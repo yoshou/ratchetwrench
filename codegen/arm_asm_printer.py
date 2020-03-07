@@ -699,7 +699,7 @@ def write_bits(value, bits, offset, count):
 
 def get_binop_opcode(inst: MCInst):
     opcode = inst.opcode
-    if opcode in [ARMMachineOps.MOVr, ARMMachineOps.MOVCCr]:
+    if opcode in [ARMMachineOps.MOVr, ARMMachineOps.MOVCCi, ARMMachineOps.MOVCCr]:
         return 0b1101
     if opcode in [ARMMachineOps.ANDri, ARMMachineOps.ANDrr, ARMMachineOps.ANDrsi]:
         return 0b0000
@@ -1127,6 +1127,30 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
+    if opcode in [ARMMachineOps.VLDRD]:
+        code = 0
+
+        code = write_bits(code, 0b1110, 28, 4)  # always
+        code = write_bits(code, 0b1101, 24, 4)  # opc1
+        code = write_bits(code, 0b01, 20, 2)  # opc2
+        code = write_bits(code, 0b101, 9, 3)
+        code = write_bits(code, 0b1, 8, 1)  # single-presicion
+
+        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
+
+        sd_reg = get_reg_code(inst.operands[0])
+
+        code = write_bits(code, is_add, 23, 1)  # U (add)
+
+        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
+        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
+
+        code = write_bits(code, rn_reg, 16, 4)  # Rn
+
+        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
+
+        return code
+
     if opcode in [ARMMachineOps.VSTRS]:
         code = 0
 
@@ -1144,6 +1168,30 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
         code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
+
+        code = write_bits(code, rn_reg, 16, 4)  # Rn
+
+        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
+
+        return code
+
+    if opcode in [ARMMachineOps.VSTRD]:
+        code = 0
+
+        code = write_bits(code, 0b1110, 28, 4)  # always
+        code = write_bits(code, 0b1101, 24, 4)  # opc1
+        code = write_bits(code, 0b00, 20, 2)  # opc2
+        code = write_bits(code, 0b101, 9, 3)
+        code = write_bits(code, 0b1, 8, 1)  # single-presicion
+
+        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
+
+        sd_reg = get_reg_code(inst.operands[0])
+
+        code = write_bits(code, is_add, 23, 1)  # U (add)
+
+        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
+        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
 
         code = write_bits(code, rn_reg, 16, 4)  # Rn
 
@@ -1401,12 +1449,10 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 0b1111, 12, 4)
         return code
 
-    if opcode in [ARMMachineOps.MOVCCr]:
+    if opcode in [ARMMachineOps.MOVCCr, ARMMachineOps.MOVCCi]:
         cond = inst.operands[3].imm
         rn, rd = inst.operands[1], inst.operands[0]
         imm_op = 1 if inst.operands[2].is_imm else 0
-
-        code = 0
 
         opc = get_binop_opcode(inst)
 

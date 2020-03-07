@@ -1037,7 +1037,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             stack_obj = func.frame.get_stack_object(operand.index)
             offset = self.calculate_frame_offset(func, operand.index)
 
-            if inst.opcode in [ARMMachineOps.VLDRS, ARMMachineOps.VSTRS]:
+            if inst.opcode in [ARMMachineOps.VLDRS, ARMMachineOps.VSTRS, ARMMachineOps.VLDRD, ARMMachineOps.VSTRD]:
                 assert(offset % 4 == 0)
                 offset = offset >> 2
 
@@ -1784,11 +1784,8 @@ class ARMTargetLowering(TargetLowering):
 
         mov_esp_inst.insert_before(front_inst)
 
-        # callee_save_regs = [R4, R5, R6, R7, R8, R9,
-        #                     R10, D8, D9, D10, D11, D12, D13, D14, D15]
-
         callee_save_regs = [R4, R5, R6, R7, R8, R9,
-                            R10, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31]
+                            R10, D8, D9, D10, D11, D12, D13, D14, D15]
 
         def is_reg_modified(reg):
             for alias_reg in iter_reg_aliases(reg):

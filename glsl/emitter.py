@@ -1299,15 +1299,6 @@ class X86_64ABIInfo(ABIInfo):
         return PrimitiveType("double")
 
     def compute_arg_info(self, ctx, ty):
-        # lo, hi = self.classify(ctx, ty)
-
-        # if lo == ABIClass.NoClass:
-        #     assert(hi == ABIClass.NoClass)
-        #     return ABIArgInfo(ABIArgKind.Ignore)
-
-        # if lo == ABIClass.SSE:
-        #     result_ty = self.get_sse_type(ctx, ctx.get_ir_type(ty), 0)
-
         if isinstance(ty, ast.types.VoidType):
             return ABIArgInfo(ABIArgKind.Ignore)
 

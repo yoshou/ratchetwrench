@@ -9,10 +9,12 @@ class SlotIndex:
     def __init__(self, index):
         self.index = index
 
+
 class SlotSegment:
     def __init__(self):
         self.start = -1
         self.end = -1
+
 
 class LiveRange:
     def __init__(self):
@@ -108,12 +110,8 @@ class LiveIntervals(MachineFunctionPass):
                     continue
 
                 operand.is_dead = operand.is_def and operand.reg not in live_out
-                if operand.is_dead:
-                    inst.comment = "Set Dead"
 
                 is_kill = operand.is_use and operand.reg in killed
-                if is_kill != operand.is_kill:
-                    inst.comment = "Set kill"
 
                 operand.is_kill = operand.is_use and operand.reg in killed
 
@@ -132,7 +130,7 @@ class LiveIntervals(MachineFunctionPass):
                     live_ranges[new_live_reg] = LiveRange()
 
                 seg = SlotSegment()
-                seg.start =  insts.index(inst)
+                seg.start = insts.index(inst)
                 live_ranges[new_live_reg].segments.append(seg)
 
             killed_regs = live_in - live_out
@@ -142,4 +140,3 @@ class LiveIntervals(MachineFunctionPass):
                 live_ranges[killed_reg].segments[-1].end = insts.index(inst)
 
         self.mfunc.live_ranges = live_ranges
-

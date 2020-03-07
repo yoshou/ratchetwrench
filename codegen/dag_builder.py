@@ -279,7 +279,7 @@ class DagBuilder:
             if isinstance(idx, ConstantInt):
                 offset, field_size = self.data_layout.get_elem_offset_in_bits(
                     ty, idx.value)
-                offset = self.get_value(ConstantInt(
+                offset_value = self.get_value(ConstantInt(
                     int(offset / 8), ptr_ty.get_ir_type()))
                 if isinstance(ty, StructType):
                     ty = ty.fields[idx.value]
@@ -295,8 +295,11 @@ class DagBuilder:
             else:
                 raise NotImplementedError
 
+            if offset == 0:
+                continue
+
             ptr = DagValue(self.g.add_node(
-                VirtualDagOps.ADD, [ptr_ty], ptr, offset), 0)
+                VirtualDagOps.ADD, [ptr_ty], ptr, offset_value), 0)
 
         self.set_inst_value(inst, ptr)
 

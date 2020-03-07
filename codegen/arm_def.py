@@ -273,6 +273,27 @@ def match_addrmode_imm12(node, values, idx, dag):
 
         return idx + 1, MatcherResult([base, offset])
 
+    if value.node.opcode == VirtualDagOps.ADD:
+        value1 = value.node.operands[0]
+        value2 = value.node.operands[1]
+
+        if value1.node.opcode == VirtualDagOps.CONSTANT:
+            base = value2
+            offset = DagValue(dag.add_target_constant_node(
+                value1.ty, value1.node.value), 0)
+
+            return idx + 1, MatcherResult([base, offset])
+        elif value2.node.opcode == VirtualDagOps.CONSTANT:
+            base = value1
+            offset = DagValue(dag.add_target_constant_node(
+                value2.ty, value2.node.value), 0)
+
+            return idx + 1, MatcherResult([base, offset])
+
+    if value.node.opcode == VirtualDagOps.SUB:
+        if value2.node.opcode == VirtualDagOps.CONSTANT:
+            raise NotImplementedError()
+
     # if value.node.opcode == ARMDagOps.WRAPPER:
     #     base = value.node.operands[0]
     #     offset = DagValue(dag.add_target_constant_node(
@@ -309,6 +330,31 @@ def match_addrmode5(node, values, idx, dag: Dag):
             value.ty, 0), 0)
 
         return idx + 1, MatcherResult([base, offset])
+
+    if value.node.opcode == VirtualDagOps.ADD:
+        value1 = value.node.operands[0]
+        value2 = value.node.operands[1]
+
+        if value1.node.opcode == VirtualDagOps.CONSTANT:
+            base = value2
+
+            assert(value1.node.value.value % 4 == 0)
+            offset = DagValue(dag.add_target_constant_node(
+                value1.ty, ConstantInt(value1.node.value.value >> 2, value1.node.value.ty)), 0)
+
+            return idx + 1, MatcherResult([base, offset])
+        elif value2.node.opcode == VirtualDagOps.CONSTANT:
+            base = value1
+
+            assert(value2.node.value.value % 4 == 0)
+            offset = DagValue(dag.add_target_constant_node(
+                value2.ty, ConstantInt(value2.node.value.value >> 2, value2.node.value.ty)), 0)
+
+            return idx + 1, MatcherResult([base, offset])
+
+    if value.node.opcode == VirtualDagOps.SUB:
+        if value2.node.opcode == VirtualDagOps.CONSTANT:
+            raise NotImplementedError()
 
     # if value.node.opcode == ARMDagOps.WRAPPER:
     #     base = value.node.operands[0]
@@ -791,14 +837,14 @@ class ARMMachineOps(Enum):
     )
 
     VLDRD = def_inst(
-        "vldrs",
+        "vldrd",
         outs=[("dst", DPR)],
         ins=[("src", AddrMode5)],
         patterns=[set_(("dst", DPR), load_(("src", addrmode5)))]
     )
 
     VSTRD = def_inst(
-        "vstrs",
+        "vstrd",
         outs=[],
         ins=[("src", DPR), ("dst", AddrMode5)],
         patterns=[store_(("src", DPR), ("dst", addrmode5))]
@@ -909,7 +955,7 @@ class ARMMachineOps(Enum):
     MOVCCi16 = def_inst(
         "movcc_i16",
         outs=[("dst", GPR)],
-        ins=[("false", GPR), ("true", imm0_65535), ("p", cmovpred)],
+        ins=[("false", GPR), ("true", I32Imm), ("p", cmovpred)],
         constraints=[Constraint("dst", "false")],
         is_terminator=True
     )
@@ -917,7 +963,7 @@ class ARMMachineOps(Enum):
     MOVCCi = def_inst(
         "movcc_i",
         outs=[("dst", GPR)],
-        ins=[("false", GPR), ("true", mod_imm), ("p", cmovpred)],
+        ins=[("false", GPR), ("true", I32Imm), ("p", cmovpred)],
         constraints=[Constraint("dst", "false")],
         is_terminator=True
     )
