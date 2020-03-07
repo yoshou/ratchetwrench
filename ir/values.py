@@ -393,6 +393,10 @@ class BasicBlock(Value):
 
         return self.insts[-1]
 
+    @property
+    def phis(self):
+        return [inst for inst in self.insts if isinstance(inst, PHINode)]
+
     def add_inst(self, inst, inst_before):
         if inst_before:
             idx = self.insts.index(inst_before)
@@ -431,10 +435,20 @@ class User(Value):
 
 
 class Instruction(User):
-    def __init__(self, block: BasicBlock, ty, ops, num_ops, name=""):
+    def __init__(self, block_or_inst: BasicBlock, ty, ops, num_ops, name=""):
         super().__init__(ty, ops, num_ops, name)
-        self.block = block
-        block.add_inst(self, None)
+
+        if isinstance(block_or_inst, BasicBlock):
+            self.block = block_or_inst
+            self.block.add_inst(self, None)
+        else:
+            assert(isinstance(block_or_inst, Instruction))
+            self.block = block_or_inst.block
+            self.block.add_inst(self, block_or_inst)
+
+    @property
+    def successors(self):
+        return []
 
     def remove(self):
         if len(self.uses) > 0:
@@ -640,15 +654,23 @@ class PHINode(Instruction):
 
     @property
     def values(self):
-        return self.operands
+        return {k: v for k, v in zip(self.incoming_blocks, self.incoming_values)}
 
     def check_value_types(self):
         ty = self.ty
 
-        for value in self.values[0::2]:
+        for value in self.operands[0::2]:
             if ty != value.ty:
                 raise ValueError("Values must be the same types.")
             ty = value.ty
+
+    @property
+    def incoming_values(self):
+        return [value for value in self.operands[::2]]
+
+    @property
+    def incoming_blocks(self):
+        return [value for value in self.operands[1::2]]
 
     @property
     def is_terminator(self):
@@ -780,6 +802,10 @@ class SwitchInst(Instruction):
     def is_terminator(self):
         return True
 
+    @property
+    def successors(self):
+        return [self.default, *self.case_dests]
+
 
 class BranchInst(Instruction):
     def __init__(self, block, cond, then_target, else_target):
@@ -802,6 +828,10 @@ class BranchInst(Instruction):
     def is_terminator(self):
         return True
 
+    @property
+    def successors(self):
+        return [self.then_target, self.else_target]
+
 
 class JumpInst(Instruction):
     def __init__(self, block, goto_target):
@@ -814,6 +844,10 @@ class JumpInst(Instruction):
     @property
     def is_terminator(self):
         return True
+
+    @property
+    def successors(self):
+        return [self.goto_target]
 
 
 class ReturnInst(Instruction):

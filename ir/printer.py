@@ -226,7 +226,7 @@ def print_inst(inst, slot_id_map):
 
     if isinstance(inst, PHINode):
         values = [
-            f"[{get_value_name(inst.values[i])}, {get_value_name(inst.values[i+1])}]" for i in range(0, len(inst.values), 2)]
+            f"[{get_value_name(value)}, {get_value_name(block)}]" for block, value in inst.values.items()]
         return f"{get_value_name(inst)} = phi {get_value_type(inst)} {', '.join(values)}"
 
     raise Exception

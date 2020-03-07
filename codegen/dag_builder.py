@@ -523,7 +523,44 @@ class DagBuilder:
 
         self.root = DagValue(value, 0)
 
+    def create_regs(self, ty):
+        vts = compute_value_types(ty, self.data_layout)
+
+        if len(vts) > 1:
+            raise NotImplementedError()
+
+        regs = []
+        for ty in vts:
+            vreg = self.target_lowering.get_machine_vreg(ty)
+            regs.append(vreg)
+
+        return regs[0]
+
+    def handle_phi_node_in_succs(self, inst):
+        block = inst.block
+        for succ in inst.successors:
+            for phi in succ.phis:
+
+                phi_value = phi.values[block]
+
+                if phi in self.func_info.reg_value_map:
+                    vreg = self.func_info.reg_value_map[phi]
+                else:
+                    vreg = MachineVirtualRegister(
+                        self.create_regs(phi.ty), len(self.func_info.reg_value_map))
+
+                    self.func_info.reg_value_map[phi] = vreg
+
+                vts = compute_value_types(phi.ty, self.data_layout)
+                src = self.get_value(phi_value)
+                dst = DagValue(self.g.add_register_node(vts[0], vreg), 0)
+
+                node = self.g.add_copy_to_reg_node(dst, src)
+
     def visit(self, inst):
+        if inst.is_terminator:
+            self.handle_phi_node_in_succs(inst)
+
         if isinstance(inst, AllocaInst):
             self.visit_alloca(inst)
         elif isinstance(inst, LoadInst):
@@ -554,10 +591,13 @@ class DagBuilder:
             self.visit_call(inst)
         elif isinstance(inst, ReturnInst):
             self.visit_return(inst)
+        elif isinstance(inst, PHINode):
+            pass
         else:
             raise NotImplementedError(
                 "{0} is not a supporting instruction.".format(inst.__class__.__name__))
 
+        # Export virtual registers acrossing basic blocks.
         if inst in self.func_info.reg_value_map:
             value_types = compute_value_types(inst.ty, self.data_layout)
             if len(value_types) > 1:
