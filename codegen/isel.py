@@ -89,8 +89,6 @@ class InstructionSelection(MachineFunctionPass):
                     self.func_info.reg_value_map[inst] = self.mfunc.reg_info.create_virtual_register(
                         regs[0])
 
-        print(len(self.mfunc.frame.stack_object))
-
         for bb in self.func.bbs:
             dag_builder = self.dag_builders[bb]
             for inst in bb.insts:

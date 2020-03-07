@@ -49,19 +49,10 @@ class Mem2Reg(FunctionPass):
 
             assert(isinstance(use, LoadInst))
 
-            if not store_inst:
-                continue
-
             for load_use in use.uses:
                 for i, operand in enumerate(load_use.operands):
                     if operand is use:
                         load_use.set_operand(i, store_inst.rs)
-
-                        if len(operand.uses) == 0:
-                            operand.remove()
-
-        if len(inst.uses) > 1:
-            return
 
         if inst.uses[0] != store_inst:
             return
@@ -73,9 +64,12 @@ class Mem2Reg(FunctionPass):
                 self.removed_store_count += 1
             use.remove()
 
+        inst.remove()
+
     def promote_mem_to_reg(self, alloca_insts):
         for inst in alloca_insts:
             if len(inst.uses) == 0:
+                inst.remove()
                 continue
 
             info = AllocaInfo()

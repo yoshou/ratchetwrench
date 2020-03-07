@@ -454,7 +454,14 @@ class Instruction(User):
         if len(self.uses) > 0:
             raise ValueError("This instruction is used by others.")
 
+        if not self.block:
+            return
+
+        for i, operand in enumerate(self.operands):
+            self.set_operand(i, None)
+
         self.block.insts.remove(self)
+        self.block = None
 
     @property
     def is_terminator(self):

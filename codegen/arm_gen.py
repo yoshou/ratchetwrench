@@ -1876,6 +1876,8 @@ class ARMTargetLowering(TargetLowering):
             return SPR
         elif ty.value_type == ValueType.F64:
             return DPR
+        elif ty.value_type == ValueType.V4F32:
+            return QPR
 
         raise NotImplementedError()
 
