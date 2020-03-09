@@ -22,57 +22,9 @@ def is_null_fp_constant(value):
     return isinstance(value.node, ConstantFPDagNode) and value.node.is_zero
 
 
-def is_x86_zero(value):
-    return is_null_constant(value) or is_null_fp_constant(value)
-
-
 class ARMInstructionSelector(InstructionSelector):
     def __init__(self):
         super().__init__()
-
-    def lower_wrapper_rip(self, node, dag):
-        noreg = MachineRegister(NOREG)
-        MVT = MachineValueType
-
-        ty = node.value_types[0]
-
-        base = DagValue(dag.add_register_node(
-            MVT(ValueType.I64), MachineRegister(RIP)), 0)
-        scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
-        index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
-        disp = node.operands[0]
-        segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
-
-        lea_ops = (base, scale, index, disp, segment)
-
-        if ty == MachineValueType(ValueType.I64):
-            lea_operand = ARMMachineOps.LEA64r
-        elif ty == MachineValueType(ValueType.I32):
-            lea_operand = ARMMachineOps.LEA32r
-        else:
-            raise ValueError()
-
-        return dag.add_machine_dag_node(lea_operand, node.value_types, *lea_ops)
-
-    def select_br(self, node: DagNode, dag: Dag, new_ops):
-        chain = new_ops[0]
-        dest = new_ops[1]
-
-        return dag.add_machine_dag_node(ARMMachineOps.JMP_1, node.value_types, dest, chain)
-
-    def select_brcond(self, node: DagNode, dag: Dag, new_ops):
-        chain = node.operands[0]
-        dest = node.operands[1]
-        condcode = node.operands[2]
-        cond = node.operands[3]
-
-        eflags = dag.add_target_register_node(
-            MachineValueType(ValueType.I32), EFLAGS)
-
-        copy_cc_node = dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)],
-                                    chain, DagValue(eflags, 0), cond)
-
-        return dag.add_machine_dag_node(ARMMachineOps.JCC_1, node.value_types, dest, condcode, DagValue(copy_cc_node, 0), DagValue(copy_cc_node, 1))
 
     def select_setcc(self, node: DagNode, dag: Dag, new_ops):
         condcode = new_ops[0]
@@ -87,11 +39,6 @@ class ARMInstructionSelector(InstructionSelector):
             one = DagValue(dag.add_target_constant_node(value_ty, 1), 0)
 
             return dag.add_machine_dag_node(ARMMachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
-
-        raise NotImplementedError()
-
-    def select_bitcast(self, node: DagNode, dag: Dag, new_ops):
-        src = new_ops[0]
 
         raise NotImplementedError()
 
@@ -131,96 +78,6 @@ class ARMInstructionSelector(InstructionSelector):
             ops.append(glue)
 
         return dag.add_machine_dag_node(ARMMachineOps.BL, node.value_types, *ops)
-
-    def select_return(self, node: DagNode, dag: Dag, new_ops):
-        chain = new_ops[0]
-        ops = new_ops[1:]
-        return dag.add_machine_dag_node(ARMMachineOps.RET, node.value_types, *ops, chain)
-
-    def select_arm_sub(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = ARMMachineOps.SUB32mi
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = ARMMachineOps.SUB32ri
-            elif node.value_types[0] == MachineValueType(ValueType.I8):
-                opcode = ARMMachineOps.SUB8ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = ARMMachineOps.SUB32rr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_arm_sub")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_arm_cmp(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            ty = op1.ty
-            if ty == MachineValueType(ValueType.F32):
-                opcode = ARMMachineOps.UCOMISSrr
-            elif ty == MachineValueType(ValueType.F64):
-                opcode = ARMMachineOps.UCOMISDrr
-            else:
-                raise NotImplementedError()
-
-            return dag.add_machine_dag_node(opcode, [MachineValueType(ValueType.I32)], *new_ops)
-
-        print("select_arm_sub")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_arm_movss(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(ARMMachineOps.MOVSSrr, node.value_types, *new_ops)
-
-        print("select_arm_movss")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_arm_shufp(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-        op3 = new_ops[2]
-
-        assert(isinstance(op3.node, ConstantDagNode))
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(ARMMachineOps.SHUFPSrri, node.value_types, *new_ops)
-
-        print("select_arm_shufp")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
 
     def select_copy_from_reg(self, node: DagNode, dag: Dag, new_ops):
         return node
@@ -267,20 +124,6 @@ class ARMInstructionSelector(InstructionSelector):
 
         return None
 
-    def select_constant(self, node: DagNode, dag: Dag, new_ops):
-        value = DagValue(dag.add_target_constant_node(
-            node.value_types[0], node.value), 0)
-        ops = [value]
-
-        if node.value_types[0] == MachineValueType(ValueType.I64):
-            operand = ARMMachineOps.MOV64ri
-        elif node.value_types[0] == MachineValueType(ValueType.I32):
-            operand = ARMMachineOps.MOV32ri
-        else:
-            raise ValueError()
-
-        return dag.add_machine_dag_node(operand, node.value_types, *ops)
-
     def select_frame_index(self, node: DagNode, dag: Dag, new_ops):
         base = DagValue(dag.add_frame_index_node(
             node.value_types[0], node.index, True), 0)
@@ -290,31 +133,6 @@ class ARMInstructionSelector(InstructionSelector):
         ops = [base, offset]
 
         return dag.add_machine_dag_node(ARMMachineOps.ADDri, node.value_types, *ops)
-
-    def select_build_vector(self, node: DagNode, dag: Dag, new_ops):
-        for operand in node.operands:
-            assert(is_x86_zero(operand))
-
-        ops = []
-
-        if node.value_types[0] == MachineValueType(ValueType.V4F32):
-            operand = ARMMachineOps.V_SET0
-        else:
-            raise ValueError()
-
-        return dag.add_machine_dag_node(operand, node.value_types, *ops)
-
-    def select_scalar_to_vector(self, node: DagNode, dag: Dag, new_ops):
-        in_type = node.operands[0].ty
-        out_type = node.value_types[0]
-
-        if in_type == MachineValueType(ValueType.F32) and out_type == MachineValueType(ValueType.V4F32):
-            regclass_id = regclasses.index(VR128)
-            regclass_id_val = DagValue(dag.add_target_constant_node(
-                MachineValueType(ValueType.I32), regclass_id), 0)
-            return dag.add_node(TargetDagOps.COPY_TO_REGCLASS, node.value_types, node.operands[0], regclass_id_val)
-
-        raise ValueError()
 
     def select_vdup(self, node: DagNode, dag: Dag, new_ops):
         in_type = node.operands[0].ty
@@ -353,60 +171,29 @@ class ARMInstructionSelector(InstructionSelector):
                         MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
                     return dag.add_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, idx, subreg_id)
 
-        raise ValueError()
+        # TODO: Neet to implement indexing with variable. A solution is using memory.
+
+        raise NotImplementedError()
 
     def select(self, node: DagNode, dag: Dag):
         new_ops = node.operands
 
-        matched = self.select_code(node, dag)
-
         SELECT_TABLE = {
             VirtualDagOps.COPY_FROM_REG: self.select_copy_from_reg,
             VirtualDagOps.COPY_TO_REG: self.select_copy_to_reg,
-            # VirtualDagOps.LOAD: self.select_load,
-            # VirtualDagOps.STORE: self.select_store,
-            # VirtualDagOps.ADD: self.select_add,
-            # VirtualDagOps.SUB: self.select_sub,
-
-            # VirtualDagOps.AND: self.select_and,
-            # VirtualDagOps.OR: self.select_or,
-            # VirtualDagOps.XOR: self.select_xor,
-            # VirtualDagOps.SRL: self.select_srl,
-            # VirtualDagOps.SHL: self.select_shl,
-
-            # VirtualDagOps.FADD: self.select_fadd,
-            # VirtualDagOps.FSUB: self.select_fsub,
-            # VirtualDagOps.FMUL: self.select_fmul,
-            # VirtualDagOps.FDIV: self.select_fdiv,
-
-            # VirtualDagOps.BITCAST: self.select_bitcast,
-            # VirtualDagOps.BR: self.select_br,
             VirtualDagOps.CALLSEQ_START: self.select_callseq_start,
             VirtualDagOps.CALLSEQ_END: self.select_callseq_end,
-            # VirtualDagOps.BUILD_VECTOR: self.select_build_vector,
-            # VirtualDagOps.SCALAR_TO_VECTOR: self.select_scalar_to_vector,
-            # VirtualDagOps.CONSTANT: self.select_constant,
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
-            # ARMDagOps.SUB: self.select_arm_sub,
-            # ARMDagOps.CMP: self.select_arm_cmp,
-            # ARMDagOps.MOVSS: self.select_arm_movss,
-            # ARMDagOps.SHUFP: self.select_arm_shufp,
-            ARMDagOps.SETCC: self.select_setcc,
-            # ARMDagOps.BRCOND: self.select_brcond,
-            ARMDagOps.CALL: self.select_call,
-            # ARMDagOps.RETURN: self.select_return,
-            ARMDagOps.VDUP: self.select_vdup,
             VirtualDagOps.INSERT_VECTOR_ELT: self.select_insert_vector_elt,
+            ARMDagOps.SETCC: self.select_setcc,
+            ARMDagOps.CALL: self.select_call,
+            ARMDagOps.VDUP: self.select_vdup,
         }
 
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
-        # elif node.opcode == VirtualDagOps.FRAME_INDEX:
-        #     return dag.add_frame_index_node(node.value_types[0], node.index, True)
         elif node.opcode == VirtualDagOps.UNDEF:
             return node
-        # elif node.opcode == VirtualDagOps.CONSTANT:
-        #     return dag.add_target_constant_node(node.value_types[0], node.value)
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT:
             return node
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_POOL:
@@ -421,32 +208,27 @@ class ARMInstructionSelector(InstructionSelector):
             return node
         elif node.opcode == VirtualDagOps.EXTERNAL_SYMBOL:
             return dag.add_external_symbol_node(node.value_types[0], node.symbol, True)
-        # elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
-        #     return node
-        # elif node.opcode == VirtualDagOps.GLOBAL_ADDRESS:
-        #     return node
         elif node.opcode == VirtualDagOps.MERGE_VALUES:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == VirtualDagOps.TOKEN_FACTOR:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == ARMDagOps.WRAPPER_PIC:
             return self.lower_wrapper_rip(node, dag)
-        # elif node.opcode == ARMDagOps.WRAPPER:
-        #     return node.operands[0].node
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
             return node
         elif node.opcode in SELECT_TABLE:
             select_func = SELECT_TABLE[node.opcode]
-            minst = select_func(node, dag, new_ops)
-        else:
-            if matched:
-                return matched
-            raise NotImplementedError(
-                "Can't select the instruction: {}".format(node.opcode))
+            return select_func(node, dag, new_ops)
 
-        return minst
+        matched = self.select_code(node, dag)
+
+        if matched:
+            return matched
+
+        raise NotImplementedError(
+            "Can't select the instruction: {}".format(node.opcode))
 
 
 class ArgListEntry:
@@ -1053,21 +835,9 @@ class ARMTargetInstInfo(TargetInstInfo):
                 elif inst.opcode == ARMMachineOps.SUBri:
                     inst.opcode = ARMMachineOps.ADDri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode == ARMMachineOps.STRi12:
-                    pass
-                elif inst.opcode == ARMMachineOps.LDRi12:
-                    pass
-                elif inst.opcode == ARMMachineOps.VSTRS:
-                    pass
-                elif inst.opcode == ARMMachineOps.VLDRS:
-                    pass
-                elif inst.opcode == ARMMachineOps.VSTRD:
-                    pass
-                elif inst.opcode == ARMMachineOps.VLDRD:
-                    pass
-                elif inst.opcode == ARMMachineOps.VST1q64:
-                    pass
-                elif inst.opcode == ARMMachineOps.VLD1q64:
+                elif inst.opcode in [
+                        ARMMachineOps.STRi12, ARMMachineOps.LDRi12, ARMMachineOps.VSTRS, ARMMachineOps.VLDRS,
+                        ARMMachineOps.VSTRD, ARMMachineOps.VLDRD, ARMMachineOps.VST1q64, ARMMachineOps.VLD1q64]:
                     pass
                 else:
                     raise ValueError()
@@ -2048,29 +1818,34 @@ class ARMTargetInfo(TargetInfo):
     def __init__(self, triple):
         super().__init__(triple)
 
+        self._inst_info = ARMTargetInstInfo()
+        self._lowering = ARMTargetLowering()
+        self._reg_info = ARMTargetRegisterInfo()
+        self._calling_conv = ARMCallingConv()
+        self._isel = ARMInstructionSelector()
+        self._legalizer = ARMLegalizer()
+        self._frame_lowering = ARMFrameLowering(16)
+
     def get_inst_info(self) -> TargetInstInfo:
-        return ARMTargetInstInfo()
+        return self._inst_info
 
     def get_lowering(self) -> TargetLowering:
-        return ARMTargetLowering()
+        return self._lowering
 
     def get_register_info(self) -> TargetRegisterInfo:
-        return ARMTargetRegisterInfo()
+        return self._reg_info
 
     def get_calling_conv(self) -> CallingConv:
-        return ARMCallingConv()
+        return self._calling_conv
 
-    def get_instruction_selector(self):
-        return ARMInstructionSelector()
+    def get_instruction_selector(self) -> InstructionSelector:
+        return self._isel
 
-    def get_legalizer(self):
-        return ARMLegalizer()
+    def get_legalizer(self) -> Legalizer:
+        return self._legalizer
 
     def get_frame_lowering(self) -> TargetFrameLowering:
-        return ARMFrameLowering(16)
-
-
-from codegen.arm_constant_island import ARMConstantIsland
+        return self._frame_lowering
 
 
 class ARMTargetMachine:
@@ -2084,6 +1859,7 @@ class ARMTargetMachine:
         from codegen.arm_asm_printer import ARMAsmInfo, MCAsmStream, ARMCodeEmitter, ARMAsmBackend, ARMAsmPrinter
         from codegen.coff import WinCOFFObjectWriter, WinCOFFObjectStream
         from codegen.elf import ELFObjectStream, ELFObjectWriter, ARMELFObjectWriter
+        from codegen.arm_constant_island import ARMConstantIsland
 
         pass_manager.passes.append(ARMConstantIsland())
 

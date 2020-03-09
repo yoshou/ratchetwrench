@@ -42,9 +42,16 @@ class Mem2Reg(FunctionPass):
 
     def rewrite_single_store_alloca(self, inst: AllocaInst, info):
         store_inst = None
+
         for use in inst.uses:
             if isinstance(use, StoreInst):
                 store_inst = use
+                break
+
+        assert(store_inst)
+
+        for use in inst.uses:
+            if isinstance(use, StoreInst):
                 continue
 
             assert(isinstance(use, LoadInst))
@@ -53,9 +60,6 @@ class Mem2Reg(FunctionPass):
                 for i, operand in enumerate(load_use.operands):
                     if operand is use:
                         load_use.set_operand(i, store_inst.rs)
-
-        if inst.uses[0] != store_inst:
-            return
 
         for use in inst.uses:
             if isinstance(use, LoadInst):

@@ -200,49 +200,10 @@ class ARMAsmPrinter(AsmPrinter):
         return self.ctx.get_or_create_symbol(name)
 
     def emit_constant_pool(self):
-        cp = self.mfunc.constant_pool
-        if len(cp.constants) == 0:
-            return
-
-        cp_sections = OrderedDict()
-        for idx, entry in enumerate(cp.constants):
-            align = entry.alignment
-            kind = self.get_cp_section_kind(entry)
-
-            section = self.ctx.obj_file_info.get_section_for_const(
-                kind, entry.value, align)
-
-            if section not in cp_sections:
-                cp_indices = []
-                cp_sections[section] = cp_indices
-            else:
-                cp_indices = cp_sections[section]
-
-            cp_indices.append(idx)
-
-        for section, cp_indices in cp_sections.items():
-            offset = 0
-            self.stream.switch_section(section)
-            for cp_index in cp_indices:
-                symbol = self.get_cp_index_symbol(cp_index)
-                self.stream.emit_label(symbol)
-
-                cp_entry = cp.constants[cp_index]
-                align = cp_entry.alignment
-
-                aligned_offset = int(int((offset + align - 1) / align) * align)
-
-                self.stream.emit_zeros(aligned_offset - offset)
-                offset = aligned_offset
-
-                data_layout = self.module.data_layout
-                value_size = data_layout.get_type_alloc_size(cp_entry.value.ty)
-                self.emit_global_constant(data_layout, cp_entry.value)
-
-                offset += value_size
+        pass
 
     def emit_function_header(self, func):
-        # self.emit_constant_pool()
+        self.emit_constant_pool()
 
         self.stream.switch_section(self.ctx.obj_file_info.text_section)
         self.emit_linkage(func.func_info.func)

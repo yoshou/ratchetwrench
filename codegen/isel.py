@@ -238,45 +238,6 @@ class InstructionSelection(MachineFunctionPass):
     def legalize(self):
         self.do_legalize()
 
-    def promote_integer_result_setcc(self, node, dag, legalized):
-        setcc_ty = MachineValueType(ValueType.I8)
-
-        return dag.add_node(node.opcode, [setcc_ty], *node.operands)
-
-    # def promote_integer_result_setcc(self, node, dag, legalized):
-    #     setcc_ty = MachineValueType(ValueType.I32)
-
-    #     return dag.add_node(node.opcode, [setcc_ty], *node.operands)
-
-    def get_legalized_op(self, operand, legalized):
-        if operand.node in legalized:
-            return DagValue(legalized[operand.node], operand.index)
-
-        return operand
-
-    def promote_integer_result_bin(self, node, dag, legalized):
-        lhs = self.get_legalized_op(node.operands[0], legalized)
-        rhs = self.get_legalized_op(node.operands[1], legalized)
-
-        return dag.add_node(node.opcode, [lhs.ty], lhs, rhs)
-
-    def promote_integer_result(self, node, dag, legalized):
-        if node.opcode == VirtualDagOps.SETCC:
-            return self.promote_integer_result_setcc(node, dag, legalized)
-        elif node.opcode in [VirtualDagOps.AND, VirtualDagOps.OR]:
-            return self.promote_integer_result_bin(node, dag, legalized)
-        elif node.opcode in [VirtualDagOps.LOAD]:
-            return dag.add_node(node.opcode, [MachineValueType(ValueType.I32)], *node.operands)
-        else:
-            raise ValueError("No method to promote.")
-
-    def legalize_node_type(self, node: DagNode, dag: Dag, legalized):
-        for vt in node.value_types:
-            if vt.value_type == ValueType.I1:
-                return self.promote_integer_result(node, dag, legalized)
-
-        return node
-
     def do_legalize_type(self):
         def create_legalize_type_node(dag, results):
             def legalize_type_node(node):
@@ -417,22 +378,6 @@ class InstructionSelection(MachineFunctionPass):
 
     def schedule(self):
 
-        def bfs(node: DagNode, action, visited):
-            if node in visited:
-                return
-
-            visited.add(node)
-
-            for op in node.operands:
-                bfs(op.node, action, visited)
-
-            action(node)
-
-        def topological_sort_schedule(root):
-            lst = []
-            bfs(root, lambda node: lst.append(node), set())
-            return lst
-
         def glued_node_iter(node):
             glue_ty = MachineValueType(ValueType.GLUE)
             yield node
@@ -440,22 +385,22 @@ class InstructionSelection(MachineFunctionPass):
                 node = node.operands[-1].node
                 yield node
 
-        def bfs2(node, action, visited):
+        def bfs(node, action, visited):
             if node in visited:
                 return
 
             visited.add(node)
 
             for succ in node.preds:
-                bfs2(succ.node, action, visited)
+                bfs(succ.node, action, visited)
 
             action(node)
 
-        def topological_sort_schedule2(nodes):
+        def topological_sort_schedule(nodes):
             lst = []
             visited = set()
             for node in nodes:
-                bfs2(node, lambda n: lst.append(n), visited)
+                bfs(node, lambda n: lst.append(n), visited)
             return lst
 
         vr_map = {}
@@ -475,7 +420,6 @@ class InstructionSelection(MachineFunctionPass):
             # sched_dag.build()
 
             emitter = MachineInstrEmitter(mbb, vr_map)
-            nodes = topological_sort_schedule(dag.root.node)
 
             sched_node_map = {}
 
@@ -515,7 +459,7 @@ class InstructionSelection(MachineFunctionPass):
 
             # Run scheduler
             def schedule_nodes(sched_nodes):
-                for sched_node in reversed(topological_sort_schedule2(sched_node_map.values())):
+                for sched_node in reversed(topological_sort_schedule(sched_nodes)):
                     for glued_node in glued_node_iter(sched_node.node):
                         yield glued_node
 

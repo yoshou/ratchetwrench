@@ -41,11 +41,14 @@ class TwoAddressInst(MachineFunctionPass):
                     if mfunc.reg_info.has_one_use(src_reg):
                         inst.comment = "One use"
 
+                    # From % reg3 = add % reg1, % reg2
+                    # To % reg3 = copy reg1
+                    #    % reg3 = add % reg3, % reg2
                     if use_idx not in copied:
                         minst = MachineInstruction(TargetDagOps.COPY)
 
                         minst.add_reg(dst_reg, RegState.Define)
-                        minst.add_reg(src_reg, inst.operands[use_idx].flags)
+                        minst.add_reg(src_reg, RegState.Non)
 
                         minst.insert_before(inst)
 

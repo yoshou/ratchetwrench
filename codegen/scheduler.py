@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+
 class ScheduleUnit:
     def __init__(self, node, id):
         self.node = node
@@ -12,9 +13,11 @@ class ScheduleUnit:
         self.preds.append(edge)
         edge.node.succs.append(ScheduleEdge(self))
 
+
 class ScheduleEdge:
     def __init__(self, node):
         self.node = node
+
 
 class ScheduleDag:
     def __init__(self, mfunc, dag):
@@ -47,3 +50,11 @@ class ScheduleDag:
 
         for node in all_nodes(self.mfunc.root):
             pass
+
+
+class ListScheduler:
+    def __init__(self):
+        pass
+
+    def schedule(self):
+        pass
