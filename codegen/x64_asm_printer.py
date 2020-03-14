@@ -1279,6 +1279,16 @@ class X64CodeEmitter(MCCodeEmitter):
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
+        elif inst.opcode in [X64MachineOps.VMOVSSrm]:
+            base_opcode = 0x10
+            form = X64InstForm.MRMSrcMem
+
+            raise NotImplementedError()
+
+            if inst.opcode == X64MachineOps.MOVSSrm:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XS | X64TSFlags.EncVEX)
+            else:
+                raise ValueError()
         elif inst.opcode in [X64MachineOps.MOVAPSrr]:
             base_opcode = 0x28
             form = X64InstForm.MRMSrcReg

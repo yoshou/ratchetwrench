@@ -196,6 +196,8 @@ FR64 = def_regclass("FR64", [ValueType.F64], 64, [
 VR128 = def_regclass("VR128", [ValueType.V4F32], 128, [
                      globals()[f"XMM{idx}"] for idx in range(16)])
 
+CCR = def_regclass("CCR", [ValueType.I32], 32, [EFLAGS])
+
 reg_graph = compute_reg_graph()
 reg_groups = compute_reg_groups(reg_graph)
 compute_reg_subregs_all(reg_graph)
@@ -233,16 +235,6 @@ F128Mem = X64MemOperandDef()
 AnyMem = X64MemOperandDef()
 
 
-class SDNode:
-    def __init__(self, opcode):
-        self.opcode = opcode
-
-
-FrameIndex = SDNode(VirtualDagOps.FRAME_INDEX)
-ADD = SDNode(VirtualDagOps.ADD)
-SUB = SDNode(VirtualDagOps.SUB)
-
-
 def match_reloc_imm8(node, values, idx, dag):
     from codegen.dag import VirtualDagOps, DagValue
     from codegen.types import ValueType
@@ -255,12 +247,18 @@ def match_reloc_imm8(node, values, idx, dag):
     if constant & 0xFF != constant:
         return idx, None
 
-    return idx + 1, MatcherResult([values[idx]])
+    target_value = DagValue(dag.add_target_constant_node(
+        value.ty, value.node.value), 0)
+
+    return idx + 1, target_value
 
 
 def match_reloc_imm32(node, values, idx, dag):
     from codegen.dag import VirtualDagOps, DagValue
     from codegen.types import ValueType
+
+    if idx >= len(values):
+        return idx, None
 
     value = values[idx]
     if value.node.opcode != VirtualDagOps.CONSTANT:
@@ -272,12 +270,15 @@ def match_reloc_imm32(node, values, idx, dag):
     target_value = DagValue(dag.add_target_constant_node(
         value.ty, value.node.value), 0)
 
-    return idx + 1, MatcherResult([target_value])
+    return idx + 1, target_value
 
 
 def match_reloc_imm64(node, values, idx, dag):
     from codegen.dag import VirtualDagOps, DagValue
     from codegen.types import ValueType
+
+    if idx >= len(values):
+        return idx, None
 
     value = values[idx]
     if value.node.opcode not in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
@@ -289,12 +290,15 @@ def match_reloc_imm64(node, values, idx, dag):
     target_value = DagValue(dag.add_target_constant_node(
         value.ty, value.node.value), 0)
 
-    return idx + 1, MatcherResult([target_value])
+    return idx + 1, target_value
 
 
 def match_reloc_immf32(node, values, idx, dag):
     from codegen.dag import VirtualDagOps
     from codegen.types import ValueType
+
+    if idx >= len(values):
+        return idx, None
 
     value = values[idx]
     if value.node.opcode != VirtualDagOps.CONSTANT:
@@ -306,7 +310,7 @@ def match_reloc_immf32(node, values, idx, dag):
     target_value = DagValue(dag.add_target_constant_node(
         value.ty, value.node.value), 0)
 
-    return idx + 1, MatcherResult([target_value])
+    return idx + 1, target_value
 
 
 reloc_imm8 = ComplexOperandMatcher(match_reloc_imm8)
@@ -319,6 +323,9 @@ def match_reloc_imm(node, values, idx, dag):
     from codegen.dag import VirtualDagOps, DagValue
     from codegen.types import ValueType
 
+    if idx >= len(values):
+        return idx, None
+
     value = values[idx]
     if value.node.opcode != VirtualDagOps.CONSTANT:
         return idx, None
@@ -326,7 +333,7 @@ def match_reloc_imm(node, values, idx, dag):
     target_value = DagValue(dag.add_target_constant_node(
         value.ty, value.node.value), 0)
 
-    return idx + 1, MatcherResult([target_value])
+    return idx + 1, target_value
 
 
 reloc_imm = ComplexOperandMatcher(match_reloc_imm)
@@ -359,19 +366,19 @@ def match_addr(node, operands, idx, dag):
             base = sub_op2
             disp = sub_op1
         elif sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            if sub_op1.node.opcode == X64DagOps.WRAPPER_RIP:
+            if sub_op1.node.opcode == X64DagOps.WRAPPER_RIP and sub_op2.node.is_zero:
                 base = DagValue(dag.add_target_register_node(
                     MVT(ValueType.I64), RIP), 0)
-                assert(sub_op2.node.is_zero)
+
                 disp = sub_op1.node.operands[0]
             else:
                 base = sub_op1
                 disp = sub_op2
         elif sub_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            if sub_op2.node.opcode == X64DagOps.WRAPPER_RIP:
+            if sub_op2.node.opcode == X64DagOps.WRAPPER_RIP and sub_op1.node.is_zero:
                 base = DagValue(dag.add_target_register_node(
                     MVT(ValueType.I64), RIP), 0)
-                assert(sub_op1.node.is_zero)
+
                 disp = sub_op2.node.operands[0]
             else:
                 base = sub_op2
@@ -389,9 +396,7 @@ def match_addr(node, operands, idx, dag):
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
 
-        assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
-
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.SUB:
         sub_op1 = operand.node.operands[0]
         sub_op2 = operand.node.operands[1]
@@ -406,7 +411,7 @@ def match_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == X64DagOps.WRAPPER_RIP:
         base = DagValue(dag.add_register_node(
             MVT(ValueType.I64), MachineRegister(RIP)), 0)
@@ -417,7 +422,7 @@ def match_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == X64DagOps.WRAPPER:
         disp = operand.node.operands[0]
 
@@ -434,7 +439,7 @@ def match_addr(node, operands, idx, dag):
             assert(disp.node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS)
             raise NotImplementedError()
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.CONSTANT:
         disp = DagValue(dag.add_target_constant_node(
             operand.node.value_types[0], operand.node.value), 0)
@@ -448,12 +453,13 @@ def match_addr(node, operands, idx, dag):
 
         segment = DagValue(dag.add_register_node(
             MVT(ValueType.I16), noreg), 0)
+
         if node.mem_operand:
             if node.mem_operand.ptr_info.value.ty.addr_space == 256:
                 segment = DagValue(dag.add_register_node(
                     MVT(ValueType.I16), MachineRegister(GS)), 0)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     else:
         assert(operand.node.opcode in [
                VirtualDagOps.COPY_FROM_REG, VirtualDagOps.FRAME_INDEX])
@@ -465,7 +471,7 @@ def match_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
 
     return idx, None
 
@@ -509,7 +515,7 @@ def match_lea_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.SUB:
         sub_op1 = operand.node.operands[0]
         sub_op2 = operand.node.operands[1]
@@ -525,7 +531,7 @@ def match_lea_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == X64DagOps.WRAPPER_RIP:
         base = DagValue(dag.add_register_node(
             MVT(ValueType.I64), MachineRegister(RIP)), 0)
@@ -536,7 +542,7 @@ def match_lea_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == X64DagOps.WRAPPER:
         disp = operand.node.operands[0]
 
@@ -549,7 +555,7 @@ def match_lea_addr(node, operands, idx, dag):
         segment = DagValue(dag.add_register_node(
             MVT(ValueType.I16), noreg), 0)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.FRAME_INDEX:
         base = operand
         scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
@@ -559,7 +565,7 @@ def match_lea_addr(node, operands, idx, dag):
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-        return idx + 1, MatcherResult([base, scale, index, disp, segment])
+        return idx + 1, [base, scale, index, disp, segment]
 
     return idx, None
 
@@ -603,7 +609,13 @@ x64shufp_ = NodePatternMatcherGen(X64DagOps.SHUFP)
 x64membarrier = NodePatternMatcherGen(X64DagOps.MEMBARRIER)()
 
 
-class X64MachineOps(Enum):
+class X64MachineOps:
+
+    @classmethod
+    def insts(cls):
+        for member, value in cls.__dict__.items():
+            if isinstance(value, MachineInstructionDef):
+                yield value
 
     # lea32
     LEA32r = def_inst("lea32_r",
@@ -717,6 +729,12 @@ class X64MachineOps(Enum):
 
     MOVSSrm = def_inst("movss_rm",
                        outs=[("dst", FR32)],
+                       ins=[("src", F32Mem)],
+                       patterns=[set_(("dst", FR32), load_(("src", addr)))]
+                       )
+
+    VMOVSSrm = def_inst("movss_rm",
+                       outs=[("dst", VR128)],
                        ins=[("src", F32Mem)],
                        patterns=[set_(("dst", FR32), load_(("src", addr)))]
                        )
@@ -1431,7 +1449,8 @@ class X64MachineOps(Enum):
     V_SET0 = def_inst("v_set0",
                       outs=[("dst", VR128)],
                       ins=[],
-                      patterns=[set_(("dst", VR128), imm_zero_vec)]
+                      #   patterns=[
+                      #       set_(("dst", VR128), v4f32_(imm_zero_vec))]
                       )
 
     CALL = def_inst("call",
@@ -1462,3 +1481,16 @@ class X64MachineOps(Enum):
                           ins=[],
                           patterns=[x64membarrier]
                           )
+
+loadf32_ = lambda addr: f32_(load_(addr))
+
+V_SET0 = def_inst_node_(X64MachineOps.V_SET0)
+VMOVSSrm = def_inst_node_(X64MachineOps.VMOVSSrm)
+
+x64_patterns = []
+
+def def_pat_x64(pattern, result):
+    def_pat(pattern, result, x64_patterns)
+
+def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
+# def_pat(v4f32_(scalar_to_vector_(loadf32_(("src", addr)))), VMOVSSrm(("src", F32Mem)))

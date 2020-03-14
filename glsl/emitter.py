@@ -1381,6 +1381,37 @@ class EABIABIInfo(ABIInfo):
         raise NotImplementedError()
 
 
+class RISCVABIInfo(ABIInfo):
+    def __init__(self, xlen):
+        super().__init__()
+
+        self.xlen = xlen
+
+    def compute_arg_info(self, ctx, ty: FunctionType):
+        if isinstance(ty, ast.types.VoidType):
+            return ABIArgInfo(ABIArgKind.Ignore)
+
+        if isinstance(ty, ast.types.PrimitiveType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if isinstance(ty, ast.types.VectorType):
+            ir_ty = ctx.get_ir_type(ty)
+            if is_x86_mmx_type(ir_ty):
+                return ABIArgInfo(ABIArgKind.Direct, get_integer_type(64))
+
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        type_info = get_type_info(ctx, ty)
+        width = type_info.witdh
+
+        if is_complex_type(ty):
+            if width > 128:
+                return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
+            return ABIArgInfo(ABIArgKind.Direct, get_integer_type(width))
+
+        raise NotImplementedError()
+
+
 def compute_arg_result_info(ctx, func_ty):
     return_ty = func_ty.return_ty
 
@@ -1400,6 +1431,8 @@ class ABIType(Enum):
     WinX86_64 = auto()
     X86_64 = auto()
     EABI = auto()
+    RISCV32 = auto()
+    RISCV64 = auto()
 
 
 def emit_ir(ast, abi, module):
@@ -1410,6 +1443,10 @@ def emit_ir(ast, abi, module):
         ctx.abi_info = X86_64ABIInfo()
     elif abi == ABIType.EABI:
         ctx.abi_info = EABIABIInfo()
+    elif abi == ABIType.RISCV32:
+        ctx.abi_info = RISCVABIInfo(32)
+    elif abi == ABIType.RISCV64:
+        ctx.abi_info = RISCVABIInfo(64)
     else:
         raise ValueError("Invalid abi type.")
 
@@ -1430,6 +1467,8 @@ def emit_ir(ast, abi, module):
                 thread_local = ThreadLocalMode.GeneralDynamicTLSModel
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
+
+                thread_local = ThreadLocalMode.NotThreadLocal
 
                 global_named_values[ident.val] = module.add_global_variable(
                     GlobalVariable(ty, linkage, ident.val.name, thread_local, init))

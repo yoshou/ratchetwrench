@@ -30,11 +30,11 @@ class MachineRegisterDef:
         self.name = name
         self.explicit_subregs = list(subregs)
         self.explicit_subreg_descs = list(subreg_descs)
-        self.explicit_aliases = list(aliases)
+        self.explicit_aliases = list()
         self.encoding = encoding
 
         self.subregs = []
-        self.aliases = list(aliases)
+        self.aliases = []
 
         self.reg_units = set()
         self.superregs = set()
@@ -146,8 +146,8 @@ def compute_reg_subregs_all(reg_graph):
         for alias in reg.explicit_aliases:
             regunit = RegUnit(reg, alias)
 
-            reg.reg_units |= regunit
-            alias.reg_units |= regunit
+            reg.reg_units |= {regunit}
+            alias.reg_units |= {regunit}
 
         if len(reg.reg_units) == 0:
             reg.reg_units |= {RegUnit(reg)}
@@ -281,7 +281,15 @@ NOREG = def_reg("noreg")
 
 
 class MachineOperandDef:
-    pass
+    def apply(self, values):
+        if not self.operand_info:
+            return [values]
+
+        assert(len(self.operand_info) == len(values))
+        results = []
+        for operand, value in zip(self.operand_info, values):
+            results.extend(operand.apply(value))
+        return results
 
 
 class MachineRegisterClassDef(MachineOperandDef):
@@ -293,6 +301,10 @@ class MachineRegisterClassDef(MachineOperandDef):
         self.regs = regs
         self.subclass_and_subregs = {}
 
+    @property
+    def operand_info(self):
+        return None
+
 
 class ValueOperandDef(MachineOperandDef):
     def __init__(self, ty):
@@ -300,8 +312,81 @@ class ValueOperandDef(MachineOperandDef):
 
     @property
     def operand_info(self):
-        return [self]
+        return None
 
+
+I8Imm = ValueOperandDef(ValueType.I8)
+I16Imm = ValueOperandDef(ValueType.I16)
+I32Imm = ValueOperandDef(ValueType.I32)
+I64Imm = ValueOperandDef(ValueType.I64)
+
+F32Imm = ValueOperandDef(ValueType.F32)
+F64Imm = ValueOperandDef(ValueType.F64)
+
+BrTarget8 = ValueOperandDef(ValueType.I8)
+BrTarget16 = ValueOperandDef(ValueType.I16)
+BrTarget32 = ValueOperandDef(ValueType.I32)
+VectorIndex32 = ValueOperandDef(ValueType.I32)
+
+
+def def_node_(opcode):
+    class SDNode:
+        def __init__(self, opcode, operands):
+            self.opcode = opcode
+            self.operands = operands
+
+        def construct(self, node, dag, result):
+            raise NotImplementedError()
+
+    return lambda *operands: SDNode(opcode, list(operands))
+
+
+def def_node_xform_(opcode, func):
+    class SDNodeXForm:
+        def __init__(self, opcode, func):
+            self.opcode = opcode
+            self.func = func
+
+        def construct(self, node, dag, result):
+            return [self.func(node, dag)]
+
+    return lambda operands: SDNodeXForm(opcode, func)
+
+
+def get_builder(builder_or_tuple):
+    if isinstance(builder_or_tuple, tuple):
+        class MatchedOperandBuilder:
+            def __init__(self, name, operand):
+                self.name = name
+                self.operand = operand
+
+            def construct(self, node, dag, result):
+                value = result.values_as_dict[self.name].value
+                return self.operand.apply(value)
+
+        return MatchedOperandBuilder(*builder_or_tuple)
+    else:
+        return builder_or_tuple
+
+
+def def_inst_node_(opcode):
+    class SDNodeInst:
+        def __init__(self, opcode, operands):
+            self.opcode = opcode
+            self.operands = [get_builder(operand) for operand in operands]
+
+        def construct(self, node, dag, result):
+            from codegen.dag import DagValue
+
+            ops = []
+            for operand in self.operands:
+                ops.extend(operand.construct(node, dag, result))
+
+            inst = self.opcode
+
+            return [DagValue(dag.add_machine_dag_node(inst, node.value_types, *ops), 0)]
+
+    return lambda *operands: SDNodeInst(opcode, list(operands))
 
 class Constraint:
     def __init__(self, op1, op2):
@@ -323,6 +408,9 @@ class MachineInstructionDef:
         self.is_terminator = is_terminator
         self.is_call = is_call
 
+        for pattern in self.patterns:
+            pattern.inst = self
+
     @property
     def operands(self):
         operands = []
@@ -330,16 +418,22 @@ class MachineInstructionDef:
             if isinstance(ty, MachineRegisterClassDef):
                 operands.append((name, ty))
             elif isinstance(ty, ValueOperandDef):
-                for i, info in enumerate(ty.operand_info):
-                    operands.append((f"{name}.{i}", info))
+                if not ty.operand_info:
+                    operands.append((name, ty))
+                else:
+                    for i, info in enumerate(ty.operand_info):
+                        operands.append((f"{name}.{i}", info))
             else:
                 raise NotImplementedError()
         for name, ty in self.ins.items():
             if isinstance(ty, MachineRegisterClassDef):
                 operands.append((name, ty))
             elif isinstance(ty, ValueOperandDef):
-                for i, info in enumerate(ty.operand_info):
-                    operands.append((f"{name}.{i}", info))
+                if not ty.operand_info:
+                    operands.append((name, ty))
+                else:
+                    for i, info in enumerate(ty.operand_info):
+                        operands.append((f"{name}.{i}", info))
             else:
                 raise NotImplementedError()
 
@@ -612,6 +706,8 @@ class ArchType(Enum):
     Thumb = "thumb"
     X86 = "x86"
     X86_64 = "x86_64"
+    RISCV32 = "riscv32"
+    RISCV64 = "riscv64"
 
 
 class OS(Enum):

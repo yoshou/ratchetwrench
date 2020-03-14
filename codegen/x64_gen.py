@@ -903,13 +903,15 @@ class X64InstructionSelector(InstructionSelector):
         return dag.add_node(VirtualDagOps.COPY_TO_REG, node.value_types, *ops)
 
     def select_code(self, node: DagNode, dag: Dag):
-        ops_table = [op for op in X64MachineOps]
+        ops_table = [op for op in X64MachineOps.insts()]
+
+        value = DagValue(node, 0)
 
         def match_node(inst: MachineInstructionDef):
-            for pattern in inst.value.patterns:
-                res = pattern.match(inst, node, dag)
+            for pattern in inst.patterns:
+                _, res = pattern.match(None, [value], 0, dag)
                 if res:
-                    return res
+                    return construct(inst, node, dag, res)
 
             return None
 
@@ -917,6 +919,11 @@ class X64InstructionSelector(InstructionSelector):
             matched = match_node(op)
             if matched:
                 return matched
+
+        for pattern in x64_patterns:
+            _, res = pattern.match(node, dag)
+            if res:
+                return pattern.construct(node, dag, res).node
 
         return None
 

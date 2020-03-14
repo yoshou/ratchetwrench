@@ -271,7 +271,7 @@ def match_addrmode_imm12(node, values, idx, dag):
         offset = DagValue(dag.add_target_constant_node(
             value.ty, 0), 0)
 
-        return idx + 1, MatcherResult([base, offset])
+        return idx + 1, [base, offset]
 
     if value.node.opcode == VirtualDagOps.ADD:
         value1 = value.node.operands[0]
@@ -282,13 +282,13 @@ def match_addrmode_imm12(node, values, idx, dag):
             offset = DagValue(dag.add_target_constant_node(
                 value1.ty, value1.node.value), 0)
 
-            return idx + 1, MatcherResult([base, offset])
+            return idx + 1, [base, offset]
         elif value2.node.opcode == VirtualDagOps.CONSTANT:
             base = value1
             offset = DagValue(dag.add_target_constant_node(
                 value2.ty, value2.node.value), 0)
 
-            return idx + 1, MatcherResult([base, offset])
+            return idx + 1, [base, offset]
 
     if value.node.opcode == VirtualDagOps.SUB:
         if value2.node.opcode == VirtualDagOps.CONSTANT:
@@ -309,7 +309,7 @@ def match_addrmode_imm12(node, values, idx, dag):
     offset = DagValue(dag.add_target_constant_node(
         value.ty, 0), 0)
 
-    return idx + 1, MatcherResult([base, offset])
+    return idx + 1, [base, offset]
 
 
 addrmode_imm12 = ComplexOperandMatcher(match_addrmode_imm12)
@@ -329,7 +329,7 @@ def match_addrmode5(node, values, idx, dag: Dag):
         offset = DagValue(dag.add_target_constant_node(
             value.ty, 0), 0)
 
-        return idx + 1, MatcherResult([base, offset])
+        return idx + 1, [base, offset]
 
     if value.node.opcode == VirtualDagOps.ADD:
         value1 = value.node.operands[0]
@@ -342,7 +342,7 @@ def match_addrmode5(node, values, idx, dag: Dag):
             offset = DagValue(dag.add_target_constant_node(
                 value1.ty, ConstantInt(value1.node.value.value >> 2, value1.node.value.ty)), 0)
 
-            return idx + 1, MatcherResult([base, offset])
+            return idx + 1, [base, offset]
         elif value2.node.opcode == VirtualDagOps.CONSTANT:
             base = value1
 
@@ -350,7 +350,7 @@ def match_addrmode5(node, values, idx, dag: Dag):
             offset = DagValue(dag.add_target_constant_node(
                 value2.ty, ConstantInt(value2.node.value.value >> 2, value2.node.value.ty)), 0)
 
-            return idx + 1, MatcherResult([base, offset])
+            return idx + 1, [base, offset]
 
     if value.node.opcode == VirtualDagOps.SUB:
         if value2.node.opcode == VirtualDagOps.CONSTANT:
@@ -371,7 +371,7 @@ def match_addrmode5(node, values, idx, dag: Dag):
     offset = DagValue(dag.add_target_constant_node(
         value.ty, 0), 0)
 
-    return idx + 1, MatcherResult([base, offset])
+    return idx + 1, [base, offset]
 
 
 addrmode5 = ComplexOperandMatcher(match_addrmode5)
@@ -389,7 +389,7 @@ def match_addrmode6(node, values, idx, dag: Dag):
     align = DagValue(dag.add_target_constant_node(
         value.ty, 1), 0)  # TODO: Need alignment information
 
-    return idx + 1, MatcherResult([addr, align])
+    return idx + 1, [addr, align]
 
 
 addrmode6 = ComplexOperandMatcher(match_addrmode6)
@@ -409,7 +409,7 @@ def match_imm0_65535(node, values, idx, dag):
     target_value = DagValue(dag.add_target_constant_node(
         value.ty, value.node.value), 0)
 
-    return idx + 1, MatcherResult([target_value])
+    return idx + 1, target_value
 
 
 imm0_65535 = ComplexOperandMatcher(match_imm0_65535)
@@ -465,7 +465,7 @@ def match_mod_imm(node, values, idx, dag):
         target_value = DagValue(dag.add_target_constant_node(
             value.ty, constant), 0)
 
-        return idx + 1, MatcherResult([target_value])
+        return idx + 1, target_value
 
     return idx, None
 
@@ -506,13 +506,19 @@ def match_imm_shifter_operand(node, values, idx, dag):
     opc = DagValue(dag.add_target_constant_node(
         value.ty, opc | (rhs_val << 3)), 0)
 
-    return idx + 1, MatcherResult([base, opc])
+    return idx + 1, [base, opc]
 
 
 so_reg_imm = ComplexOperandMatcher(match_imm_shifter_operand)
 
 
-class ARMMachineOps(Enum):
+class ARMMachineOps:
+    @classmethod
+    def insts(cls):
+        for member, value in cls.__dict__.items():
+            if isinstance(value, MachineInstructionDef):
+                yield value
+
     LDRi12 = def_inst(
         "ldr_i12",
         outs=[("dst", GPR)],

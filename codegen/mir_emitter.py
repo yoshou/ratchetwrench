@@ -343,7 +343,7 @@ class MachineInstrEmitter:
 
         minst = self.create_instruction(inst.opcode)
 
-        ii = inst.opcode.value
+        ii = inst.opcode
 
         num_defs = len(ii.outs)
         for ty, _ in zip(inst.value_types, ii.outs):

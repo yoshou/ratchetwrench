@@ -11,7 +11,7 @@ class PeepholeOptimize(MachineFunctionPass):
         super().__init__()
 
     def process_instruction(self, inst: MachineInstruction):
-        if hasattr(inst.opcode.value, "is_compare") and inst.opcode.value.is_compare:
+        if hasattr(inst.opcode, "is_compare") and inst.opcode.is_compare:
             self.target_inst_info.optimize_compare_inst(self.mfunc, inst)
 
     def process_basicblock(self, bb: MachineBasicBlock):

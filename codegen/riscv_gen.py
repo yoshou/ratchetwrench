@@ -4,14 +4,14 @@
 from codegen.spec import *
 from codegen.mir_emitter import *
 from codegen.isel import *
-from codegen.arm_def import *
+from codegen.riscv_def import *
 from codegen.matcher import *
 
 
-class ARMOperandFlag(IntFlag):
-    NO_FLAG = auto()
-    MO_LO16 = auto()
-    MO_HI16 = auto()
+class RISCVOperandFlag(IntFlag):
+    NONE = auto()
+    LO = auto()
+    HI = auto()
 
 
 def is_null_constant(value):
@@ -22,7 +22,7 @@ def is_null_fp_constant(value):
     return isinstance(value.node, ConstantFPDagNode) and value.node.is_zero
 
 
-class ARMInstructionSelector(InstructionSelector):
+class RISCVInstructionSelector(InstructionSelector):
     def __init__(self):
         super().__init__()
 
@@ -35,10 +35,10 @@ class ARMInstructionSelector(InstructionSelector):
 
             zero = DagValue(dag.add_target_constant_node(value_ty, 0), 0)
             zero = DagValue(dag.add_machine_dag_node(
-                ARMMachineOps.MOVi16, [value_ty], zero), 0)
+                RISCVMachineOps.MOVi16, [value_ty], zero), 0)
             one = DagValue(dag.add_target_constant_node(value_ty, 1), 0)
 
-            return dag.add_machine_dag_node(ARMMachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
+            return dag.add_machine_dag_node(RISCVMachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
 
         raise NotImplementedError()
 
@@ -47,7 +47,7 @@ class ARMInstructionSelector(InstructionSelector):
         in_bytes = new_ops[1]
         out_bytes = new_ops[2]
         opt = dag.add_target_constant_node(MachineValueType(ValueType.I32), 0)
-        return dag.add_machine_dag_node(ARMMachineOps.ADJCALLSTACKDOWN, node.value_types, in_bytes, out_bytes, DagValue(opt, 0), chain)
+        return dag.add_machine_dag_node(RISCVMachineOps.ADJCALLSTACKDOWN, node.value_types, in_bytes, out_bytes, DagValue(opt, 0), chain)
 
     def select_callseq_end(self, node: DagNode, dag: Dag, new_ops):
         chain = new_ops[0]
@@ -59,7 +59,7 @@ class ARMInstructionSelector(InstructionSelector):
         if glue:
             ops.append(glue)
 
-        return dag.add_machine_dag_node(ARMMachineOps.ADJCALLSTACKUP, node.value_types, *ops)
+        return dag.add_machine_dag_node(RISCVMachineOps.ADJCALLSTACKUP, node.value_types, *ops)
 
     def get_glue(self, operands):
         for operand in operands:
@@ -77,7 +77,7 @@ class ARMInstructionSelector(InstructionSelector):
         if glue:
             ops.append(glue)
 
-        return dag.add_machine_dag_node(ARMMachineOps.BL, node.value_types, *ops)
+        return dag.add_machine_dag_node(RISCVMachineOps.BL, node.value_types, *ops)
 
     def select_copy_from_reg(self, node: DagNode, dag: Dag, new_ops):
         return node
@@ -107,7 +107,7 @@ class ARMInstructionSelector(InstructionSelector):
         return dag.add_node(VirtualDagOps.COPY_TO_REG, node.value_types, *ops)
 
     def select_code(self, node: DagNode, dag: Dag):
-        ops_table = [op for op in ARMMachineOps.insts()]
+        ops_table = [op for op in RISCVMachineOps.insts()]
 
         value = DagValue(node, 0)
 
@@ -124,6 +124,11 @@ class ARMInstructionSelector(InstructionSelector):
             if matched:
                 return matched
 
+        for pattern in riscv_patterns:
+            _, res = pattern.match(node, dag)
+            if res:
+                return pattern.construct(node, dag, res).node
+
         return None
 
     def select_frame_index(self, node: DagNode, dag: Dag, new_ops):
@@ -134,7 +139,7 @@ class ARMInstructionSelector(InstructionSelector):
             node.value_types[0], 0), 0)
         ops = [base, offset]
 
-        return dag.add_machine_dag_node(ARMMachineOps.ADDri, node.value_types, *ops)
+        return dag.add_machine_dag_node(RISCVMachineOps.ADDri, node.value_types, *ops)
 
     def select_vdup(self, node: DagNode, dag: Dag, new_ops):
         in_type = node.operands[0].ty
@@ -143,7 +148,7 @@ class ARMInstructionSelector(InstructionSelector):
         if in_type in SPR.tys and out_type.value_type == ValueType.V4F32:
             lane = DagValue(dag.add_target_constant_node(
                 MachineValueType(ValueType.I32), 0), 0)
-            return dag.add_machine_dag_node(ARMMachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
+            return dag.add_machine_dag_node(RISCVMachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
 
         raise ValueError()
 
@@ -187,10 +192,13 @@ class ARMInstructionSelector(InstructionSelector):
             VirtualDagOps.CALLSEQ_END: self.select_callseq_end,
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
             VirtualDagOps.INSERT_VECTOR_ELT: self.select_insert_vector_elt,
-            ARMDagOps.SETCC: self.select_setcc,
-            ARMDagOps.CALL: self.select_call,
-            ARMDagOps.VDUP: self.select_vdup,
+            RISCVDagOps.SETCC: self.select_setcc,
+            RISCVDagOps.CALL: self.select_call,
+            RISCVDagOps.VDUP: self.select_vdup,
         }
+
+        if isinstance(node, MachineDagNode):
+            return node
 
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
@@ -214,7 +222,7 @@ class ARMInstructionSelector(InstructionSelector):
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == VirtualDagOps.TOKEN_FACTOR:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
-        elif node.opcode == ARMDagOps.WRAPPER_PIC:
+        elif node.opcode == RISCVDagOps.WRAPPER_PIC:
             return self.lower_wrapper_rip(node, dag)
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
@@ -248,7 +256,7 @@ class CallInfo:
         self.arg_list = arg_list
 
 
-class ARMCallingConv(CallingConv):
+class RISCVCallingConv(CallingConv):
     def __init__(self):
         pass
 
@@ -351,7 +359,7 @@ class ARMCallingConv(CallingConv):
 
             ops = [builder.root, stack_pop_bytes, reg_node]
 
-        node = g.add_node(ARMDagOps.RETURN, [
+        node = g.add_node(RISCVDagOps.RETURN, [
                           MachineValueType(ValueType.OTHER)], *ops)
 
         builder.root = DagValue(node, 0)
@@ -498,7 +506,7 @@ class ARMCallingConv(CallingConv):
 
         # Function call
         call_node = dag.add_node(
-            ARMDagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], chain, func_address, copy_to_reg_chain.get_value(1))
+            RISCVDagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], chain, func_address, copy_to_reg_chain.get_value(1))
 
         chain = DagValue(call_node, 0)
 
@@ -565,19 +573,19 @@ class ARMCallingConv(CallingConv):
 
         return dag.add_merge_values(ret_parts)
 
-    def allocate_return_arm_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+    def allocate_return_riscv_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
         if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
             loc_vt = MachineValueType(ValueType.I32)
 
         if loc_vt.value_type == ValueType.F32:
-            regs = [S0, S1, S2, S3]
+            regs = [F10_F, F11_F, F12_F, F13_F, F14_F, F15_F, F16_F, F17_F]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
         if loc_vt.value_type == ValueType.I32:
-            regs = [R0, R1, R2, R3]
+            regs = [X10, X11, X12, X13, X14, X15, X16, X17]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
@@ -597,23 +605,22 @@ class ARMCallingConv(CallingConv):
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_return(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
-        self.allocate_return_arm_cdecl(
+        self.allocate_return_riscv_cdecl(
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
-    def allocate_argument_arm_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+    def allocate_argument_riscv_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
         if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
             loc_vt = MachineValueType(ValueType.I32)
 
         if loc_vt.value_type == ValueType.F32:
-            regs = [S0, S1, S2, S3, S4, S5, S6, S7,
-                    S8, S9, S10, S11, S12, S13, S14, S15]
+            regs = [F10_F, F11_F, F12_F, F13_F, F14_F, F15_F, F16_F, F17_F]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
         if loc_vt.value_type == ValueType.I32:
-            regs = [R0, R1, R2, R3]
+            regs = [X10, X11, X12, X13, X14, X15, X16, X17]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
@@ -645,11 +652,11 @@ class ARMCallingConv(CallingConv):
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_argument(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
-        self.allocate_argument_arm_cdecl(
+        self.allocate_argument_riscv_cdecl(
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
 
-class ARMTargetInstInfo(TargetInstInfo):
+class RISCVTargetInstInfo(TargetInstInfo):
     def __init__(self):
         super().__init__()
 
@@ -658,11 +665,11 @@ class ARMTargetInstInfo(TargetInstInfo):
         assert(isinstance(dst_reg, MachineRegister))
 
         if src_reg.spec in GPR.regs and dst_reg.spec in GPR.regs:
-            opcode = ARMMachineOps.MOVsi
+            opcode = RISCVMachineOps.MOVsi
         elif src_reg.spec in SPR.regs and dst_reg.spec in SPR.regs:
-            opcode = ARMMachineOps.VMOVS
+            opcode = RISCVMachineOps.VMOVS
         elif src_reg.spec in QPR.regs and dst_reg.spec in QPR.regs:
-            opcode = ARMMachineOps.VORRq
+            opcode = RISCVMachineOps.VORRq
         else:
             raise NotImplementedError(
                 "Move instructions support GPR, SPR, DPR or QPR at the present time.")
@@ -672,11 +679,11 @@ class ARMTargetInstInfo(TargetInstInfo):
         copy_inst.add_reg(dst_reg, RegState.Define)
         copy_inst.add_reg(src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == ARMMachineOps.VORRq:
+        if opcode == RISCVMachineOps.VORRq:
             copy_inst.add_reg(
                 src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == ARMMachineOps.MOVsi:
+        if opcode == RISCVMachineOps.MOVsi:
             copy_inst.add_imm(2)
 
         copy_inst.insert_after(inst)
@@ -692,14 +699,14 @@ class ARMTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if reg.spec in GPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.STRi12)
+                copy_inst = MachineInstruction(RISCVMachineOps.STRi12)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
             elif reg.spec in SPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.VSTRS)
+                copy_inst = MachineInstruction(RISCVMachineOps.VSTRS)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -709,7 +716,7 @@ class ARMTargetInstInfo(TargetInstInfo):
                 raise NotImplementedError()
         elif size == 8:
             if reg.spec in DPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.VSTRD)
+                copy_inst = MachineInstruction(RISCVMachineOps.VSTRD)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -723,14 +730,14 @@ class ARMTargetInstInfo(TargetInstInfo):
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
 
-                addr_inst = MachineInstruction(ARMMachineOps.ADDri)
+                addr_inst = MachineInstruction(RISCVMachineOps.ADDri)
                 addr_inst.add_reg(scratch_reg, RegState.Define)
                 addr_inst.add_frame_index(stack_slot)
                 addr_inst.add_imm(0)
 
                 addr_inst.insert_before(inst)
 
-                copy_inst = MachineInstruction(ARMMachineOps.VST1q64)
+                copy_inst = MachineInstruction(RISCVMachineOps.VST1q64)
                 copy_inst.add_reg(reg, RegState.Non)
                 copy_inst.add_reg(scratch_reg, RegState.Kill)
                 copy_inst.add_imm(1)
@@ -754,13 +761,13 @@ class ARMTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if reg.spec in GPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.LDRi12)
+                copy_inst = MachineInstruction(RISCVMachineOps.LDRi12)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
             elif reg.spec in SPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.VLDRS)
+                copy_inst = MachineInstruction(RISCVMachineOps.VLDRS)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -769,7 +776,7 @@ class ARMTargetInstInfo(TargetInstInfo):
                 raise NotImplementedError()
         elif size == 8:
             if reg.spec in DPR.regs:
-                copy_inst = MachineInstruction(ARMMachineOps.VLDRD)
+                copy_inst = MachineInstruction(RISCVMachineOps.VLDRD)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -782,14 +789,14 @@ class ARMTargetInstInfo(TargetInstInfo):
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
 
-                addr_inst = MachineInstruction(ARMMachineOps.ADDri)
+                addr_inst = MachineInstruction(RISCVMachineOps.ADDri)
                 addr_inst.add_reg(scratch_reg, RegState.Define)
                 addr_inst.add_frame_index(stack_slot)
                 addr_inst.add_imm(0)
 
                 addr_inst.insert_before(inst)
 
-                copy_inst = MachineInstruction(ARMMachineOps.VLD1q64)
+                copy_inst = MachineInstruction(RISCVMachineOps.VLD1q64)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_reg(scratch_reg, RegState.Kill)
@@ -821,7 +828,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             stack_obj = func.frame.get_stack_object(operand.index)
             offset = self.calculate_frame_offset(func, operand.index)
 
-            if inst.opcode in [ARMMachineOps.VLDRS, ARMMachineOps.VSTRS, ARMMachineOps.VLDRD, ARMMachineOps.VSTRD]:
+            if inst.opcode in [RISCVMachineOps.VLDRS, RISCVMachineOps.VSTRS, RISCVMachineOps.VLDRD, RISCVMachineOps.VSTRD]:
                 assert(offset % 4 == 0)
                 offset = offset >> 2
 
@@ -831,15 +838,15 @@ class ARMTargetInstInfo(TargetInstInfo):
             inst.operands[idx + 1] = MOImm(inst.operands[idx + 1].val + offset)
 
             if inst.operands[idx + 1].val < 0:
-                if inst.opcode == ARMMachineOps.ADDri:
-                    inst.opcode = ARMMachineOps.SUBri
+                if inst.opcode == RISCVMachineOps.ADDri:
+                    inst.opcode = RISCVMachineOps.SUBri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode == ARMMachineOps.SUBri:
-                    inst.opcode = ARMMachineOps.ADDri
+                elif inst.opcode == RISCVMachineOps.SUBri:
+                    inst.opcode = RISCVMachineOps.ADDri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
                 elif inst.opcode in [
-                        ARMMachineOps.STRi12, ARMMachineOps.LDRi12, ARMMachineOps.VSTRS, ARMMachineOps.VLDRS,
-                        ARMMachineOps.VSTRD, ARMMachineOps.VLDRD, ARMMachineOps.VST1q64, ARMMachineOps.VLD1q64]:
+                        RISCVMachineOps.STRi12, RISCVMachineOps.LDRi12, RISCVMachineOps.VSTRS, RISCVMachineOps.VLDRS,
+                        RISCVMachineOps.VSTRD, RISCVMachineOps.VLDRD, RISCVMachineOps.VST1q64, RISCVMachineOps.VLD1q64]:
                     pass
                 else:
                     raise ValueError()
@@ -849,14 +856,14 @@ class ARMTargetInstInfo(TargetInstInfo):
         reginfo = func.reg_info
         if reginfo.is_use_empty(inst.operands[0].reg):
 
-            if inst.opcode == ARMMachineOps.SUB32ri:
-                inst.opcode = ARMMachineOps.CMP32ri
-            elif inst.opcode == ARMMachineOps.SUB32rm:
-                inst.opcode = ARMMachineOps.CMP32rm
-            elif inst.opcode == ARMMachineOps.SUB32rr:
-                inst.opcode = ARMMachineOps.CMP32rr
-            elif inst.opcode == ARMMachineOps.SUB8ri:
-                inst.opcode = ARMMachineOps.CMP8ri
+            if inst.opcode == RISCVMachineOps.SUB32ri:
+                inst.opcode = RISCVMachineOps.CMP32ri
+            elif inst.opcode == RISCVMachineOps.SUB32rm:
+                inst.opcode = RISCVMachineOps.CMP32rm
+            elif inst.opcode == RISCVMachineOps.SUB32rr:
+                inst.opcode = RISCVMachineOps.CMP32rr
+            elif inst.opcode == RISCVMachineOps.SUB8ri:
+                inst.opcode = RISCVMachineOps.CMP8ri
             else:
                 raise ValueError("Not supporting instruction.")
 
@@ -869,11 +876,11 @@ class ARMTargetInstInfo(TargetInstInfo):
             inst.remove_operand(0)
 
     def expand_post_ra_pseudo(self, inst: MachineInstruction):
-        # if inst.opcode == ARMMachineOps.LDRLIT_ga_abs:
+        # if inst.opcode == RISCVMachineOps.LDRLIT_ga_abs:
         #     # Replace with 'LDR' from constant pool.
         #     dst = inst.operands[0]
         #     gv = inst.operands[1]
-        #     opc = ARMMachineOps.LDRi12
+        #     opc = RISCVMachineOps.LDRi12
 
         #     cp = inst.mbb.func.constant_pool
         #     index = cp.get_or_create_index(gv.value, 4)
@@ -887,12 +894,12 @@ class ARMTargetInstInfo(TargetInstInfo):
         #     new_inst.insert_after(inst)
         #     inst.remove()
 
-        if inst.opcode == ARMMachineOps.MOVi32imm:
+        if inst.opcode == RISCVMachineOps.MOVi32imm:
             dst = inst.operands[0]
             src = inst.operands[1]
 
-            lo_opc = ARMMachineOps.MOVi16
-            hi_opc = ARMMachineOps.MOVTi16
+            lo_opc = RISCVMachineOps.MOVi16
+            hi_opc = RISCVMachineOps.MOVTi16
 
             lo_inst = MachineInstruction(lo_opc)
             lo_inst.add_reg(dst.reg, RegState.Define)
@@ -903,9 +910,9 @@ class ARMTargetInstInfo(TargetInstInfo):
 
             if isinstance(src, MOGlobalAddress):
                 lo_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | ARMOperandFlag.MO_LO16.value))
+                    src.value, target_flags=(src.target_flags | RISCVOperandFlag.MO_LO16.value))
                 hi_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | ARMOperandFlag.MO_HI16.value))
+                    src.value, target_flags=(src.target_flags | RISCVOperandFlag.MO_HI16.value))
             else:
                 raise ValueError()
 
@@ -913,12 +920,12 @@ class ARMTargetInstInfo(TargetInstInfo):
             lo_inst.insert_after(inst)
             inst.remove()
 
-        if inst.opcode == ARMMachineOps.LEApcrel:
+        if inst.opcode == RISCVMachineOps.LEApcrel:
             dst = inst.operands[0]
             src = inst.operands[1]
 
-            lo_opc = ARMMachineOps.MOVi16
-            hi_opc = ARMMachineOps.MOVTi16
+            lo_opc = RISCVMachineOps.MOVi16
+            hi_opc = RISCVMachineOps.MOVTi16
 
             lo_inst = MachineInstruction(lo_opc)
             lo_inst.add_reg(dst.reg, RegState.Define)
@@ -929,9 +936,9 @@ class ARMTargetInstInfo(TargetInstInfo):
 
             if isinstance(src, MOConstantPoolIndex):
                 lo_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | ARMOperandFlag.MO_LO16.value))
+                    src.index, target_flags=(src.target_flags | RISCVOperandFlag.MO_LO16.value))
                 hi_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | ARMOperandFlag.MO_HI16.value))
+                    src.index, target_flags=(src.target_flags | RISCVOperandFlag.MO_HI16.value))
             else:
                 raise ValueError()
 
@@ -999,36 +1006,36 @@ def find_if(values, pred):
     return -1
 
 
-ARMCC_EQ = 0b0000  # Equal                      Equal
-ARMCC_NE = 0b0001  # Not equal                  Not equal, or unordered
-ARMCC_HS = 0b0010  # Carry set                  >, ==, or unordered
-ARMCC_LO = 0b0011  # Carry clear                Less than
-ARMCC_MI = 0b0100  # Minus, negative            Less than
-ARMCC_PL = 0b0101  # Plus, positive or zero     >, ==, or unordered
-ARMCC_VS = 0b0110  # Overflow                   Unordered
-ARMCC_VC = 0b0111  # No overflow                Not unordered
-ARMCC_HI = 0b1000  # Unsigned higher            Greater than, or unordered
-ARMCC_LS = 0b1001  # Unsigned lower or same     Less than or equal
-ARMCC_GE = 0b1010  # Greater than or equal      Greater than or equal
-ARMCC_LT = 0b1011  # Less than                  Less than, or unordered
-ARMCC_GT = 0b1100  # Greater than               Greater than
-ARMCC_LE = 0b1101  # Less than or equal         <, ==, or unordered
-ARMCC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
+RISCVCC_EQ = 0b0000  # Equal                      Equal
+RISCVCC_NE = 0b0001  # Not equal                  Not equal, or unordered
+RISCVCC_HS = 0b0010  # Carry set                  >, ==, or unordered
+RISCVCC_LO = 0b0011  # Carry clear                Less than
+RISCVCC_MI = 0b0100  # Minus, negative            Less than
+RISCVCC_PL = 0b0101  # Plus, positive or zero     >, ==, or unordered
+RISCVCC_VS = 0b0110  # Overflow                   Unordered
+RISCVCC_VC = 0b0111  # No overflow                Not unordered
+RISCVCC_HI = 0b1000  # Unsigned higher            Greater than, or unordered
+RISCVCC_LS = 0b1001  # Unsigned lower or same     Less than or equal
+RISCVCC_GE = 0b1010  # Greater than or equal      Greater than or equal
+RISCVCC_LT = 0b1011  # Less than                  Less than, or unordered
+RISCVCC_GT = 0b1100  # Greater than               Greater than
+RISCVCC_LE = 0b1101  # Less than or equal         <, ==, or unordered
+RISCVCC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
 
 
-class ARMConstantPoolKind(Enum):
+class RISCVConstantPoolKind(Enum):
     Value = auto()
     ExtSymbol = auto()
     BlockAddress = auto()
     BasicBlock = auto()
 
 
-class ARMConstantPoolModifier(Enum):
+class RISCVConstantPoolModifier(Enum):
     Non = auto()
     TLSGlobalDesc = auto()
 
 
-class ARMConstantPoolConstant(MachineConstantPoolValue):
+class RISCVConstantPoolConstant(MachineConstantPoolValue):
     def __init__(self, ty, label_id, value, kind, modifier, pc_offset, relative):
         super().__init__(ty)
         self.label_id = label_id
@@ -1042,7 +1049,7 @@ class ARMConstantPoolConstant(MachineConstantPoolValue):
         return hash((self.value, self.kind, self.modifier, self.pc_offset, self.relative))
 
     def __eq__(self, other):
-        if not isinstance(other, ARMConstantPoolConstant):
+        if not isinstance(other, RISCVConstantPoolConstant):
             return False
 
         eq1 = self.value == other.value and self.kind == other.kind and self.modifier == other.modifier
@@ -1053,7 +1060,7 @@ class ARMConstantPoolConstant(MachineConstantPoolValue):
         return not self.__eq__(other)
 
 
-class ARMTargetLowering(TargetLowering):
+class RISCVTargetLowering(TargetLowering):
     def __init__(self):
         super().__init__()
 
@@ -1072,29 +1079,29 @@ class ARMTargetLowering(TargetLowering):
 
             if is_fcmp:
                 if cond in [CondCode.SETEQ, CondCode.SETOEQ]:
-                    node = dag.add_target_constant_node(ty, ARMCC_EQ)
+                    node = dag.add_target_constant_node(ty, RISCVCC_EQ)
                 elif cond in [CondCode.SETGT, CondCode.SETOGT]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GT)
+                    node = dag.add_target_constant_node(ty, RISCVCC_GT)
                 elif cond in [CondCode.SETLT, CondCode.SETOLT]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
                     swap = True
                 elif cond in [CondCode.SETGE, CondCode.SETOGE]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
                 else:
                     raise NotImplementedError()
             else:
                 if cond == CondCode.SETEQ:
-                    node = dag.add_target_constant_node(ty, ARMCC_EQ)
+                    node = dag.add_target_constant_node(ty, RISCVCC_EQ)
                 elif cond == CondCode.SETNE:
-                    node = dag.add_target_constant_node(ty, ARMCC_NE)
+                    node = dag.add_target_constant_node(ty, RISCVCC_NE)
                 elif cond == CondCode.SETLT:
-                    node = dag.add_target_constant_node(ty, ARMCC_LT)
+                    node = dag.add_target_constant_node(ty, RISCVCC_LT)
                 elif cond == CondCode.SETGT:
-                    node = dag.add_target_constant_node(ty, ARMCC_GT)
+                    node = dag.add_target_constant_node(ty, RISCVCC_GT)
                 elif cond == CondCode.SETLE:
-                    node = dag.add_target_constant_node(ty, ARMCC_LE)
+                    node = dag.add_target_constant_node(ty, RISCVCC_LE)
                 elif cond == CondCode.SETGE:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
                 elif cond == CondCode.SETULT:
                     node = dag.add_target_constant_node(ty, 0b0011)
                 elif cond == CondCode.SETUGT:
@@ -1113,16 +1120,16 @@ class ARMTargetLowering(TargetLowering):
             op1, op2 = op2, op1
 
         if is_fcmp:
-            cmp_node = DagValue(dag.add_node(ARMDagOps.CMPFP,
+            cmp_node = DagValue(dag.add_node(RISCVDagOps.CMPFP,
                                              [MachineValueType(ValueType.GLUE)], op1, op2), 0)
-            cmp_node = DagValue(dag.add_node(ARMDagOps.FMSTAT,
+            cmp_node = DagValue(dag.add_node(RISCVDagOps.FMSTAT,
                                              [MachineValueType(ValueType.GLUE)], cmp_node), 0)
         else:
-            cmp_node = DagValue(dag.add_node(ARMDagOps.CMP,
+            cmp_node = DagValue(dag.add_node(RISCVDagOps.CMP,
                                              [MachineValueType(ValueType.GLUE)], op1, op2), 0)
 
         # operand 1 is eflags.
-        setcc_node = dag.add_node(ARMDagOps.SETCC, node.value_types,
+        setcc_node = dag.add_node(RISCVDagOps.SETCC, node.value_types,
                                   DagValue(condcode, 0), cmp_node)
 
         return setcc_node
@@ -1135,13 +1142,13 @@ class ARMTargetLowering(TargetLowering):
         if cond.node.opcode == VirtualDagOps.SETCC:
             cond = DagValue(self.lower_setcc(cond.node, dag), 0)
 
-        if cond.node.opcode == ARMDagOps.SETCC:
+        if cond.node.opcode == RISCVDagOps.SETCC:
             condcode = cond.node.operands[0]
             glue = cond.node.operands[1]
             cond = DagValue(dag.add_target_register_node(
                 MachineValueType(ValueType.I32), CPSR), 0)
 
-            return dag.add_node(ARMDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(RISCVDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
         else:
             if cond.ty == MachineValueType(ValueType.I1):
                 cond = DagValue(dag.add_node(VirtualDagOps.ZERO_EXTEND, [
@@ -1158,12 +1165,12 @@ class ARMTargetLowering(TargetLowering):
             cond = DagValue(dag.add_target_register_node(
                 MachineValueType(ValueType.I32), CPSR), 0)
 
-            return dag.add_node(ARMDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(RISCVDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
 
     def lower_global_address(self, node: DagNode, dag: Dag):
         target_address = dag.add_global_address_node(
             node.value_types[0], node.value, True)
-        return dag.add_node(ARMDagOps.WRAPPER, node.value_types, DagValue(target_address, 0))
+        return dag.add_node(RISCVDagOps.WRAPPER, node.value_types, DagValue(target_address, 0))
 
     def lower_global_tls_address(self, node: DagNode, dag: Dag):
         data_layout = dag.mfunc.func_info.func.module.data_layout
@@ -1173,14 +1180,14 @@ class ARMTargetLowering(TargetLowering):
         if global_value.thread_local == ThreadLocalMode.GeneralDynamicTLSModel:
             pc_label_id = dag.mfunc.func_info.create_pic_label_id()
 
-            cp_value = ARMConstantPoolConstant(
-                global_value.ty, pc_label_id, global_value, ARMConstantPoolKind.Value, ARMConstantPoolModifier.TLSGlobalDesc, 8, True)
+            cp_value = RISCVConstantPoolConstant(
+                global_value.ty, pc_label_id, global_value, RISCVConstantPoolKind.Value, RISCVConstantPoolModifier.TLSGlobalDesc, 8, True)
 
             argument = DagValue(
                 dag.add_constant_pool_node(ptr_ty, cp_value, True, 4), 0)
 
             argument = DagValue(dag.add_node(
-                ARMDagOps.WRAPPER, [MachineValueType(ValueType.I32)], argument), 0)
+                RISCVDagOps.WRAPPER, [MachineValueType(ValueType.I32)], argument), 0)
 
             argument = DagValue(dag.add_load_node(
                 ptr_ty, dag.entry, argument, False), 0)
@@ -1190,7 +1197,7 @@ class ARMTargetLowering(TargetLowering):
             pic_label = DagValue(dag.add_target_constant_node(
                 ptr_ty, ConstantInt(pc_label_id, i32)), 0)
 
-            argument = DagValue(dag.add_node(ARMDagOps.PIC_ADD,
+            argument = DagValue(dag.add_node(RISCVDagOps.PIC_ADD,
                                              [ptr_ty], argument, pic_label), 0)
 
             arg_list = []
@@ -1218,9 +1225,19 @@ class ARMTargetLowering(TargetLowering):
         assert(isinstance(node, ConstantFPDagNode))
         data_layout = dag.mfunc.func_info.func.module.data_layout
 
-        constant_pool = dag.add_constant_pool_node(
-            self.get_pointer_type(data_layout), node.value, False)
-        return dag.add_load_node(node.value_types[0], dag.entry, DagValue(constant_pool, 0), False)
+        cp_hi = DagValue(dag.add_constant_pool_node(
+            self.get_pointer_type(data_layout), node.value, True), 0)
+
+        cp_lo = DagValue(dag.add_constant_pool_node(
+            self.get_pointer_type(data_layout), node.value, True), 0)
+
+        cp = DagValue(dag.add_machine_dag_node(RISCVMachineOps.LUI,
+                                               [MachineValueType(ValueType.I32)], cp_hi), 0)
+
+        cp = DagValue(dag.add_machine_dag_node(RISCVMachineOps.ADDI,
+                                               [MachineValueType(ValueType.I32)], cp, cp_lo), 0)
+
+        return dag.add_load_node(node.value_types[0], dag.entry, cp, False)
 
     def lower_constant_pool(self, node: DagNode, dag: Dag):
         assert(isinstance(node, ConstantPoolDagNode))
@@ -1228,7 +1245,7 @@ class ARMTargetLowering(TargetLowering):
 
         target_constant_pool = dag.add_constant_pool_node(
             self.get_pointer_type(data_layout), node.value, True)
-        return dag.add_node(ARMDagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
+        return dag.add_node(RISCVDagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
 
     def lower_build_vector(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
@@ -1247,7 +1264,7 @@ class ARMTargetLowering(TargetLowering):
                 break
 
         if is_one_val:
-            return dag.add_node(ARMDagOps.VDUP, node.value_types, operands[0])
+            return dag.add_node(RISCVDagOps.VDUP, node.value_types, operands[0])
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
 
@@ -1263,7 +1280,7 @@ class ARMTargetLowering(TargetLowering):
             VirtualDagOps.SCALAR_TO_VECTOR, [vec.ty], val), 0)
         param = self.create_i8_constant(self.shuffle_param(0, 0, 0, 0))
 
-        return DagValue(dag.add_node(ARMDagOps.SHUFP, node.value_types, vec, vec, param), 0)
+        return DagValue(dag.add_node(RISCVDagOps.SHUFP, node.value_types, vec, vec, param), 0)
 
     def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
@@ -1297,9 +1314,9 @@ class ARMTargetLowering(TargetLowering):
             VirtualDagOps.SCALAR_TO_VECTOR, [vt], vec2_elem), 0)
 
         if elem_vt.value_type == ValueType.F32:
-            opcode = ARMDagOps.MOVSS
+            opcode = RISCVDagOps.MOVSS
         else:
-            opcode = ARMDagOps.MOVSD
+            opcode = RISCVDagOps.MOVSD
 
         return dag.add_node(opcode, [vt], vec1, vec2)
 
@@ -1319,7 +1336,7 @@ class ARMTargetLowering(TargetLowering):
 
             # Merge the vectors.
             blend_mask = [mask[vec2_idx] - 4, 0, mask[vec2_idx_adj], 0]
-            vec2 = DagValue(dag.add_node(ARMDagOps.SHUFP, [
+            vec2 = DagValue(dag.add_node(RISCVDagOps.SHUFP, [
                             vt], vec2, vec1, self.get_x86_shuffle_mask_v4(blend_mask, dag)), 0)
 
             if vec2_idx < 2:
@@ -1334,7 +1351,7 @@ class ARMTargetLowering(TargetLowering):
         elif num_vec2_elems == 2:
             raise NotImplementedError()
 
-        return dag.add_node(ARMDagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
+        return dag.add_node(RISCVDagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
 
     def lower_v4f32_shuffle(self, node: DagNode, dag: Dag):
         vec1 = node.operands[0]
@@ -1354,7 +1371,7 @@ class ARMTargetLowering(TargetLowering):
         raise ValueError()
 
     def lower_sub(self, node: DagNode, dag: Dag):
-        return dag.add_node(ARMDagOps.SUB, node.value_types, *node.operands)
+        return dag.add_node(RISCVDagOps.SUB, node.value_types, *node.operands)
 
     def lower_bitcast(self, node: DagNode, dag: Dag):
         if node.operands[0].ty in QPR.tys:
@@ -1432,19 +1449,19 @@ class ARMTargetLowering(TargetLowering):
             loc_info = arg_val.loc_info
             if isinstance(arg_val, CCArgReg):
                 if arg_vt.value_type == ValueType.I8:
-                    regclass = GPRwoPC
+                    regclass = GPR
                 elif arg_vt.value_type == ValueType.I16:
-                    regclass = GPRwoPC
+                    regclass = GPR
                 elif arg_vt.value_type == ValueType.I32:
-                    regclass = GPRwoPC
+                    regclass = GPR
                 elif arg_vt.value_type == ValueType.I64:
                     raise ValueError()
                 elif arg_vt.value_type == ValueType.F32:
-                    regclass = SPR
+                    regclass = FPR32
                 elif arg_vt.value_type == ValueType.F64:
-                    regclass = DPR
+                    regclass = FPR64
                 elif arg_vt.value_type == ValueType.V2F64:
-                    regclass = QPR
+                    raise NotImplementedError()
                 else:
                     raise ValueError()
 
@@ -1527,9 +1544,9 @@ class ARMTargetLowering(TargetLowering):
         #     MachineValueType(ValueType.OTHER)], arg_load_chains), 0)
 
     def is_frame_op(self, inst):
-        if inst.opcode == ARMMachineOps.ADJCALLSTACKDOWN:
+        if inst.opcode == RISCVMachineOps.ADJCALLSTACKDOWN:
             return True
-        if inst.opcode == ARMMachineOps.ADJCALLSTACKUP:
+        if inst.opcode == RISCVMachineOps.ADJCALLSTACKUP:
             return True
 
         return False
@@ -1542,7 +1559,7 @@ class ARMTargetLowering(TargetLowering):
 
         front_inst = bb.insts[0]
 
-        push_fp_lr_inst = MachineInstruction(ARMMachineOps.STMDB_UPD)
+        push_fp_lr_inst = MachineInstruction(RISCVMachineOps.STMDB_UPD)
         push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
         push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
         push_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
@@ -1550,7 +1567,7 @@ class ARMTargetLowering(TargetLowering):
 
         push_fp_lr_inst.insert_before(front_inst)
 
-        mov_esp_inst = MachineInstruction(ARMMachineOps.MOVr)
+        mov_esp_inst = MachineInstruction(RISCVMachineOps.MOVr)
         mov_esp_inst.add_reg(MachineRegister(R11), RegState.Define)  # To
         mov_esp_inst.add_reg(MachineRegister(SP), RegState.Non)  # From
 
@@ -1580,7 +1597,7 @@ class ARMTargetLowering(TargetLowering):
             func.frame.calee_save_info.append(CalleeSavedInfo(reg, frame_idx))
 
         stack_size = func.frame.estimate_stack_size(
-            ARMMachineOps.ADJCALLSTACKDOWN, ARMMachineOps.ADJCALLSTACKUP)
+            RISCVMachineOps.ADJCALLSTACKDOWN, RISCVMachineOps.ADJCALLSTACKUP)
 
         max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
         stack_size = int(
@@ -1588,7 +1605,7 @@ class ARMTargetLowering(TargetLowering):
 
         assert(get_mod_imm(stack_size) != -1)
 
-        sub_sp_inst = MachineInstruction(ARMMachineOps.SUBri)
+        sub_sp_inst = MachineInstruction(RISCVMachineOps.SUBri)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Define)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Non)
         sub_sp_inst.add_imm(stack_size)
@@ -1618,13 +1635,13 @@ class ARMTargetLowering(TargetLowering):
             inst_info.copy_reg_from_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
 
-        restore_esp_inst = MachineInstruction(ARMMachineOps.MOVr)
+        restore_esp_inst = MachineInstruction(RISCVMachineOps.MOVr)
         restore_esp_inst.add_reg(MachineRegister(SP), RegState.Define)  # To
         restore_esp_inst.add_reg(MachineRegister(R11), RegState.Non)  # From
 
         restore_esp_inst.insert_before(front_inst)
 
-        pop_fp_lr_inst = MachineInstruction(ARMMachineOps.LDMIA_UPD)
+        pop_fp_lr_inst = MachineInstruction(RISCVMachineOps.LDMIA_UPD)
         pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
         pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
         pop_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
@@ -1645,11 +1662,11 @@ class ARMTargetLowering(TargetLowering):
         elif ty.value_type == ValueType.I64:
             pass
         elif ty.value_type == ValueType.F32:
-            return SPR
+            return FPR32
         elif ty.value_type == ValueType.F64:
-            return DPR
+            return FPR64
         elif ty.value_type == ValueType.V4F32:
-            return QPR
+            raise NotImplementedError()
 
         raise NotImplementedError()
 
@@ -1694,7 +1711,7 @@ class ARMTargetLowering(TargetLowering):
             MachineValueType(ValueType.OTHER)], *chains), 0)
 
 
-class ARMTargetRegisterInfo(TargetRegisterInfo):
+class RISCVTargetRegisterInfo(TargetRegisterInfo):
     def __init__(self):
         super().__init__()
 
@@ -1745,7 +1762,7 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
         raise ValueError("Could not find the register class.")
 
     def get_regclass_for_vt(self, vt):
-        for regclass in arm_regclasses:
+        for regclass in riscv_regclasses:
             if vt in regclass.tys:
                 return regclass
 
@@ -1766,7 +1783,7 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
         return find_subreg(reg, subreg_idx)
 
 
-class ARMFrameLowering(TargetFrameLowering):
+class RISCVFrameLowering(TargetFrameLowering):
     def __init__(self, alignment):
         super().__init__(alignment)
 
@@ -1777,7 +1794,7 @@ class ARMFrameLowering(TargetFrameLowering):
         return StackGrowsDirection.Down
 
 
-class ARMLegalizer(Legalizer):
+class RISCVLegalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
@@ -1816,17 +1833,17 @@ class ARMLegalizer(Legalizer):
         return node
 
 
-class ARMTargetInfo(TargetInfo):
+class RISCVTargetInfo(TargetInfo):
     def __init__(self, triple):
         super().__init__(triple)
 
-        self._inst_info = ARMTargetInstInfo()
-        self._lowering = ARMTargetLowering()
-        self._reg_info = ARMTargetRegisterInfo()
-        self._calling_conv = ARMCallingConv()
-        self._isel = ARMInstructionSelector()
-        self._legalizer = ARMLegalizer()
-        self._frame_lowering = ARMFrameLowering(16)
+        self._inst_info = RISCVTargetInstInfo()
+        self._lowering = RISCVTargetLowering()
+        self._reg_info = RISCVTargetRegisterInfo()
+        self._calling_conv = RISCVCallingConv()
+        self._isel = RISCVInstructionSelector()
+        self._legalizer = RISCVLegalizer()
+        self._frame_lowering = RISCVFrameLowering(16)
 
     def get_inst_info(self) -> TargetInstInfo:
         return self._inst_info
@@ -1850,33 +1867,29 @@ class ARMTargetInfo(TargetInfo):
         return self._frame_lowering
 
 
-class ARMTargetMachine:
+class RISCVTargetMachine:
     def __init__(self, triple):
         self.triple = triple
 
     def get_target_info(self, func: Function):
-        return ARMTargetInfo(self.triple)
+        return RISCVTargetInfo(self.triple)
 
     def add_mc_emit_passes(self, pass_manager, mccontext, output, is_asm):
-        from codegen.arm_asm_printer import ARMAsmInfo, MCAsmStream, ARMCodeEmitter, ARMAsmBackend, ARMAsmPrinter
-        from codegen.coff import WinCOFFObjectWriter, WinCOFFObjectStream
-        from codegen.elf import ELFObjectStream, ELFObjectWriter, ARMELFObjectWriter
-        from codegen.arm_constant_island import ARMConstantIsland
-
-        pass_manager.passes.append(ARMConstantIsland())
+        from codegen.riscv_asm_printer import RISCVAsmInfo, MCAsmStream, RISCVCodeEmitter, RISCVAsmBackend, RISCVAsmPrinter
+        from codegen.elf import ELFObjectStream, ELFObjectWriter, RISCVELFObjectWriter
 
         objformat = self.triple.objformat
 
-        mccontext.asm_info = ARMAsmInfo()
+        mccontext.asm_info = RISCVAsmInfo()
         if is_asm:
             raise NotImplementedError()
         else:
-            emitter = ARMCodeEmitter(mccontext)
-            backend = ARMAsmBackend()
+            emitter = RISCVCodeEmitter(mccontext)
+            backend = RISCVAsmBackend()
 
             if objformat == ObjectFormatType.ELF:
-                target_writer = ARMELFObjectWriter()
+                target_writer = RISCVELFObjectWriter()
                 writer = ELFObjectWriter(output, target_writer)
                 stream = ELFObjectStream(mccontext, backend, writer, emitter)
 
-        pass_manager.passes.append(ARMAsmPrinter(stream))
+        pass_manager.passes.append(RISCVAsmPrinter(stream))

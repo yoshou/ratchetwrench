@@ -214,6 +214,10 @@ class DagValue:
     def get_value(self, idx):
         return DagValue(self._node, idx)
 
+    @property
+    def valid(self):
+        return self.index < len(self._node.value_types)
+
 
 class DagEdge:
     def __init__(self, source: DagNode, ref: DagValue):

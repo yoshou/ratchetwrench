@@ -337,7 +337,7 @@ class MachineFunction:
             if inst.opcode == TargetDagOps.COPY:
                 f.write('copy')
         else:
-            f.write('{}'.format(inst.opcode.value.mnemonic))
+            f.write('{}'.format(inst.opcode.mnemonic))
 
         first = True
         for operand in inst.operands[start_op:]:
@@ -705,15 +705,15 @@ class MachineInstruction:
     @property
     def is_call(self):
         from codegen.spec import MachineInstructionDef
-        if isinstance(self.opcode.value, MachineInstructionDef):
-            return self.opcode.value.is_call
+        if isinstance(self.opcode, MachineInstructionDef):
+            return self.opcode.is_call
         return False
 
     @property
     def is_terminator(self):
         from codegen.spec import MachineInstructionDef
-        if isinstance(self.opcode.value, MachineInstructionDef):
-            return self.opcode.value.is_terminator
+        if isinstance(self.opcode, MachineInstructionDef):
+            return self.opcode.is_terminator
         return False
 
     def add_reg_operand_to_use(self, operand):
