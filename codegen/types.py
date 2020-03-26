@@ -143,6 +143,10 @@ class MachineValueType:
 
         raise ValueError("This type is not supported in ir.")
 
+    @property
+    def is_vector(self):
+        return self.value_type.value.startswith("v")
+
 
 OtherVT = MachineValueType(ValueType.OTHER)
 

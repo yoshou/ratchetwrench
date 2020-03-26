@@ -98,6 +98,14 @@ def compute_value_types(ty, data_layout, offsets=None, start_offset=0):
         elem_vt = get_vt(ty.elem_ty)
         vt = get_vector_ty(elem_vt, ty.size)
         vts = [MachineValueType(vt)]
+    elif isinstance(ty, ArrayType):
+        elem_size = data_layout.get_type_alloc_size(ty.elem_ty)
+        vts = []
+        for i in range(ty.size):
+            elem_vts = compute_value_types(
+                ty.elem_ty, data_layout, offsets, start_offset + i * elem_size)
+
+            vts.extend(elem_vts)
     elif isinstance(ty, FunctionType):
         vts = [MachineValueType(ValueType.OTHER)]
     else:
@@ -153,7 +161,7 @@ class MachineInstrEmitter:
 
             index = cp.get_or_create_index(operand.node.value, align)
 
-            minst.add_constant_pool_index(index)
+            minst.add_constant_pool_index(index, operand.node.target_flags)
         elif isinstance(operand.node, RegisterDagNode):
             minst.add_reg(operand.node.reg, RegState.Non)
         elif isinstance(operand.node, GlobalAddressDagNode):
@@ -164,7 +172,8 @@ class MachineInstrEmitter:
         elif isinstance(operand.node, BasicBlockDagNode):
             minst.add_mbb(operand.node.bb)
         elif isinstance(operand.node, ExternalSymbolDagNode):
-            minst.add_external_symbol(operand.node.symbol)
+            minst.add_external_symbol(
+                operand.node.symbol, operand.node.target_flags)
         elif isinstance(operand.node, (MachineDagNode, DagNode)):
             self.add_register_operand(minst, operand)
         else:

@@ -90,6 +90,8 @@ class VirtualDagOps(Enum):
     FSHR = VirtualDagOp("fshr")
 
     BITCAST = VirtualDagOp("bitcast")
+    SIGN_EXTEND = VirtualDagOp("sign_extend")
+    ZERO_EXTEND = VirtualDagOp("zero_extend")
 
     LOAD = VirtualDagOp("load")
     STORE = VirtualDagOp("store")
@@ -99,7 +101,6 @@ class VirtualDagOps(Enum):
     SETCC = VirtualDagOp("setcc")
     BR = VirtualDagOp("br")
     BRCOND = VirtualDagOp("brcond")
-    ZERO_EXTEND = VirtualDagOp("zero_extend")
 
     CONDCODE = VirtualDagOp("CondCode")
     REGISTER = VirtualDagOp("Register")
@@ -228,8 +229,17 @@ class DagEdge:
 
 
 class MemDagNode(DagNode):
-    def __init__(self, opcode, value_types, operands):
+    def __init__(self, opcode, value_types, operands, mem_operand):
         super().__init__(opcode, value_types, operands)
+        self.mem_operand = mem_operand
+
+    def __eq__(self, other):
+        if not isinstance(other, MemDagNode):
+            return False
+        return self.mem_operand == other.mem_operand and super().__eq__(other)
+
+    def __hash__(self):
+        return hash((super().__hash__(), self.mem_operand))
 
 
 class MachinePointerInfo:
@@ -238,39 +248,48 @@ class MachinePointerInfo:
 
 
 class MachineMemOperand:
-    def __init__(self, ptr_info):
+    def __init__(self, ptr_info, size):
         self.ptr_info = ptr_info
+        self.size = size
 
 
 class LoadDagNode(MemDagNode):
     def __init__(self, value_types, operands, mem_operand):
-        super().__init__(VirtualDagOps.LOAD, value_types, operands)
-        self.mem_operand = mem_operand
+        super().__init__(VirtualDagOps.LOAD, value_types, operands, mem_operand)
 
     def get_label(self):
-        return f"load<>"
+        return f"load<(load {self.mem_operand.size})>"
 
     def __eq__(self, other):
         if not isinstance(other, LoadDagNode):
             return False
-        return self.mem_operand == other.mem_operand and super().__eq__(other)
+        return super().__eq__(other)
 
     def __hash__(self):
-        return hash((super().__hash__(), self.mem_operand))
+        return super().__hash__()
 
 
 class StoreDagNode(MemDagNode):
-    def __init__(self, value_types, operands):
+    def __init__(self, value_types, operands, mem_operand):
         super().__init__(VirtualDagOps.STORE, [
-            MachineValueType(ValueType.OTHER)], operands)
+            MachineValueType(ValueType.OTHER)], operands, mem_operand)
 
     def get_label(self):
-        return f"store<>"
+        return f"store<(store {self.mem_operand.size})>"
+
+    def __eq__(self, other):
+        if not isinstance(other, StoreDagNode):
+            return False
+        return super().__eq__(other)
+
+    def __hash__(self):
+        return super().__hash__()
 
 
 class RegisterDagNode(DagNode):
     def __init__(self, value_types, reg):
         super().__init__(VirtualDagOps.REGISTER, value_types, [])
+        assert(isinstance(reg, (MachineRegister, MachineVirtualRegister)))
         self.reg = reg
 
     def get_label(self):
@@ -344,18 +363,19 @@ class GlobalAddressDagNode(DagNode):
     def __eq__(self, other):
         if not isinstance(other, GlobalAddressDagNode):
             return False
-        return self.value == other.value and self.value_types[0] == other.value_types[0]
+        return self.value == other.value and self.value_types[0] == other.value_types[0] and self.target_flags == other.target_flags
 
     def __hash__(self):
-        return hash((super().__hash__(), self.value))
+        return hash((super().__hash__(), self.value, self.target_flags))
 
 
 class ExternalSymbolDagNode(DagNode):
-    def __init__(self, is_target, symbol: str, value_type):
+    def __init__(self, is_target, symbol: str, value_type, target_flags):
         assert(isinstance(value_type, MachineValueType))
         opcode = VirtualDagOps.TARGET_EXTERNAL_SYMBOL if is_target else VirtualDagOps.EXTERNAL_SYMBOL
         super().__init__(opcode, [value_type], [])
         self.symbol = symbol
+        self.target_flags = target_flags
 
     def get_label(self):
         return f"{self.opcode.value}<{self.symbol}>"
@@ -389,7 +409,7 @@ class FrameIndexDagNode(DagNode):
 
 
 class ConstantPoolDagNode(DagNode):
-    def __init__(self, is_target: bool, value_types, constant, align: int = 0):
+    def __init__(self, is_target: bool, value_types, constant, align: int = 0, target_flags=0):
         from codegen.mir import MachineConstantPoolValue
         assert(isinstance(constant, (Constant, MachineConstantPoolValue)))
         assert(len(value_types) == 1)
@@ -397,6 +417,7 @@ class ConstantPoolDagNode(DagNode):
         super().__init__(opcode, value_types, [])
         self.constant = constant
         self.align = align
+        self.target_flags = target_flags
 
     def get_label(self):
         return f"{self.opcode.value}<{self.constant}>"
@@ -406,12 +427,12 @@ class ConstantPoolDagNode(DagNode):
         return self.constant
 
     def __hash__(self):
-        return hash((super().__hash__(), self.constant))
+        return hash((super().__hash__(), self.constant, self.target_flags))
 
     def __eq__(self, other):
         if not isinstance(other, ConstantPoolDagNode):
             return False
-        return self.opcode == other.opcode and self.value_types[0] == other.value_types[0] and self.constant == other.constant
+        return self.opcode == other.opcode and self.value_types[0] == other.value_types[0] and self.constant == other.constant and self.target_flags == other.target_flags
 
 
 class ConstantDagNode(DagNode):
@@ -584,27 +605,46 @@ class Dag:
         node = self.append_node(node)
         return node
 
-    def add_load_node(self, value_ty: MachineValueType, chain, ptr, is_volatile, ptr_info=None):
+    def add_load_node(self, value_ty: MachineValueType, chain, ptr, is_volatile, ptr_info=None, mem_value_ty=None, mem_operand=None):
         assert(isinstance(value_ty, MachineValueType))
-        undef = DagValue(self.add_undef(ptr.ty), 0)
+
+        if not mem_operand:
+            if not mem_value_ty:
+                mem_value_ty = value_ty
+
+            mem_operand = MachineMemOperand(
+                ptr_info, mem_value_ty.get_size_in_byte())
+
+        offset = DagValue(self.add_undef(ptr.ty), 0)
         node = LoadDagNode(
-            [value_ty, MachineValueType(ValueType.OTHER)], [chain, ptr, undef], MachineMemOperand(ptr_info))
+            [value_ty, MachineValueType(ValueType.OTHER)], [chain, ptr, offset], mem_operand)
         node = self.append_node(node)
 
         if is_volatile:
             self.root = DagValue(node, 1)
         return node
 
-    def add_store_node(self, chain: DagValue, ptr: DagValue, value: DagValue):
+    def add_store_node(self, chain: DagValue, ptr: DagValue, value: DagValue, is_volatile=True, ptr_info=None, mem_value_ty=None, mem_operand=None):
         assert(chain.ty == MachineValueType(ValueType.OTHER))
         assert(ptr.ty != MachineValueType(ValueType.OTHER))
         assert(value.ty != MachineValueType(ValueType.OTHER))
 
+        value_ty = value.ty
+
+        if not mem_value_ty:
+            mem_value_ty = value_ty
+
+        if not mem_operand:
+            mem_operand = MachineMemOperand(
+                ptr_info, mem_value_ty.get_size_in_byte())
+
+        offset = DagValue(self.add_undef(ptr.ty), 0)
         node = StoreDagNode([MachineValueType(ValueType.OTHER)], [
-                            chain, value, ptr])
+                            chain, value, ptr, offset], mem_operand)
         node = self.append_node(node)
 
-        self.root = DagValue(node, 0)
+        if is_volatile:
+            self.root = DagValue(node, 0)
         return node
 
     def add_frame_index_node(self, ptr_ty, index, is_target=False):
@@ -613,9 +653,10 @@ class Dag:
         node = self.append_node(node)
         return node
 
-    def add_constant_pool_node(self, value_ty: MachineValueType, value, is_target=False, align=0):
+    def add_constant_pool_node(self, value_ty: MachineValueType, value, is_target=False, align=0, target_flags=0):
         assert(isinstance(value_ty, MachineValueType))
-        node = ConstantPoolDagNode(is_target, [value_ty], value, align)
+        node = ConstantPoolDagNode(
+            is_target, [value_ty], value, align, target_flags)
         node = self.append_node(node)
         return node
 
@@ -665,22 +706,22 @@ class Dag:
         node = self.append_node(node)
         return node
 
-    def add_global_address_node(self, value_ty, value, target, target_flags=0):
+    def add_global_address_node(self, value_ty, value, is_target, target_flags=0):
         assert(isinstance(value_ty, MachineValueType))
 
         if value.is_thread_local:
-            opcode = VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS if target else VirtualDagOps.GLOBAL_TLS_ADDRESS
+            opcode = VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS if is_target else VirtualDagOps.GLOBAL_TLS_ADDRESS
         else:
-            opcode = VirtualDagOps.TARGET_GLOBAL_ADDRESS if target else VirtualDagOps.GLOBAL_ADDRESS
+            opcode = VirtualDagOps.TARGET_GLOBAL_ADDRESS if is_target else VirtualDagOps.GLOBAL_ADDRESS
 
         node = GlobalAddressDagNode(opcode, [value_ty], value, target_flags)
         node = self.append_node(node)
         return node
 
-    def add_external_symbol_node(self, value_ty, symbol: str, is_target=False):
+    def add_external_symbol_node(self, value_ty, symbol: str, is_target=False, target_flags=0):
         assert(isinstance(value_ty, MachineValueType))
 
-        node = ExternalSymbolDagNode(is_target, symbol, value_ty)
+        node = ExternalSymbolDagNode(is_target, symbol, value_ty, target_flags)
         node = self.append_node(node)
         return node
 

@@ -37,13 +37,17 @@ class FastRegisterAllocation(MachineFunctionPass):
         live_reg = self.live_regs[reg]
         phys_reg = live_reg.phys_reg
 
+        hwmode = inst.mbb.func.target_info.hwmode
+
         if not phys_reg:
             return
 
         if live_reg.dirty:
             regclass = reg.regclass
             align = int(regclass.align / 8)
-            size = regclass.tys[0].get_size_in_bits()
+
+            tys = regclass.get_types(hwmode)
+            size = tys[0].get_size_in_bits()
             size = int(int((size + 7) / 8))
 
             stack_slot = live_reg.stack_slot

@@ -145,6 +145,8 @@ DPR = def_arm_regclass("DPR", [ValueType.F64, ValueType.V2F32], 64, [
 QPR = def_arm_regclass("QPR", [ValueType.V4F32, ValueType.V2F64], 128, [
     globals()[f"Q{idx}"] for idx in range(15)])
 
+ARM = MachineHWMode("arm")
+
 # build register graph
 reg_graph = compute_reg_graph()
 reg_groups = compute_reg_groups(reg_graph)
@@ -187,16 +189,6 @@ SORegImm = ARMMemOperandDef([GPR, I32Imm])
 arm_bl_target = ValueOperandDef(ValueType.I32)
 reglist = ValueOperandDef(ValueType.I32)
 cmovpred = ValueOperandDef(ValueType.I32)
-
-
-class SDNode:
-    def __init__(self, opcode):
-        self.opcode = opcode
-
-
-FrameIndex = SDNode(VirtualDagOps.FRAME_INDEX)
-ADD = SDNode(VirtualDagOps.ADD)
-SUB = SDNode(VirtualDagOps.SUB)
 
 
 class ARMDagOp(DagOp):

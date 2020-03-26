@@ -542,6 +542,12 @@ def setup_buildin_decls(sym_table):
 
     yield register_function_proto(proto, sym_table)
 
+    # fract
+    proto = FunctionProto(Type('float', None), Ident('glsl_fract'), [
+                          FunctionParam(Type('float', None), None, None)])
+
+    yield register_function_proto(proto, sym_table)
+
     # mod
     proto = FunctionProto(Type('float', None), Ident('glsl_mod'), [
                           FunctionParam(Type('float', None), None, None),

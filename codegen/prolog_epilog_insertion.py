@@ -53,6 +53,28 @@ class PrologEpilogInsertion(MachineFunctionPass):
                 stack_object.offset = offset
                 offset += stack_object.size
 
+    def allocate_stack_object_for_csr(self, func: MachineFunction):
+        reg_info = func.target_info.get_register_info()
+        frame_info = func.target_info.get_frame_lowering()
+        data_layout = func.func_info.func.module.data_layout
+
+        callee_save_regs = reg_info.get_callee_saved_regs()
+        callee_save_regs = frame_info.determinate_callee_saves(
+            func, callee_save_regs)
+
+        hwmode = func.target_info.hwmode
+
+        for reg in callee_save_regs:
+            regclass = reg_info.get_regclass_from_reg(reg)
+
+            mvt = regclass.get_types(hwmode)[0]
+
+            align = int(data_layout.get_pref_type_alignment(
+                mvt.get_ir_type()) / 8)
+            size = mvt.get_size_in_byte()
+
+            frame_idx = func.frame.create_stack_object(size, align)
+            func.frame.calee_save_info.append(CalleeSavedInfo(reg, frame_idx))
 
     def process_machine_function(self, mfunc: MachineFunction):
         self.target_lowering = mfunc.target_info.get_lowering()
@@ -60,6 +82,8 @@ class PrologEpilogInsertion(MachineFunctionPass):
 
         for bb in mfunc.bbs:
             self.process_basicblock(bb)
+
+        self.allocate_stack_object_for_csr(mfunc)
 
         self.insert_prolog_epilog(mfunc)
 

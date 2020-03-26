@@ -22,6 +22,7 @@ class InstructionSelection(MachineFunctionPass):
         self.data_layout = self.func.module.data_layout
         self.target_lowering = mfunc.target_info.get_lowering()
         self.func_info = mfunc.func_info
+        self.reg_info = mfunc.target_info.get_register_info()
 
         self.init()
         self.combine()
@@ -81,13 +82,20 @@ class InstructionSelection(MachineFunctionPass):
                     if len(value_types) > 1:
                         raise NotImplementedError()
 
+                    reg_info = self.reg_info
+
                     regs = []
                     for ty in value_types:
-                        vreg = self.target_lowering.get_machine_vreg(ty)
-                        regs.append(vreg)
+                        reg_vt = reg_info.get_register_type(ty)
+                        reg_count = reg_info.get_register_count(ty)
 
-                    self.func_info.reg_value_map[inst] = self.mfunc.reg_info.create_virtual_register(
-                        regs[0])
+                        for idx in range(reg_count):
+                            vreg = self.target_lowering.get_machine_vreg(
+                                reg_vt)
+                            regs.append(
+                                self.mfunc.reg_info.create_virtual_register(vreg))
+
+                    self.func_info.reg_value_map[inst] = regs
 
         for bb in self.func.bbs:
             dag_builder = self.dag_builders[bb]
@@ -240,11 +248,16 @@ class InstructionSelection(MachineFunctionPass):
 
     def do_legalize_type(self):
         def create_legalize_type_node(dag, results):
-            def legalize_type_node(node):
-                results[node] = self.legalizer.legalize_node_type(
+            def legalize_node_result(node):
+                new_node = self.legalizer.legalize_node_result(
                     node, dag, results)
 
-            return legalize_type_node
+                if new_node:
+                    results[node] = new_node
+                else:
+                    results[node] = node
+
+            return legalize_node_result
 
         changed = False
 
@@ -255,29 +268,41 @@ class InstructionSelection(MachineFunctionPass):
             self._bfs(dag.root.node, create_legalize_type_node(
                 dag, results), set())
 
-            operands = set()
+            nodes = set()
 
-            def collect_operands(node):
-                for operand in node.operands:
-                    operands.add(operand)
+            def collect_nodes(node):
+                nodes.add(node)
 
-            self._bfs(dag.root.node, collect_operands, set())
+            self._bfs(dag.root.node, collect_nodes, set())
 
-            operands.add(dag.root)
+            legalized = {}
+            for node in nodes:
+                for idx in range(len(node.operands)):
+                    new_node = self.legalizer.legalize_node_operand(
+                        node, idx, dag, results)
+
+                    if new_node:
+                        legalized[node] = new_node
 
             assignments = set()
-            for operand in operands:
-                assignments.add((operand, results[operand.node]))
+            for node in nodes:
+                for operand in node.operands:
+                    if operand.node in legalized:
+                        assignments.add((operand, legalized[operand.node]))
 
-            for old_node, new_node in results.items():
+            if dag.root.node in legalized:
+                assignments.add((dag.root, legalized[dag.root.node]))
+
+            for operand, new_node in assignments:
+                old_node = operand.node
+
                 if old_node is not new_node:
                     for op in old_node.uses:
                         new_node.uses.add(op)
 
-                changed |= old_node is not new_node
-
-            for operand, new_node in assignments:
                 operand.node = new_node
+
+                changed |= old_node is not new_node
 
             dag.remove_unreachable_nodes()
 

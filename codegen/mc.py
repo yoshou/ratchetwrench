@@ -255,6 +255,9 @@ class MCTargetExpr(MCExpr):
     def __init__(self):
         super().__init__(MCExprType.Target)
 
+    def evaluate_expr_as_relocatable(self, layout, fixup):
+        raise NotImplementedError()
+
 
 class MCOperandType(Enum):
     Invalid = auto()
@@ -465,6 +468,14 @@ class MCSymbolELF(MCSymbol):
         self.flags = other_flags | (((val >> 5) & 7) << 7)
 
 
+def get_global_prefix():
+    return ""
+
+
+def get_private_global_prefix():
+    return ".L"
+
+
 class MCContext:
     def __init__(self, obj_file_info):
         self.symbol_table = {}
@@ -479,7 +490,7 @@ class MCContext:
         return symbol
 
     def create_temp_symbol(self, name: str, always_add_suffix=True):
-        return self.create_symbol(".L" + name, always_add_suffix)
+        return self.create_symbol(get_private_global_prefix() + name, always_add_suffix)
 
     def create_symbol(self, name: str, always_add_suffix=False):
         is_temporary = False
@@ -492,7 +503,7 @@ class MCContext:
             self.name_ids[name] += 1
             name = name + str(self.name_ids[name])
 
-        if str(name).startswith(".L"):
+        if str(name).startswith(get_private_global_prefix()):
             is_temporary = True
 
         if self.obj_file_info.is_elf:

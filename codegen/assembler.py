@@ -10,6 +10,7 @@ from codegen.mc import (
 
 class MCAsmLayout:
     def __init__(self, asm):
+        self.asm = asm
         self.sections = list(sorted(asm.sections, key=lambda sec: sec.name))
         self.symbols = list(sorted(asm.symbols, key=lambda sym: sym.name))
 
@@ -113,6 +114,8 @@ def evaluate_expr_as_relocatable(expr: MCExpr, asm, layout: MCAsmLayout, fixup: 
         return create_mc_value(0, expr, None)
     elif expr.ty == MCExprType.Unary:
         raise NotImplementedError()
+    elif expr.ty == MCExprType.Target:
+        return expr.evaluate_expr_as_relocatable(layout, fixup)
     elif expr.ty == MCExprType.Binary:
         lhs, rhs = expr.operand1, expr.operand2
 

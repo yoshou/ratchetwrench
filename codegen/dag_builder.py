@@ -13,6 +13,100 @@ def align_offset(offset, align):
     return int(int((offset + align - 1) / align) * align)
 
 
+def get_copy_from_parts_vector(parts, part_vt, value_vt, dag):
+    from codegen.mir_emitter import get_vector_ty
+
+    if len(parts) > 1:
+        vec_vt = get_vector_ty(part_vt.value_type, len(parts))
+        assert(vec_vt == value_vt.value_type)
+
+        ops = parts
+
+        return DagValue(dag.add_node(VirtualDagOps.BUILD_VECTOR, [value_vt], *ops), 0)
+
+    raise NotImplementedError()
+
+
+def get_copy_from_parts(parts, part_vt, value_vt, dag):
+    if value_vt.is_vector:
+        return get_copy_from_parts_vector(parts, part_vt, value_vt, dag)
+
+    if len(parts) > 1:
+        raise NotImplementedError()
+
+    return parts[0]
+
+
+def get_copy_to_parts_vector(value, parts, part_vt, value_vt, chain, dag):
+    from codegen.mir_emitter import get_vector_ty
+
+    if len(parts) > 1:
+        vec_vt = get_vector_ty(part_vt.value_type, len(parts))
+        assert(vec_vt == value_vt.value_type)
+
+        for idx, part in enumerate(parts):
+            idx_val = DagValue(dag.add_target_constant_node(
+                MachineValueType(ValueType.I32), ConstantInt(idx, i32)), 0)
+
+            elem = DagValue(dag.add_node(VirtualDagOps.EXTRACT_VECTOR_ELT, [
+                part_vt], value, idx_val), 0)
+            chain = DagValue(
+                dag.add_copy_to_reg_node(part, elem), 0)
+
+        return chain
+
+    raise NotImplementedError()
+
+
+def get_copy_to_parts(value, parts, part_vt, chain, dag):
+    value_vt = value.ty
+
+    if value_vt.is_vector:
+        return get_copy_to_parts_vector(value, parts, part_vt, value_vt, chain, dag)
+
+    if len(parts) > 1:
+        raise NotImplementedError()
+
+    chain = DagValue(
+        dag.add_copy_to_reg_node(parts[0], value), 0)
+    return chain
+
+
+def get_parts_to_copy_vector(value, num_parts, part_vt, value_vt, dag):
+    from codegen.mir_emitter import get_vector_ty
+
+    parts = []
+
+    if num_parts > 1:
+        vec_vt = get_vector_ty(part_vt.value_type, num_parts)
+        assert(vec_vt == value_vt.value_type)
+
+        for idx in range(num_parts):
+            idx_val = DagValue(dag.add_target_constant_node(
+                MachineValueType(ValueType.I32), ConstantInt(idx, i32)), 0)
+
+            elem = DagValue(dag.add_node(VirtualDagOps.EXTRACT_VECTOR_ELT, [
+                part_vt], value, idx_val), 0)
+
+            parts.append(elem)
+
+        return parts
+
+    raise NotImplementedError()
+
+
+def get_parts_to_copy(value, num_parts, part_vt, dag):
+    value_vt = value.ty
+
+    if value_vt.is_vector:
+        return get_parts_to_copy_vector(value, num_parts, part_vt, value_vt, dag)
+
+    if num_parts > 1:
+        raise NotImplementedError()
+
+    return [value]
+
+
 class DagBuilder:
     def __init__(self, mfunc, mbb_map, data_layout: DataLayout):
         self.data_layout = data_layout
@@ -23,6 +117,7 @@ class DagBuilder:
         self.condcodes = {}
         self.mfunc = mfunc
         self.target_lowering = mfunc.target_info.get_lowering()
+        self.reg_info = mfunc.target_info.get_register_info()
 
     def set_inst_value(self, inst, value):
         assert(isinstance(value, DagValue))
@@ -107,18 +202,30 @@ class DagBuilder:
             return self.inst_map[ir_value]
 
         if ir_value in self.func_info.reg_value_map:
-            vreg = self.func_info.reg_value_map[ir_value]
+            vregs = self.func_info.reg_value_map[ir_value]
 
-            value_types = compute_value_types(ir_value.ty, self.data_layout)
-            if len(value_types) > 1:
+            vts = compute_value_types(ir_value.ty, self.data_layout)
+            if len(vts) > 1:
                 raise NotImplementedError()
 
-            vt = value_types[0]
+            values = []
 
-            node = self.g.add_register_node(vt, vreg)
+            for val_idx, vt in enumerate(vts):
+                regs = []
 
-            node = self.g.add_copy_from_reg_node(vt, DagValue(node, 0))
-            self.inst_map[ir_value] = DagValue(node, 0)
+                reg_vt = self.target_lowering.get_register_type(vt)
+                reg_count = self.target_lowering.get_register_count(vt)
+
+                for reg_idx in range(reg_count):
+                    vreg = vregs[len(regs)]
+                    reg = DagValue(self.g.add_register_node(reg_vt, vreg), 0)
+                    regs.append(
+                        DagValue(self.g.add_copy_from_reg_node(reg.ty, reg), 0))
+
+                values.append(get_copy_from_parts(
+                    regs, reg_vt, vt, self.g))
+
+            self.inst_map[ir_value] = self.g.add_merge_values(values)
 
             return self.inst_map[ir_value]
 
@@ -220,13 +327,16 @@ class DagBuilder:
 
         values = []
         for i, vt in enumerate(vts):
+            offset_val = offsets[i]
+
             offset = self.get_or_create_constant(
-                ConstantInt(offsets[i], inst.rs.ty))
-            if offset != 0:
+                ConstantInt(offset_val, inst.rs.ty))
+            if offset_val != 0:
                 addr = DagValue(self.g.add_node(
                     VirtualDagOps.ADD, [rs.ty], rs, offset), 0)
             else:
                 addr = rs
+
             value = DagValue(self.g.add_load_node(
                 vt, self.root, addr, False), 0)
             values.append(value)
@@ -242,15 +352,19 @@ class DagBuilder:
 
         chains = []
         for i, vt in enumerate(vts):
+            offset_val = offsets[i]
+
             offset = self.get_or_create_constant(
-                ConstantInt(offsets[i], inst.rd.ty))
-            if offset.node.value.value != 0:
+                ConstantInt(offset_val, inst.rd.ty))
+
+            if offset_val != 0:
                 addr = DagValue(self.g.add_node(
                     VirtualDagOps.ADD, [rd.ty], rd, offset), 0)
             else:
                 addr = rd
+
             value = DagValue(self.g.add_store_node(
-                self.root, addr, DagValue(rs.node, i)), 0)
+                self.root, addr, DagValue(rs.node, i), mem_value_ty=vt), 0)
             chains.append(value)
 
         node = self.g.add_node(VirtualDagOps.TOKEN_FACTOR, [
@@ -322,7 +436,7 @@ class DagBuilder:
         vts = compute_value_types(inst.ty, self.data_layout)
 
         value = DagValue(self.g.add_node(
-            VirtualDagOps.INSERT_VECTOR_ELT, vts, vec, elem, idx), 0)
+            VirtualDagOps.EXTRACT_VECTOR_ELT, vts, vec, elem, idx), 0)
 
         self.set_inst_value(inst, value)
 
@@ -546,14 +660,14 @@ class DagBuilder:
                 if phi in self.func_info.reg_value_map:
                     vreg = self.func_info.reg_value_map[phi]
                 else:
-                    vreg = MachineVirtualRegister(
-                        self.create_regs(phi.ty), len(self.func_info.reg_value_map))
+                    vreg = [MachineVirtualRegister(
+                        self.create_regs(phi.ty), len(self.func_info.reg_value_map))]
 
                     self.func_info.reg_value_map[phi] = vreg
 
                 vts = compute_value_types(phi.ty, self.data_layout)
                 src = self.get_value(phi_value)
-                dst = DagValue(self.g.add_register_node(vts[0], vreg), 0)
+                dst = DagValue(self.g.add_register_node(vts[0], vreg[0]), 0)
 
                 node = self.g.add_copy_to_reg_node(dst, src)
 
@@ -603,12 +717,20 @@ class DagBuilder:
             if len(value_types) > 1:
                 raise NotImplementedError()
 
-            vreg = self.func_info.reg_value_map[inst]
+            vregs = self.func_info.reg_value_map[inst]
 
-            node = self.g.add_register_node(value_types[0], vreg)
+            for idx, vt in enumerate(value_types):
+                regs = []
 
-            src = self.get_value(inst)
+                reg_vt = self.target_lowering.get_register_type(vt)
+                reg_count = self.target_lowering.get_register_count(vt)
 
-            node = self.g.add_copy_to_reg_node(DagValue(node, 0), src)
+                for reg_idx in range(reg_count):
+                    vreg = vregs[len(regs)]
+                    regs.append(
+                        DagValue(self.g.add_register_node(reg_vt, vreg), 0))
 
-            self.root = DagValue(node, 0)
+                src = self.get_value(inst).get_value(idx)
+
+                self.root = get_copy_to_parts(
+                    src, regs, reg_vt, self.root, self.g)

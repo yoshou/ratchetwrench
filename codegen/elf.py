@@ -324,9 +324,9 @@ class RISCVELFObjectWriter(ELFObjectTargetWriter):
         super().__init__()
 
         self.os_abi = ELFOSABI_NONE
-        self.abi_version = 5
-        self.emachine = EM_ARM
-        self.flags = 0x5000000
+        self.abi_version = 0
+        self.emachine = EM_RISCV
+        self.flags = EF_RISCV_FLOAT_ABI_DOUBLE
         self.is_64bit = False
         self.has_relocation_addend = False
 
@@ -334,48 +334,36 @@ class RISCVELFObjectWriter(ELFObjectTargetWriter):
         modifier = target.access_variant
         kind = fixup.kind
 
-        from codegen.arm_asm_printer import ARMFixupKind
+        from codegen.riscv_asm_printer import RISCVFixupKind
 
         if is_pcrel:
-            if kind in [ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH]:
-                return R_ARM_JUMP24
-            elif kind in [ARMFixupKind.ARM_UNCOND_BL]:
-                return R_ARM_CALL
-            elif kind in [ARMFixupKind.ARM_MOVW_LO16]:
-                return R_ARM_MOVW_PREL_NC
-            elif kind in [ARMFixupKind.ARM_MOVT_HI16]:
-                return R_ARM_MOVT_PREL
+            if kind in [RISCVFixupKind.RISCV_BRANCH]:
+                return R_RISCV_BRANCH
+            elif kind in [RISCVFixupKind.RISCV_CALL]:
+                return R_RISCV_CALL
+            elif kind in [RISCVFixupKind.RISCV_JAL]:
+                return R_RISCV_JAL
+            elif kind in [RISCVFixupKind.RISCV_PCREL_HI20]:
+                return R_RISCV_PCREL_HI20
+            elif kind in [RISCVFixupKind.RISCV_PCREL_LO12_I]:
+                return R_RISCV_PCREL_LO12_I
+            elif kind in [RISCVFixupKind.RISCV_PCREL_LO12_S]:
+                return R_RISCV_PCREL_LO12_S
+            elif kind in [RISCVFixupKind.RISCV_TLS_GD_HI20]:
+                return R_RISCV_TLS_GD_HI20
             else:
                 raise NotImplementedError()
 
         # absolute
-        if kind in [ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH]:
-            return R_ARM_JUMP24
-        elif kind in [ARMFixupKind.ARM_UNCOND_BL]:
-            return R_ARM_CALL
-        elif kind in [ARMFixupKind.ARM_MOVW_LO16]:
-            return R_ARM_MOVW_ABS_NC
-        elif kind in [ARMFixupKind.ARM_MOVT_HI16]:
-            return R_ARM_MOVT_ABS
-        elif kind == MCFixupKind.Data_1:
-            if modifier == MCVariantKind.Non:
-                return R_ARM_ABS8
-            else:
-                raise NotImplementedError()
-        elif kind == MCFixupKind.Data_2:
-            if modifier == MCVariantKind.Non:
-                return R_ARM_ABS16
-            else:
-                raise NotImplementedError()
-        elif kind == MCFixupKind.Data_4:
-            if modifier == MCVariantKind.Non:
-                return R_ARM_NONE
-            elif modifier == MCVariantKind.TLSGD:
-                return R_ARM_TLS_GD32
-            else:
-                raise NotImplementedError()
-        else:
-            raise NotImplementedError()
+
+        if kind in [RISCVFixupKind.RISCV_HI20]:
+            return R_RISCV_HI20
+        elif kind in [RISCVFixupKind.RISCV_LO12_I]:
+            return R_RISCV_LO12_I
+        elif kind in [RISCVFixupKind.RISCV_LO12_S]:
+            return R_RISCV_LO12_S
+
+        raise NotImplementedError()
 
 
 ELF_MAGIC = bytes([0x7f, ord('E'), ord('L'), ord('F')])
@@ -939,6 +927,81 @@ R_ARM_THM_BF12 = 0x89
 R_ARM_THM_BF18 = 0x8a
 R_ARM_IRELATIVE = 0xa0
 
+EF_ARM_SOFT_FLOAT = 0x00000200     # Legacy pre EABI_VER5
+EF_ARM_ABI_FLOAT_SOFT = 0x00000200  # EABI_VER5
+EF_ARM_VFP_FLOAT = 0x00000400      # Legacy pre EABI_VER5
+EF_ARM_ABI_FLOAT_HARD = 0x00000400  # EABI_VER5
+EF_ARM_EABI_UNKNOWN = 0x00000000
+EF_ARM_EABI_VER1 = 0x01000000
+EF_ARM_EABI_VER2 = 0x02000000
+EF_ARM_EABI_VER3 = 0x03000000
+EF_ARM_EABI_VER4 = 0x04000000
+EF_ARM_EABI_VER5 = 0x05000000
+EF_ARM_EABIMASK = 0xFF000000
+
+EF_RISCV_RVC = 0x0001
+EF_RISCV_FLOAT_ABI = 0x0006
+EF_RISCV_FLOAT_ABI_SOFT = 0x0000
+EF_RISCV_FLOAT_ABI_SINGLE = 0x0002
+EF_RISCV_FLOAT_ABI_DOUBLE = 0x0004
+EF_RISCV_FLOAT_ABI_QUAD = 0x0006
+EF_RISCV_RVE = 0x0008
+
+R_RISCV_NONE = 0
+R_RISCV_32 = 1
+R_RISCV_64 = 2
+R_RISCV_RELATIVE = 3
+R_RISCV_COPY = 4
+R_RISCV_JUMP_SLOT = 5
+R_RISCV_TLS_DTPMOD32 = 6
+R_RISCV_TLS_DTPMOD64 = 7
+R_RISCV_TLS_DTPREL32 = 8
+R_RISCV_TLS_DTPREL64 = 9
+R_RISCV_TLS_TPREL32 = 10
+R_RISCV_TLS_TPREL64 = 11
+R_RISCV_BRANCH = 16
+R_RISCV_JAL = 17
+R_RISCV_CALL = 18
+R_RISCV_CALL_PLT = 19
+R_RISCV_GOT_HI20 = 20
+R_RISCV_TLS_GOT_HI20 = 21
+R_RISCV_TLS_GD_HI20 = 22
+R_RISCV_PCREL_HI20 = 23
+R_RISCV_PCREL_LO12_I = 24
+R_RISCV_PCREL_LO12_S = 25
+R_RISCV_HI20 = 26
+R_RISCV_LO12_I = 27
+R_RISCV_LO12_S = 28
+R_RISCV_TPREL_HI20 = 29
+R_RISCV_TPREL_LO12_I = 30
+R_RISCV_TPREL_LO12_S = 31
+R_RISCV_TPREL_ADD = 32
+R_RISCV_ADD8 = 33
+R_RISCV_ADD16 = 34
+R_RISCV_ADD32 = 35
+R_RISCV_ADD64 = 36
+R_RISCV_SUB8 = 37
+R_RISCV_SUB16 = 38
+R_RISCV_SUB32 = 39
+R_RISCV_SUB64 = 40
+R_RISCV_GNU_VTINHERIT = 41
+R_RISCV_GNU_VTENTRY = 42
+R_RISCV_ALIGN = 43
+R_RISCV_RVC_BRANCH = 44
+R_RISCV_RVC_JUMP = 45
+R_RISCV_RVC_LUI = 46
+R_RISCV_GPREL_I = 47
+R_RISCV_GPREL_S = 48
+R_RISCV_TPREL_I = 49
+R_RISCV_TPREL_S = 50
+R_RISCV_RELAX = 51
+R_RISCV_SUB6 = 52
+R_RISCV_SET6 = 53
+R_RISCV_SET8 = 54
+R_RISCV_SET16 = 55
+R_RISCV_SET32 = 56
+R_RISCV_32_PCREL = 57
+
 
 class ELFObjectWriter(MCObjectWriter):
     def __init__(self, output, target_writer):
@@ -1157,8 +1220,8 @@ class ELFObjectWriter(MCObjectWriter):
                                 size, other, symbol_data.section_index, False)
 
     def is_in_symtab(self, layout, symbol: MCSymbol, used, renamed):
-        if symbol.temporary:
-            return False
+        # if symbol.temporary:
+        #     return False
 
         return True
 
@@ -1492,14 +1555,6 @@ class ARMELFTargetObjectFile(MCObjectFileInfo):
             ".data", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC)
         self._rodata_section = create_elf_section(
             ".rodata", SHT_PROGBITS, SHF_ALLOC)
-        self._mergeable_const4_section = create_elf_section(
-            ".rodata.cst4", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 4)
-        self._mergeable_const8_section = create_elf_section(
-            ".rodata.cst8", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8)
-        self._mergeable_const16_section = create_elf_section(
-            ".rodata.cst16", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 16)
-        self._mergeable_const32_section = create_elf_section(
-            ".rodata.cst32", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 32)
 
         self._tls_bss_section = create_elf_section(
             ".tbss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS)
@@ -1528,19 +1583,6 @@ class ARMELFTargetObjectFile(MCObjectFileInfo):
 
     def get_section_for_const(self, section_kind: SectionKind, value, align):
         return self._text_section
-
-        if section_kind == SectionKind.MergeableConst4:
-            return self._mergeable_const4_section
-        elif section_kind == SectionKind.MergeableConst8:
-            return self._mergeable_const8_section
-        elif section_kind == SectionKind.MergeableConst16:
-            return self._mergeable_const15_section
-        elif section_kind == SectionKind.MergeableConst32:
-            return self._mergeable_const32_section
-        elif section_kind == SectionKind.ReadOnly:
-            return self._rodata_section
-
-        raise ValueError("Invalid section kind.")
 
     @property
     def is_elf(self):
@@ -1561,16 +1603,10 @@ class RISCVELFTargetObjectFile(MCObjectFileInfo):
             ".bss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC)
         self._data_section = create_elf_section(
             ".data", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC)
+        self._sdata_section = create_elf_section(
+            ".sdata", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC)
         self._rodata_section = create_elf_section(
             ".rodata", SHT_PROGBITS, SHF_ALLOC)
-        self._mergeable_const4_section = create_elf_section(
-            ".rodata.cst4", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 4)
-        self._mergeable_const8_section = create_elf_section(
-            ".rodata.cst8", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8)
-        self._mergeable_const16_section = create_elf_section(
-            ".rodata.cst16", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 16)
-        self._mergeable_const32_section = create_elf_section(
-            ".rodata.cst32", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 32)
 
         self._tls_bss_section = create_elf_section(
             ".tbss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS)
@@ -1599,19 +1635,7 @@ class RISCVELFTargetObjectFile(MCObjectFileInfo):
 
     def get_section_for_const(self, section_kind: SectionKind, value, align):
         return self._text_section
-
-        if section_kind == SectionKind.MergeableConst4:
-            return self._mergeable_const4_section
-        elif section_kind == SectionKind.MergeableConst8:
-            return self._mergeable_const8_section
-        elif section_kind == SectionKind.MergeableConst16:
-            return self._mergeable_const15_section
-        elif section_kind == SectionKind.MergeableConst32:
-            return self._mergeable_const32_section
-        elif section_kind == SectionKind.ReadOnly:
-            return self._rodata_section
-
-        raise ValueError("Invalid section kind.")
+        return self._sdata_section
 
     @property
     def is_elf(self):

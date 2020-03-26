@@ -353,12 +353,21 @@ class MachineFunction:
 
         f.write('\n')
 
+    def print_frame_info(self, f):
+        f.write("  stack:\n")
+        for idx, stack_object in enumerate(self.frame.stack_object[self.frame.fixed_count:]):
+            f.write("    ")
+            f.write(
+                f"id : {idx}, offset = {stack_object.offset}, size = {stack_object.size}, align = {stack_object.align}")
+            f.write("\n")
+
     def print(self, f):
         slot_id_map = {}
 
         f.write('\n')
         f.write('function({}): # {}\n'.format(
             id(self), self.func_info.func.name))
+        self.print_frame_info(f)
         for bb in self.bbs:
             f.write('\n')
             f.write('  bb({}):\n'.format(id(bb)))
@@ -375,6 +384,21 @@ class MachineBasicBlock:
 
         self.successors = []
         self.predecessors = []
+
+    def split_basic_block(self, inst):
+        new_mbb = MachineBasicBlock(self.func)
+
+        split_idx = self._insts.index(inst)
+        for inst in self._insts[split_idx:]:
+            new_mbb._insts.append(inst)
+            inst.mbb = new_mbb
+
+        for idx in reversed(range(split_idx, len(self._insts))):
+            self._insts.pop(idx)
+
+        self.func.bbs.insert(self.number + 1, new_mbb)
+
+        return new_mbb
 
     def append_inst(self, inst):
         self.insert_inst(inst, len(self._insts))
@@ -630,8 +654,8 @@ class MOImm(MachineOperand):
 
 
 class MOBasicBlock(MachineOperand):
-    def __init__(self, mbb):
-        super().__init__()
+    def __init__(self, mbb, target_flags):
+        super().__init__(target_flags)
         self.mbb = mbb
 
     def print(self, f, slot_id_map):
@@ -666,8 +690,8 @@ class MOTargetIndex(MachineOperand):
 
 
 class MOExternalSymbol(MachineOperand):
-    def __init__(self, symbol):
-        super().__init__()
+    def __init__(self, symbol, target_flags=0):
+        super().__init__(target_flags)
         self.symbol = symbol
         self.offset = 0
 
@@ -783,8 +807,8 @@ class MachineInstruction:
     def add_global_address(self, value, target_flags=0):
         return self.add_operand(MOGlobalAddress(value, 0, target_flags))
 
-    def add_mbb(self, value):
-        return self.add_operand(MOBasicBlock(value))
+    def add_mbb(self, value, target_flags=0):
+        return self.add_operand(MOBasicBlock(value, target_flags))
 
     def add_frame_index(self, value):
         return self.add_operand(MOFrameIndex(value))
@@ -795,8 +819,8 @@ class MachineInstruction:
     def add_constant_pool_index(self, value, target_flags=0):
         return self.add_operand(MOConstantPoolIndex(value, target_flags))
 
-    def add_external_symbol(self, value):
-        return self.add_operand(MOExternalSymbol(value))
+    def add_external_symbol(self, value, target_flags=0):
+        return self.add_operand(MOExternalSymbol(value, target_flags))
 
     def insert_before(self, inst):
         if inst.mbb is None:

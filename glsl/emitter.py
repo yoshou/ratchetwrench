@@ -8,16 +8,6 @@ from ir.data_layout import *
 import ast
 
 
-def require_struct_returning(return_ty, ctx):
-    assert(isinstance(return_ty, Type))
-    if isinstance(return_ty, CompositeType):
-        size, align = ctx.module.data_layout.get_type_size_in_bits(return_ty)
-        if int(size / 8) > 16:
-            return True
-
-    return False
-
-
 def evaluate_constant_expr(ctx, expr):
     if isinstance(expr, TypedFunctionCall):
         if expr.ident.name.name == "vec3":
@@ -134,17 +124,21 @@ class Context:
             return void
 
         if isinstance(ast_ty, ast.types.FunctionType):
-            func_info = compute_arg_result_info(self, ast_ty)
+            func_info = compute_func_info(self, ast_ty)
 
+            params_ty = []
+
+            return_ty = func_info.return_info.ty
             if func_info.return_info.kind == ABIArgKind.Direct:
-                return_ty = func_info.return_info.ty
+                pass
             elif func_info.return_info.kind in [ABIArgKind.Indirect, ABIArgKind.Ignore]:
+                params_ty.append(return_ty)
                 return_ty = void
             else:
                 raise NotImplementedError()
 
-            params_ty = [self.get_ir_type(ast_param_ty)
-                         for (ast_param_ty, _, _) in ast_ty.params]
+            params_ty.extend([self.get_ir_type(ast_param_ty)
+                              for (ast_param_ty, _, _) in ast_ty.params])
 
             return FunctionType(ast_ty.name, return_ty, params_ty)
 
@@ -197,10 +191,6 @@ def get_lvalue(node, block, ctx):
 
         return inst
 
-    if isinstance(node, TypedFunctionCall):
-        block, _ = build_ir_expr_func_call(node, block, ctx)
-        return ctx.named_values[node]
-
     if isinstance(node, TypedArrayIndexerOp):
         if node in ctx.named_values:
             return ctx.named_values[node]
@@ -219,34 +209,29 @@ def get_lvalue(node, block, ctx):
 
         return inst
 
+    if isinstance(node, (TypedBinaryOp, TypedFunctionCall)):
+        block, rhs = build_ir_expr(node, block, ctx)
+        mem = AllocaInst(
+            ctx.function.bbs[0].insts[0], ConstantInt(1, i32), rhs.ty, 0)
+        StoreInst(block, rhs, mem)
+        return mem
+
     print(node)
     raise Exception("Unreachable")
 
 
 def build_ir_assign_op(lhs_node, rhs, block, ctx):
-    node_ty = rhs.ty
-    if require_struct_returning(node_ty, ctx):
-        lhs = get_lvalue(lhs_node, block, ctx)
+    lhs = get_lvalue(lhs_node, block, ctx)
 
-        size, align = ctx.module.data_layout.get_type_size_in_bits(
+    if lhs.ty.elem_ty != rhs.ty:
+        src_size = ctx.module.data_layout.get_type_alloc_size(rhs.ty)
+        dst_size = ctx.module.data_layout.get_type_alloc_size(
             lhs.ty.elem_ty)
-        rhs = BitCastInst(block, rhs, PointerType(i8, 0))
-        lhs = BitCastInst(block, lhs, PointerType(i8, 0))
-
-        memcpy = ctx.get_memcpy_func(lhs, rhs, size)
-        return block, CallInst(block, memcpy, [lhs, rhs, ConstantInt(int(size / 8), i32), ConstantInt(int(align / 8), i32), ConstantInt(0, i1)])
-    else:
-        lhs = get_lvalue(lhs_node, block, ctx)
-
-        if lhs.ty.elem_ty != rhs.ty:
-            src_size = ctx.module.data_layout.get_type_alloc_size(rhs.ty)
-            dst_size = ctx.module.data_layout.get_type_alloc_size(
-                lhs.ty.elem_ty)
-            if src_size <= dst_size:
-                lhs = BitCastInst(block, lhs, PointerType(rhs.ty, 0))
-            else:
-                raise NotImplementedError()
-        return block, StoreInst(block, rhs, lhs)
+        if src_size <= dst_size:
+            lhs = BitCastInst(block, lhs, PointerType(rhs.ty, 0))
+        else:
+            raise NotImplementedError()
+    return block, StoreInst(block, rhs, lhs)
 
 
 def build_ir_expr_assign_op(node, block, ctx):
@@ -441,15 +426,20 @@ def build_ir_expr_arith_op(node, block, ctx):
 
     if result_ty != lhs.ty:
         if isinstance(result_ty, VectorType):
-            assert(result_ty.elem_ty == lhs.ty)
+            if result_ty.elem_ty == lhs.ty:
+                elem = lhs
+                vec = InsertElementInst(block, get_constant_null_value(
+                    result_ty), elem, ConstantInt(0, i32))
 
-            elem = lhs
-            vec = InsertElementInst(block, get_constant_null_value(
-                result_ty), elem, ConstantInt(0, i32))
-
-            for i in range(1, result_ty.size):
-                vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
-            lhs = vec
+                for i in range(1, result_ty.size):
+                    vec = InsertElementInst(
+                        block, vec, elem, ConstantInt(i, i32))
+                lhs = vec
+            else:
+                src_size = ctx.module.data_layout.get_type_alloc_size(lhs.ty)
+                dst_size = ctx.module.data_layout.get_type_alloc_size(
+                    result_ty)
+                raise NotImplementedError()
         else:
             raise NotImplementedError()
 
@@ -588,27 +578,44 @@ def build_ir_expr_func_call(node, block, ctx):
 
     params = []
 
+    func_info = compute_func_info(ctx, node.ident.ty)
+
     return_ty = ctx.get_ir_type(node.type)
 
-    if require_struct_returning(return_ty, ctx) and not isinstance(node.type, ast.types.VoidType):
+    if func_info.return_info.kind == ABIArgKind.Indirect:
         mem = ctx.named_values[node]
         params.append(mem)
 
         return_mem = mem
 
     for i, param in enumerate(node.params):
+        arg_info = func_info.arguments[i]
         param_ty = ctx.get_ir_type(param.type)
 
-        if require_struct_returning(param_ty, ctx):
+        if arg_info.kind == ABIArgKind.Indirect:
             val = get_lvalue(param, block, ctx)
         else:
-            block, val = build_ir_expr(param, block, ctx)
+            if param_ty != arg_info.ty:
+                src_size = ctx.module.data_layout.get_type_alloc_size(
+                    arg_info.ty)
+                dst_size = ctx.module.data_layout.get_type_alloc_size(
+                    param_ty)
+                if src_size <= dst_size:
+                    val = get_lvalue(param, block, ctx)
+                    val = BitCastInst(block, val, PointerType(arg_info.ty, 0))
+                    val = LoadInst(block, val)
+                else:
+                    raise NotImplementedError()
+            else:
+                block, val = build_ir_expr(param, block, ctx)
+
         params.append(val)
 
     call_inst = CallInst(block, ctx.funcs[node.ident.name], params)
 
-    if require_struct_returning(return_ty, ctx):
-        return block, return_mem
+    if func_info.return_info.kind == ABIArgKind.Indirect:
+        value = LoadInst(block, return_mem)
+        return block, value
 
     return block, call_inst
 
@@ -917,7 +924,9 @@ if TARGET_GPU == 1:
 else:
     def build_ir_return_stmt(node, block, ctx):
         return_ty = ctx.get_ir_type(node.expr.type)
-        if require_struct_returning(return_ty, ctx):
+
+        func_info = ctx.func_info
+        if func_info.return_info.kind == ABIArgKind.Indirect:
             rhs = get_lvalue(node.expr, block, ctx)
             lhs = ctx.return_value
 
@@ -1013,24 +1022,26 @@ def build_ir_stack_alloc(node, block, ctx):
     # Allocate return value of all callee functions.
     if isinstance(node, TypedFunctionCall):
         return_ty = ctx.get_ir_type(node.ident.ty.return_ty)
-        if require_struct_returning(return_ty, ctx):
+        func_info = compute_func_info(ctx, node.ident.ty)
+        if func_info.return_info.kind == ABIArgKind.Indirect:
             mem = AllocaInst(block, ConstantInt(1, i32), return_ty, 0)
             ctx.named_values[node] = mem
 
 
 def build_ir_func_header(node, func, ctx):
-    func_info = compute_arg_result_info(ctx, node.ident.ty)
+    func_info = compute_func_info(ctx, node.ident.ty)
 
-    return_ty = ctx.get_ir_type(node.ident.ty.return_ty)
-    if require_struct_returning(return_ty, ctx):
+    return_ty = ctx.get_ir_type(node.type)
+
+    if func_info.return_info.kind == ABIArgKind.Indirect:
         ir_arg = Argument(PointerType(return_ty, 0))
         ir_arg.add_attribute(Attribute(AttributeKind.StructRet))
         ctx.return_value = ir_arg
         func.add_arg(ir_arg)
 
-    for arg_ty, arg_quals, arg_name in node.params:
-        param_ty = ctx.get_ir_type(arg_ty)
-        if require_struct_returning(param_ty, ctx):
+    for (arg_ty, arg_quals, arg_name), arg_info in zip(node.params, func_info.arguments):
+        param_ty = arg_info.ty
+        if arg_info.kind == ABIArgKind.Indirect:
             ir_arg = ir_arg_ptr = Argument(PointerType(param_ty, 0), arg_name)
         else:
             ir_arg = Argument(param_ty, arg_name)
@@ -1038,30 +1049,40 @@ def build_ir_func_header(node, func, ctx):
 
 
 def build_ir_func(node, block, ctx):
-    func_info = compute_arg_result_info(ctx, node.proto.ident.ty)
+    func_info = compute_func_info(ctx, node.proto.ident.ty)
+    ctx.func_info = func_info
 
-    return_ty = ctx.get_ir_type(node.proto.ident.ty.return_ty)
-    if require_struct_returning(return_ty, ctx):
+    return_ty = ctx.get_ir_type(node.proto.type)
+
+    if func_info.return_info.kind == ABIArgKind.Indirect:
         ir_arg = Argument(PointerType(return_ty, 0))
         ir_arg.add_attribute(Attribute(AttributeKind.StructRet))
         ctx.return_value = ir_arg
         block.func.add_arg(ir_arg)
 
-    for arg in node.params:
+    for arg, arg_info in zip(node.params, func_info.arguments):
         param_ty = ctx.get_ir_type(arg.ty)
-        if require_struct_returning(param_ty, ctx):
-            ir_arg = ir_arg_ptr = Argument(PointerType(param_ty, 0), arg.name)
+        coerced_param_ty = arg_info.ty
+        if arg_info.kind == ABIArgKind.Indirect:
+            ir_arg = ir_arg_ptr = Argument(
+                PointerType(param_ty, 0), arg.name)
         else:
-            ir_arg = Argument(param_ty, arg.name)
+            ir_arg = Argument(coerced_param_ty, arg.name)
             ir_arg_ptr = AllocaInst(block, ConstantInt(1, i32), param_ty, 0)
-            StoreInst(block, ir_arg, ir_arg_ptr)
+
+            ir_arg_mem_ptr = ir_arg_ptr
+
+            if coerced_param_ty != param_ty:
+                ir_arg_mem_ptr = BitCastInst(
+                    block, ir_arg_mem_ptr, PointerType(coerced_param_ty, 0))
+            StoreInst(block, ir_arg, ir_arg_mem_ptr)
 
         ctx.named_values[arg] = ir_arg_ptr
         block.func.add_arg(ir_arg)
 
     block_end = BasicBlock(block.func)
 
-    if require_struct_returning(return_ty, ctx) or isinstance(return_ty, (VoidType)):
+    if func_info.return_info.kind in [ABIArgKind.Indirect, ABIArgKind.Ignore]:
         ReturnInst(block_end, None)
     else:
         ctx.return_value = AllocaInst(block, ConstantInt(1, i32), return_ty, 0)
@@ -1075,7 +1096,7 @@ def build_ir_func(node, block, ctx):
                     func_info.return_info.ty)
                 if src_size >= dst_size:
                     coerced_value = BitCastInst(
-                        block_end, ctx.return_value, PointerType(func_info.return_info.ty))
+                        block_end, ctx.return_value, PointerType(func_info.return_info.ty, 0))
                     return_value = LoadInst(block_end, coerced_value)
                 else:
                     raise NotImplementedError()
@@ -1351,6 +1372,9 @@ class WinX86_64ABIInfo(ABIInfo):
 
         raise NotImplementedError()
 
+    def compute_return_info(self, ctx, ty):
+        return self.compute_arg_info(ctx, ty)
+
 
 class EABIABIInfo(ABIInfo):
     def __init__(self):
@@ -1380,6 +1404,9 @@ class EABIABIInfo(ABIInfo):
 
         raise NotImplementedError()
 
+    def compute_return_info(self, ctx, ty):
+        return self.compute_arg_info(ctx, ty)
+
 
 class RISCVABIInfo(ABIInfo):
     def __init__(self, xlen):
@@ -1387,7 +1414,7 @@ class RISCVABIInfo(ABIInfo):
 
         self.xlen = xlen
 
-    def compute_arg_info(self, ctx, ty: FunctionType):
+    def classify_arg_type(self, ctx, ty):
         if isinstance(ty, ast.types.VoidType):
             return ABIArgInfo(ABIArgKind.Ignore)
 
@@ -1395,21 +1422,72 @@ class RISCVABIInfo(ABIInfo):
             return ABIArgInfo(ABIArgKind.Direct)
 
         if isinstance(ty, ast.types.VectorType):
-            ir_ty = ctx.get_ir_type(ty)
-            if is_x86_mmx_type(ir_ty):
-                return ABIArgInfo(ABIArgKind.Direct, get_integer_type(64))
+            type_info = get_type_info(ctx, ty)
+            width = type_info.witdh
 
-            return ABIArgInfo(ABIArgKind.Direct)
+            ir_ty = ctx.get_ir_type(ty)
+            if width <= self.xlen * 2:
+                if width <= self.xlen:
+                    return ABIArgInfo(ABIArgKind.Direct, get_integer_type(self.xlen))
+                if width <= self.xlen * 2:
+                    return ABIArgInfo(ABIArgKind.Direct, get_array_type(get_integer_type(self.xlen), 2))
+
+            return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
 
         type_info = get_type_info(ctx, ty)
         width = type_info.witdh
 
         if is_complex_type(ty):
-            if width > 128:
-                return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
-            return ABIArgInfo(ABIArgKind.Direct, get_integer_type(width))
+            ir_ty = ctx.get_ir_type(ty)
+            if width <= self.xlen * 2:
+                if width <= self.xlen:
+                    return ABIArgInfo(ABIArgKind.Direct, get_integer_type(self.xlen))
+                if width <= self.xlen * 2:
+                    return ABIArgInfo(ABIArgKind.Direct, get_array_type(get_integer_type(self.xlen), 2))
+
+            return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
 
         raise NotImplementedError()
+
+    def compute_arg_info(self, ctx, ty):
+        return self.classify_arg_type(ctx, ty)
+
+    def classify_return_type(self, ctx, ty):
+        if isinstance(ty, ast.types.VoidType):
+            return ABIArgInfo(ABIArgKind.Ignore)
+
+        if isinstance(ty, ast.types.PrimitiveType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if isinstance(ty, ast.types.VectorType):
+            type_info = get_type_info(ctx, ty)
+            width = type_info.witdh
+
+            ir_ty = ctx.get_ir_type(ty)
+            if width <= self.xlen * 2:
+                if width <= self.xlen:
+                    return ABIArgInfo(ABIArgKind.Direct, get_integer_type(self.xlen))
+                if width <= self.xlen * 2:
+                    return ABIArgInfo(ABIArgKind.Direct, get_array_type(get_integer_type(self.xlen), 2))
+
+            return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
+
+        type_info = get_type_info(ctx, ty)
+        width = type_info.witdh
+
+        if is_complex_type(ty):
+            if width <= self.xlen * 2:
+                if width <= self.xlen:
+                    return ABIArgInfo(ABIArgKind.Direct, get_integer_type(self.xlen))
+                if width <= self.xlen * 2:
+                    return ABIArgInfo(ABIArgKind.Direct, get_array_type(get_integer_type(self.xlen), 2))
+
+            return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
+
+        raise NotImplementedError()
+
+    def compute_return_info(self, ctx, ty):
+        return self.classify_return_type(ctx, ty)
 
 
 def compute_arg_result_info(ctx, func_ty):
@@ -1417,12 +1495,27 @@ def compute_arg_result_info(ctx, func_ty):
 
     func_info = FunctionInfo()
 
-    func_info.return_info = ctx.abi_info.compute_arg_info(ctx, return_ty)
+    func_info.return_info = ctx.abi_info.compute_return_info(ctx, return_ty)
 
     return_info = func_info.return_info
     if return_info.can_have_coerce_to_type and return_info.ty == None:
         return_info.ty = ctx.get_ir_type(return_ty)
         assert(return_info.ty is not None)
+
+    return func_info
+
+
+def compute_func_info(ctx, func_ty):
+    func_info = compute_arg_result_info(ctx, func_ty)
+
+    func_info.arguments = []
+    for (param_ty, _, _) in func_ty.params:
+        arg_info = ctx.abi_info.compute_arg_info(ctx, param_ty)
+
+        if arg_info.can_have_coerce_to_type and arg_info.ty == None:
+            arg_info.ty = ctx.get_ir_type(param_ty)
+            assert(arg_info.ty is not None)
+        func_info.arguments.append(arg_info)
 
     return func_info
 
@@ -1460,15 +1553,13 @@ def emit_ir(ast, abi, module):
                 else:
                     init = evaluate_constant_expr(ctx, init_expr)
 
-                linkage = GlobalLinkage.Local
+                linkage = GlobalLinkage.Global
                 if "uniform" in ident.val.ty_qual:
                     linkage = GlobalLinkage.Global
 
                 thread_local = ThreadLocalMode.GeneralDynamicTLSModel
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
-
-                thread_local = ThreadLocalMode.NotThreadLocal
 
                 global_named_values[ident.val] = module.add_global_variable(
                     GlobalVariable(ty, linkage, ident.val.name, thread_local, init))

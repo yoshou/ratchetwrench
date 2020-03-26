@@ -12,6 +12,10 @@ class RISCVOperandFlag(IntFlag):
     NONE = auto()
     LO = auto()
     HI = auto()
+    PCREL_LO = auto()
+    PCREL_HI = auto()
+    TLS_GD_HI = auto()
+    CALL = auto()
 
 
 def is_null_constant(value):
@@ -25,22 +29,6 @@ def is_null_fp_constant(value):
 class RISCVInstructionSelector(InstructionSelector):
     def __init__(self):
         super().__init__()
-
-    def select_setcc(self, node: DagNode, dag: Dag, new_ops):
-        condcode = new_ops[0]
-        cond = new_ops[1]
-
-        if isinstance(cond.node, DagNode):
-            value_ty = node.value_types[0]
-
-            zero = DagValue(dag.add_target_constant_node(value_ty, 0), 0)
-            zero = DagValue(dag.add_machine_dag_node(
-                RISCVMachineOps.MOVi16, [value_ty], zero), 0)
-            one = DagValue(dag.add_target_constant_node(value_ty, 1), 0)
-
-            return dag.add_machine_dag_node(RISCVMachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
-
-        raise NotImplementedError()
 
     def select_callseq_start(self, node: DagNode, dag: Dag, new_ops):
         chain = new_ops[0]
@@ -112,6 +100,10 @@ class RISCVInstructionSelector(InstructionSelector):
         value = DagValue(node, 0)
 
         def match_node(inst: MachineInstructionDef):
+            if inst.enabled:
+                if not inst.enabled(dag.mfunc.target_info):
+                    return None
+
             for pattern in inst.patterns:
                 _, res = pattern.match(None, [value], 0, dag)
                 if res:
@@ -139,48 +131,7 @@ class RISCVInstructionSelector(InstructionSelector):
             node.value_types[0], 0), 0)
         ops = [base, offset]
 
-        return dag.add_machine_dag_node(RISCVMachineOps.ADDri, node.value_types, *ops)
-
-    def select_vdup(self, node: DagNode, dag: Dag, new_ops):
-        in_type = node.operands[0].ty
-        out_type = node.value_types[0]
-
-        if in_type in SPR.tys and out_type.value_type == ValueType.V4F32:
-            lane = DagValue(dag.add_target_constant_node(
-                MachineValueType(ValueType.I32), 0), 0)
-            return dag.add_machine_dag_node(RISCVMachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
-
-        raise ValueError()
-
-    def select_insert_vector_elt(self, node: DagNode, dag: Dag, new_ops):
-        vec = node.operands[0]
-        elem = node.operands[1]
-        idx = node.operands[2]
-
-        if isinstance(idx.node, ConstantDagNode):
-            if node.value_types[0].value_type == ValueType.V4F32:
-                if elem.ty in SPR.tys:
-                    idx = DagValue(dag.add_target_constant_node(
-                        idx.ty, idx.node.value), 0)
-                    subreg_idx = idx.node.value.value
-                    if subreg_idx == 0:
-                        subreg = ssub_0
-                    elif subreg_idx == 1:
-                        subreg = ssub_1
-                    elif subreg_idx == 2:
-                        subreg = ssub_2
-                    elif subreg_idx == 3:
-                        subreg = ssub_3
-                    else:
-                        raise ValueError("Invalid index")
-
-                    subreg_id = DagValue(dag.add_target_constant_node(
-                        MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
-                    return dag.add_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, idx, subreg_id)
-
-        # TODO: Neet to implement indexing with variable. A solution is using memory.
-
-        raise NotImplementedError()
+        return dag.add_machine_dag_node(RISCVMachineOps.ADDI, node.value_types, *ops)
 
     def select(self, node: DagNode, dag: Dag):
         new_ops = node.operands
@@ -191,10 +142,7 @@ class RISCVInstructionSelector(InstructionSelector):
             VirtualDagOps.CALLSEQ_START: self.select_callseq_start,
             VirtualDagOps.CALLSEQ_END: self.select_callseq_end,
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
-            VirtualDagOps.INSERT_VECTOR_ELT: self.select_insert_vector_elt,
-            RISCVDagOps.SETCC: self.select_setcc,
-            RISCVDagOps.CALL: self.select_call,
-            RISCVDagOps.VDUP: self.select_vdup,
+            # RISCVDagOps.CALL: self.select_call,
         }
 
         if isinstance(node, MachineDagNode):
@@ -227,6 +175,10 @@ class RISCVInstructionSelector(InstructionSelector):
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_EXTERNAL_SYMBOL:
             return node
         elif node.opcode in SELECT_TABLE:
             select_func = SELECT_TABLE[node.opcode]
@@ -272,6 +224,7 @@ class RISCVCallingConv(CallingConv):
     def lower_return(self, builder: DagBuilder, inst: ReturnInst, g: Dag):
         mfunc = g.mfunc
         calling_conv = mfunc.target_info.get_calling_conv()
+        target_lowering = mfunc.target_info.get_lowering()
         reg_info = mfunc.target_info.get_register_info()
         data_layout = builder.data_layout
 
@@ -290,8 +243,8 @@ class RISCVCallingConv(CallingConv):
 
             # Analyze return value
             for val_idx, vt in enumerate(return_vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
+                reg_vt = target_lowering.get_register_type(vt)
+                reg_count = target_lowering.get_register_count(vt)
 
                 for reg_idx in range(reg_count):
                     flags = CCArgFlags()
@@ -306,20 +259,6 @@ class RISCVCallingConv(CallingConv):
             ccstate.compute_returns_layout(returns)
 
             # Handle return values
-            ret_parts = []
-            ret_value = builder.get_value(inst.rs)
-            idx = 0
-            for val_idx, vt in enumerate(return_vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
-
-                if reg_count > 1:
-                    raise NotImplementedError()
-
-                ret_parts.append(ret_value.get_value(idx))
-
-                idx += reg_count
-
             reg_vals = []
             for idx, ret_val in enumerate(ccstate.values):
                 assert(isinstance(ret_val, CCArgReg))
@@ -327,12 +266,22 @@ class RISCVCallingConv(CallingConv):
 
                 reg_val = DagValue(
                     g.add_target_register_node(ret_vt, ret_val.reg), 0)
-                copy_val = ret_parts[idx]
 
-                chain = DagValue(
-                    builder.g.add_copy_to_reg_node(reg_val, copy_val), 0)
-                builder.root = chain
                 reg_vals.append(reg_val)
+
+            ret_parts = []
+            ret_value = builder.get_value(inst.rs)
+            idx = 0
+            for val_idx, vt in enumerate(return_vts):
+                reg_vt = target_lowering.get_register_type(vt)
+                reg_count = target_lowering.get_register_count(vt)
+
+                value = ret_value.get_value(val_idx)
+
+                builder.g.root = get_copy_to_parts(
+                    value, reg_vals[idx:idx+reg_count], reg_vt, builder.g.root, builder.g)
+
+                idx += reg_count
 
             ops = [builder.root, stack_pop_bytes, *reg_vals]
         else:
@@ -344,10 +293,12 @@ class RISCVCallingConv(CallingConv):
                 return_ty, inst.block.func.module.data_layout)
             assert(len(vts) == 1)
             ret_val = DagValue(
-                builder.g.add_register_node(vts[0], demote_reg), 0)
+                builder.g.add_register_node(vts[0], demote_reg[0]), 0)
 
             if ret_val.ty == MachineValueType(ValueType.I32):
-                ret_reg = R0
+                ret_reg = X10
+            elif ret_val.ty == MachineValueType(ValueType.I64):
+                ret_reg = X10
             else:
                 raise NotImplementedError()
 
@@ -395,11 +346,16 @@ class RISCVCallingConv(CallingConv):
         mfunc = dag.mfunc
         calling_conv = mfunc.target_info.get_calling_conv()
         reg_info = mfunc.target_info.get_register_info()
+        target_lowering = mfunc.target_info.get_lowering()
         data_layout = dag.data_layout
 
         func_address = call_info.target
         arg_list = call_info.arg_list
         ret_ty = call_info.ret_ty
+
+        if isinstance(func_address.node, GlobalAddressDagNode):
+            func_address = DagValue(dag.add_global_address_node(
+                func_address.ty, func_address.node.value, True, target_flags=RISCVOperandFlag.CALL.value), 0)
 
         # Handle arguments
         args = []
@@ -408,8 +364,8 @@ class RISCVCallingConv(CallingConv):
             offset_in_arg = 0
 
             for val_idx, vt in enumerate(vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
+                reg_vt = target_lowering.get_register_type(vt)
+                reg_count = target_lowering.get_register_count(vt)
 
                 for reg_idx in range(reg_count):
                     flags = CCArgFlags()
@@ -450,59 +406,59 @@ class RISCVCallingConv(CallingConv):
         chain = DagValue(callseq_start_node, 0)
 
         # Save arguments
-        arg_parts = []
+        reg_vals = []
+        idx = 0
         for arg in arg_list:
-            idx = 0
             arg_value = arg.node
             vts = compute_value_types(arg.ty, data_layout)
             for val_idx, vt in enumerate(vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
+                reg_vt = target_lowering.get_register_type(vt)
+                reg_count = target_lowering.get_register_count(vt)
 
-                if reg_count > 1:
-                    raise NotImplementedError()
+                arg_to_copy = arg_value.get_value(val_idx)
 
-                arg_parts.append(arg_value.get_value(idx))
+                parts = get_parts_to_copy(arg_to_copy, reg_count, reg_vt, dag)
+
+                for reg_idx in range(reg_count):
+                    arg_val = ccstate.values[idx]
+                    copy_val = parts[reg_idx]
+
+                    assert(isinstance(arg_val, CCArgReg))
+                    reg_val = DagValue(dag.add_target_register_node(
+                        arg_val.vt, arg_val.reg), 0)
+
+                    if arg_val.loc_info == CCArgLocInfo.Full:
+                        pass
+                    elif arg_val.loc_info == CCArgLocInfo.BCvt:
+                        copy_val = DagValue(dag.add_node(
+                            VirtualDagOps.BITCAST, [arg_val.loc_vt], copy_val), 0)
+                    elif arg_val.loc_info == CCArgLocInfo.Indirect:
+                        arg_mem_size = arg_val.vt.get_size_in_byte()
+                        arg_mem_align = int(data_layout.get_pref_type_alignment(
+                            arg_val.vt.get_ir_type()) / 8)
+                        arg_mem_frame_idx = mfunc.frame.create_stack_object(
+                            arg_mem_size, arg_mem_align)
+                        arg_mem_val = DagValue(
+                            dag.add_frame_index_node(arg_mem_frame_idx), 0)
+
+                        chain = DagValue(g.add_store_node(
+                            chain, arg_mem_val, copy_val), 0)
+
+                        copy_val = arg_mem_val
+                    else:
+                        raise ValueError()
+
+                    operands = [chain, reg_val, copy_val]
+                    if idx != 0:
+                        operands.append(copy_to_reg_chain.get_value(1))
+
+                    copy_to_reg_chain = DagValue(dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(
+                        ValueType.OTHER), MachineValueType(ValueType.GLUE)], *operands), 0)
+
+                    chain = copy_to_reg_chain
+                    reg_vals.append(reg_val)
 
                 idx += reg_count
-
-        reg_vals = []
-        for idx, arg_val in enumerate(ccstate.values):
-            assert(isinstance(arg_val, CCArgReg))
-            reg_val = DagValue(dag.add_target_register_node(
-                arg_val.vt, arg_val.reg), 0)
-            copy_val = arg_parts[idx]
-
-            if arg_val.loc_info == CCArgLocInfo.Full:
-                pass
-            elif arg_val.loc_info == CCArgLocInfo.BCvt:
-                copy_val = DagValue(dag.add_node(
-                    VirtualDagOps.BITCAST, [arg_val.loc_vt], copy_val), 0)
-            elif arg_val.loc_info == CCArgLocInfo.Indirect:
-                arg_mem_size = arg_val.vt.get_size_in_byte()
-                arg_mem_align = int(data_layout.get_pref_type_alignment(
-                    arg_val.vt.get_ir_type()) / 8)
-                arg_mem_frame_idx = mfunc.frame.create_stack_object(
-                    arg_mem_size, arg_mem_align)
-                arg_mem_val = DagValue(
-                    dag.add_frame_index_node(arg_mem_frame_idx), 0)
-
-                chain = DagValue(g.add_store_node(
-                    chain, arg_mem_val, copy_val), 0)
-
-                copy_val = arg_mem_val
-            else:
-                raise ValueError()
-
-            operands = [chain, reg_val, copy_val]
-            if idx != 0:
-                operands.append(copy_to_reg_chain.get_value(1))
-
-            copy_to_reg_chain = DagValue(dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(
-                ValueType.OTHER), MachineValueType(ValueType.GLUE)], *operands), 0)
-
-            chain = copy_to_reg_chain
-            reg_vals.append(reg_val)
 
         # Function call
         call_node = dag.add_node(
@@ -523,8 +479,8 @@ class RISCVCallingConv(CallingConv):
         offset_in_ret = 0
 
         for val_idx, vt in enumerate(return_vts):
-            reg_vt = reg_info.get_register_type(vt)
-            reg_count = reg_info.get_register_count(vt)
+            reg_vt = target_lowering.get_register_type(vt)
+            reg_count = target_lowering.get_register_count(vt)
 
             for reg_idx in range(reg_count):
                 flags = CCArgFlags()
@@ -556,8 +512,8 @@ class RISCVCallingConv(CallingConv):
         ret_parts = []
         idx = 0
         for val_idx, vt in enumerate(return_vts):
-            reg_vt = reg_info.get_register_type(vt)
-            reg_count = reg_info.get_register_count(vt)
+            reg_vt = target_lowering.get_register_type(vt)
+            reg_count = target_lowering.get_register_count(vt)
 
             if reg_count > 1:
                 raise NotImplementedError()
@@ -591,24 +547,9 @@ class RISCVCallingConv(CallingConv):
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
-        if loc_vt.value_type in [ValueType.V4F32]:
-            loc_vt = MachineValueType(ValueType.V2F64)
-            loc_info = CCArgLocInfo.BCvt
-
-        if loc_vt.value_type == ValueType.V2F64:
-            regs = [Q0, Q1, Q2, Q3]
-            reg = ccstate.alloc_reg_from_list(regs)
-            if reg is not None:
-                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
-                return False
-
         raise NotImplementedError("The type is unsupporting.")
 
-    def allocate_return(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
-        self.allocate_return_riscv_cdecl(
-            idx, vt, loc_vt, loc_info, flags, ccstate)
-
-    def allocate_argument_riscv_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+    def allocate_return_riscv64_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
         if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
             loc_vt = MachineValueType(ValueType.I32)
 
@@ -620,9 +561,48 @@ class RISCVCallingConv(CallingConv):
                 return False
 
         if loc_vt.value_type == ValueType.I32:
+            loc_vt = MachineValueType(ValueType.I64)
+            loc_info = CCArgLocInfo.SExt
+
+            regs = [X10, X11]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.I64:
+            regs = [X10, X11]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        raise NotImplementedError("The type is unsupporting.")
+
+    def allocate_return(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+        target_info = ccstate.mfunc.target_info
+        if target_info.triple.arch == ArchType.RISCV64:
+            self.allocate_return_riscv64_cdecl(
+                idx, vt, loc_vt, loc_info, flags, ccstate)
+            return
+        self.allocate_return_riscv_cdecl(
+            idx, vt, loc_vt, loc_info, flags, ccstate)
+
+    def allocate_argument_riscv_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+        if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
+            loc_vt = MachineValueType(ValueType.I32)
+
+        if loc_vt.value_type == ValueType.F32:
+            regs = [F10_F, F11_F, F12_F, F13_F, F14_F, F15_F, F16_F, F17_F]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.I32:
             regs = [X10, X11, X12, X13, X14, X15, X16, X17]
             reg = ccstate.alloc_reg_from_list(regs)
-            if reg is not None:
+            if reg:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
@@ -638,20 +618,57 @@ class RISCVCallingConv(CallingConv):
                 idx, vt, loc_vt, loc_info, stack_offset, flags)
             return False
 
-        if loc_vt.value_type in [ValueType.V4F32]:
-            loc_vt = MachineValueType(ValueType.V2F64)
-            loc_info = CCArgLocInfo.BCvt
+        raise NotImplementedError("The type is unsupporting.")
 
-        if loc_vt.value_type == ValueType.V2F64:
-            regs = [Q0, Q1, Q2, Q3]
+    def allocate_argument_riscv64_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+        if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
+            loc_vt = MachineValueType(ValueType.I32)
+
+        if loc_vt.value_type == ValueType.F32:
+            regs = [F10_F, F11_F, F12_F, F13_F, F14_F, F15_F, F16_F, F17_F]
             reg = ccstate.alloc_reg_from_list(regs)
-            if reg is not None:
+            if reg:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
+
+        if loc_vt.value_type == ValueType.I32:
+            loc_vt = MachineValueType(ValueType.I64)
+            loc_info = CCArgLocInfo.SExt
+
+            regs = [X10, X11, X12, X13, X14, X15, X16, X17]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.I64:
+            regs = [X10, X11, X12, X13, X14, X15, X16, X17]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.I32:
+            stack_offset = ccstate.alloc_stack(4, 4)
+            ccstate.assign_stack_value(
+                idx, vt, loc_vt, loc_info, stack_offset, flags)
+            return False
+
+        if loc_vt.value_type == ValueType.F32:
+            stack_offset = ccstate.alloc_stack(4, 4)
+            ccstate.assign_stack_value(
+                idx, vt, loc_vt, loc_info, stack_offset, flags)
+            return False
 
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_argument(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+        target_info = ccstate.mfunc.target_info
+        if target_info.triple.arch == ArchType.RISCV64:
+            self.allocate_argument_riscv64_cdecl(
+                idx, vt, loc_vt, loc_info, flags, ccstate)
+            return
+
         self.allocate_argument_riscv_cdecl(
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
@@ -665,11 +682,11 @@ class RISCVTargetInstInfo(TargetInstInfo):
         assert(isinstance(dst_reg, MachineRegister))
 
         if src_reg.spec in GPR.regs and dst_reg.spec in GPR.regs:
-            opcode = RISCVMachineOps.MOVsi
-        elif src_reg.spec in SPR.regs and dst_reg.spec in SPR.regs:
-            opcode = RISCVMachineOps.VMOVS
-        elif src_reg.spec in QPR.regs and dst_reg.spec in QPR.regs:
-            opcode = RISCVMachineOps.VORRq
+            opcode = RISCVMachineOps.ADDI
+        elif src_reg.spec in FPR32.regs and dst_reg.spec in FPR32.regs:
+            opcode = RISCVMachineOps.FSGNJ_S
+        elif src_reg.spec in FPR64.regs and dst_reg.spec in FPR64.regs:
+            opcode = RISCVMachineOps.FSGNJ_D
         else:
             raise NotImplementedError(
                 "Move instructions support GPR, SPR, DPR or QPR at the present time.")
@@ -679,18 +696,22 @@ class RISCVTargetInstInfo(TargetInstInfo):
         copy_inst.add_reg(dst_reg, RegState.Define)
         copy_inst.add_reg(src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == RISCVMachineOps.VORRq:
+        if opcode == RISCVMachineOps.ADDI:
+            copy_inst.add_imm(0)
+
+        if opcode in [RISCVMachineOps.FSGNJ_S, RISCVMachineOps.FSGNJ_D]:
             copy_inst.add_reg(
                 src_reg, RegState.Kill if kill_src else RegState.Non)
-
-        if opcode == RISCVMachineOps.MOVsi:
-            copy_inst.add_imm(2)
 
         copy_inst.insert_after(inst)
 
     def copy_reg_to_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         noreg = MachineRegister(NOREG)
@@ -699,14 +720,14 @@ class RISCVTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if reg.spec in GPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.STRi12)
+                copy_inst = MachineInstruction(RISCVMachineOps.SW)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in SPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.VSTRS)
+            elif reg.spec in FPR32.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.FSW)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -715,8 +736,15 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in DPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.VSTRD)
+            if reg.spec in GPR.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.SD)
+
+                copy_inst.add_reg(reg, RegState.Non)
+
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
+            elif reg.spec in FPR64.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.FSD)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -725,24 +753,7 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if reg.spec in QPR.regs:
-                mfunc = inst.mbb.func
-                regclass = GPR  # TODO
-                scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
-
-                addr_inst = MachineInstruction(RISCVMachineOps.ADDri)
-                addr_inst.add_reg(scratch_reg, RegState.Define)
-                addr_inst.add_frame_index(stack_slot)
-                addr_inst.add_imm(0)
-
-                addr_inst.insert_before(inst)
-
-                copy_inst = MachineInstruction(RISCVMachineOps.VST1q64)
-                copy_inst.add_reg(reg, RegState.Non)
-                copy_inst.add_reg(scratch_reg, RegState.Kill)
-                copy_inst.add_imm(1)
-            else:
-                raise NotImplementedError()
+            raise NotImplementedError()
         else:
             raise NotImplementedError(
                 "Move instructions support GR64 or GR32 at the present time.")
@@ -751,8 +762,12 @@ class RISCVTargetInstInfo(TargetInstInfo):
         return copy_inst
 
     def copy_reg_from_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         noreg = MachineRegister(NOREG)
@@ -761,13 +776,13 @@ class RISCVTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if reg.spec in GPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.LDRi12)
+                copy_inst = MachineInstruction(RISCVMachineOps.LW)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in SPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.VLDRS)
+            elif reg.spec in FPR32.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.FLW)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -775,8 +790,14 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in DPR.regs:
-                copy_inst = MachineInstruction(RISCVMachineOps.VLDRD)
+            if reg.spec in GPR.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.LD)
+
+                copy_inst.add_reg(reg, RegState.Define)
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
+            elif reg.spec in FPR64.regs:
+                copy_inst = MachineInstruction(RISCVMachineOps.FLD)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -784,25 +805,7 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if reg.spec in QPR.regs:
-                mfunc = inst.mbb.func
-                regclass = GPR  # TODO
-                scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
-
-                addr_inst = MachineInstruction(RISCVMachineOps.ADDri)
-                addr_inst.add_reg(scratch_reg, RegState.Define)
-                addr_inst.add_frame_index(stack_slot)
-                addr_inst.add_imm(0)
-
-                addr_inst.insert_before(inst)
-
-                copy_inst = MachineInstruction(RISCVMachineOps.VLD1q64)
-
-                copy_inst.add_reg(reg, RegState.Define)
-                copy_inst.add_reg(scratch_reg, RegState.Kill)
-                copy_inst.add_imm(1)
-            else:
-                raise NotImplementedError()
+            raise NotImplementedError()
         else:
             raise NotImplementedError(
                 "Move instructions support GR64 or GR32 at the present time.")
@@ -816,134 +819,103 @@ class RISCVTargetInstInfo(TargetInstInfo):
         stack_obj = frame.get_stack_object(idx)
         frame_lowering = func.target_info.get_frame_lowering()
         if idx < 0:
-            return stack_obj.offset + frame_lowering.frame_spill_size
+            return X8, stack_obj.offset + frame_lowering.frame_spill_size
 
-        return stack_obj.offset
+        for cs_info in func.frame.calee_save_info:
+            if idx == cs_info.frame_idx:
+                return X2, stack_obj.offset + func.frame.stack_size
+        return X8, stack_obj.offset
 
     def eliminate_frame_index(self, func: MachineFunction, inst: MachineInstruction, idx):
+        target_reg_info = func.target_info.get_register_info()
+
         # Analyze the frame index into a base register and a displacement.
         operand = inst.operands[idx]
         if isinstance(operand, MOFrameIndex):
-            base_reg = MachineRegister(R11)
+            assert(inst.opcode in [RISCVMachineOps.SW, RISCVMachineOps.LW, RISCVMachineOps.SD, RISCVMachineOps.LD,
+                                   RISCVMachineOps.ADDI, RISCVMachineOps.FLW, RISCVMachineOps.FSW])
+
             stack_obj = func.frame.get_stack_object(operand.index)
-            offset = self.calculate_frame_offset(func, operand.index)
+            frame_reg, offset = self.calculate_frame_offset(
+                func, operand.index)
 
-            if inst.opcode in [RISCVMachineOps.VLDRS, RISCVMachineOps.VSTRS, RISCVMachineOps.VLDRD, RISCVMachineOps.VSTRD]:
-                assert(offset % 4 == 0)
-                offset = offset >> 2
-
-                assert(abs(inst.operands[idx + 1].val + offset) < 256)
+            base_reg = MachineRegister(frame_reg)
 
             inst.operands[idx] = MOReg(base_reg, RegState.Non)
             inst.operands[idx + 1] = MOImm(inst.operands[idx + 1].val + offset)
 
-            if inst.operands[idx + 1].val < 0:
-                if inst.opcode == RISCVMachineOps.ADDri:
-                    inst.opcode = RISCVMachineOps.SUBri
-                    inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode == RISCVMachineOps.SUBri:
-                    inst.opcode = RISCVMachineOps.ADDri
-                    inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode in [
-                        RISCVMachineOps.STRi12, RISCVMachineOps.LDRi12, RISCVMachineOps.VSTRS, RISCVMachineOps.VLDRS,
-                        RISCVMachineOps.VSTRD, RISCVMachineOps.VLDRD, RISCVMachineOps.VST1q64, RISCVMachineOps.VLD1q64]:
-                    pass
-                else:
-                    raise ValueError()
-
     def optimize_compare_inst(self, func: MachineFunction, inst: MachineInstruction):
-        # Eliminate destination register.
-        reginfo = func.reg_info
-        if reginfo.is_use_empty(inst.operands[0].reg):
-
-            if inst.opcode == RISCVMachineOps.SUB32ri:
-                inst.opcode = RISCVMachineOps.CMP32ri
-            elif inst.opcode == RISCVMachineOps.SUB32rm:
-                inst.opcode = RISCVMachineOps.CMP32rm
-            elif inst.opcode == RISCVMachineOps.SUB32rr:
-                inst.opcode = RISCVMachineOps.CMP32rr
-            elif inst.opcode == RISCVMachineOps.SUB8ri:
-                inst.opcode = RISCVMachineOps.CMP8ri
-            else:
-                raise ValueError("Not supporting instruction.")
-
-            remove_op = inst.operands[0]
-            if remove_op.tied_to >= 0:
-                tied = inst.operands[remove_op.tied_to]
-                assert(tied.tied_to == 0)
-                tied.tied_to = -1
-
-            inst.remove_operand(0)
+        pass
 
     def expand_post_ra_pseudo(self, inst: MachineInstruction):
-        # if inst.opcode == RISCVMachineOps.LDRLIT_ga_abs:
-        #     # Replace with 'LDR' from constant pool.
-        #     dst = inst.operands[0]
-        #     gv = inst.operands[1]
-        #     opc = RISCVMachineOps.LDRi12
+        if inst.opcode == RISCVMachineOps.PseudoBR:
 
-        #     cp = inst.mbb.func.constant_pool
-        #     index = cp.get_or_create_index(gv.value, 4)
+            imm = inst.operands[0]
 
-        #     new_inst = MachineInstruction(opc)
+            jump_inst = MachineInstruction(RISCVMachineOps.JAL)
+            jump_inst.add_reg(MachineRegister(X0), RegState.Non)
+            jump_inst.add_mbb(imm.mbb)
 
-        #     new_inst.add_reg(dst.reg, RegState.Define)
-        #     new_inst.add_constant_pool_index(index)
-        #     new_inst.add_imm(0)
-
-        #     new_inst.insert_after(inst)
-        #     inst.remove()
-
-        if inst.opcode == RISCVMachineOps.MOVi32imm:
-            dst = inst.operands[0]
-            src = inst.operands[1]
-
-            lo_opc = RISCVMachineOps.MOVi16
-            hi_opc = RISCVMachineOps.MOVTi16
-
-            lo_inst = MachineInstruction(lo_opc)
-            lo_inst.add_reg(dst.reg, RegState.Define)
-
-            hi_inst = MachineInstruction(hi_opc)
-            hi_inst.add_reg(dst.reg, RegState.Define)
-            hi_inst.add_reg(dst.reg, RegState.Non)
-
-            if isinstance(src, MOGlobalAddress):
-                lo_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | RISCVOperandFlag.MO_LO16.value))
-                hi_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | RISCVOperandFlag.MO_HI16.value))
-            else:
-                raise ValueError()
-
-            hi_inst.insert_after(inst)
-            lo_inst.insert_after(inst)
+            jump_inst.insert_after(inst)
             inst.remove()
 
-        if inst.opcode == RISCVMachineOps.LEApcrel:
+        if inst.opcode == RISCVMachineOps.PseudoRET:
+            jump_inst = MachineInstruction(RISCVMachineOps.JALR)
+            jump_inst.add_reg(MachineRegister(X0), RegState.Non)
+            jump_inst.add_reg(MachineRegister(X1), RegState.Non)
+            jump_inst.add_imm(0)
+
+            jump_inst.insert_after(inst)
+            inst.remove()
+
+        if inst.opcode == RISCVMachineOps.PseudoLLA:
             dst = inst.operands[0]
-            src = inst.operands[1]
+            disp = inst.operands[1]
 
-            lo_opc = RISCVMachineOps.MOVi16
-            hi_opc = RISCVMachineOps.MOVTi16
+            new_mbb = inst.mbb.split_basic_block(inst)
 
-            lo_inst = MachineInstruction(lo_opc)
-            lo_inst.add_reg(dst.reg, RegState.Define)
-
-            hi_inst = MachineInstruction(hi_opc)
+            hi_inst = MachineInstruction(RISCVMachineOps.AUIPC)
             hi_inst.add_reg(dst.reg, RegState.Define)
-            hi_inst.add_reg(dst.reg, RegState.Non)
 
-            if isinstance(src, MOConstantPoolIndex):
-                lo_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | RISCVOperandFlag.MO_LO16.value))
+            if isinstance(disp, MOConstantPoolIndex):
                 hi_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | RISCVOperandFlag.MO_HI16.value))
+                    disp.index, RISCVOperandFlag.PCREL_HI)
             else:
-                raise ValueError()
+                raise NotImplementedError()
+
+            lo_inst = MachineInstruction(RISCVMachineOps.ADDI)
+            lo_inst.add_reg(dst.reg, RegState.Define)
+            lo_inst.add_reg(dst.reg, RegState.Non)
+            lo_inst.add_mbb(new_mbb, RISCVOperandFlag.PCREL_LO)
 
             hi_inst.insert_after(inst)
-            lo_inst.insert_after(inst)
+            lo_inst.insert_after(hi_inst)
+
+            inst.remove()
+
+        if inst.opcode == RISCVMachineOps.PseudoLA_TLS_GD:
+            dst = inst.operands[0]
+            disp = inst.operands[1]
+
+            new_mbb = inst.mbb.split_basic_block(inst)
+
+            hi_inst = MachineInstruction(RISCVMachineOps.AUIPC)
+            hi_inst.add_reg(dst.reg, RegState.Define)
+
+            if isinstance(disp, MOGlobalAddress):
+                hi_inst.add_global_address(
+                    disp.value, RISCVOperandFlag.TLS_GD_HI)
+            else:
+                raise NotImplementedError()
+
+            lo_inst = MachineInstruction(RISCVMachineOps.ADDI)
+            lo_inst.add_reg(dst.reg, RegState.Define)
+            lo_inst.add_reg(dst.reg, RegState.Non)
+            lo_inst.add_mbb(new_mbb, RISCVOperandFlag.PCREL_LO)
+
+            hi_inst.insert_after(inst)
+            lo_inst.insert_after(hi_inst)
+
             inst.remove()
 
 
@@ -1061,116 +1033,43 @@ class RISCVConstantPoolConstant(MachineConstantPoolValue):
 
 
 class RISCVTargetLowering(TargetLowering):
-    def __init__(self):
+    def __init__(self, target_machine):
         super().__init__()
 
-    def lower_setcc(self, node: DagNode, dag: Dag):
-        op1 = node.operands[0]
-        op2 = node.operands[1]
-        cond = node.operands[2]
+        self.target_machine = target_machine
 
-        is_fcmp = op1.node.value_types[0].value_type in [
-            ValueType.F32, ValueType.F64]
+        self.reg_type_for_vt = {MachineValueType(
+            e): MachineValueType(e) for e in ValueType}
 
-        def compute_condcode(cond):
-            ty = MachineValueType(ValueType.I8)
-            swap = False
-            cond = cond.node.cond
+        self.reg_type_for_vt[MachineValueType(
+            ValueType.V4F32)] = MachineValueType(ValueType.F32)
 
-            if is_fcmp:
-                if cond in [CondCode.SETEQ, CondCode.SETOEQ]:
-                    node = dag.add_target_constant_node(ty, RISCVCC_EQ)
-                elif cond in [CondCode.SETGT, CondCode.SETOGT]:
-                    node = dag.add_target_constant_node(ty, RISCVCC_GT)
-                elif cond in [CondCode.SETLT, CondCode.SETOLT]:
-                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
-                    swap = True
-                elif cond in [CondCode.SETGE, CondCode.SETOGE]:
-                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
-                else:
-                    raise NotImplementedError()
-            else:
-                if cond == CondCode.SETEQ:
-                    node = dag.add_target_constant_node(ty, RISCVCC_EQ)
-                elif cond == CondCode.SETNE:
-                    node = dag.add_target_constant_node(ty, RISCVCC_NE)
-                elif cond == CondCode.SETLT:
-                    node = dag.add_target_constant_node(ty, RISCVCC_LT)
-                elif cond == CondCode.SETGT:
-                    node = dag.add_target_constant_node(ty, RISCVCC_GT)
-                elif cond == CondCode.SETLE:
-                    node = dag.add_target_constant_node(ty, RISCVCC_LE)
-                elif cond == CondCode.SETGE:
-                    node = dag.add_target_constant_node(ty, RISCVCC_GE)
-                elif cond == CondCode.SETULT:
-                    node = dag.add_target_constant_node(ty, 0b0011)
-                elif cond == CondCode.SETUGT:
-                    node = dag.add_target_constant_node(ty, 0b1000)
-                elif cond == CondCode.SETULE:
-                    node = dag.add_target_constant_node(ty, 0b1001)
-                elif cond == CondCode.SETUGE:
-                    node = dag.add_target_constant_node(ty, 0b0010)
-                else:
-                    raise NotImplementedError()
+        if self.target_machine.hwmode == RV64:
+            self.reg_type_for_vt[MachineValueType(
+                ValueType.I32)] = MachineValueType(ValueType.I64)
 
-            return node, swap
+        self.reg_count_for_vt = {MachineValueType(e): 1 for e in ValueType}
 
-        condcode, swap = compute_condcode(cond)
-        if swap:
-            op1, op2 = op2, op1
-
-        if is_fcmp:
-            cmp_node = DagValue(dag.add_node(RISCVDagOps.CMPFP,
-                                             [MachineValueType(ValueType.GLUE)], op1, op2), 0)
-            cmp_node = DagValue(dag.add_node(RISCVDagOps.FMSTAT,
-                                             [MachineValueType(ValueType.GLUE)], cmp_node), 0)
-        else:
-            cmp_node = DagValue(dag.add_node(RISCVDagOps.CMP,
-                                             [MachineValueType(ValueType.GLUE)], op1, op2), 0)
-
-        # operand 1 is eflags.
-        setcc_node = dag.add_node(RISCVDagOps.SETCC, node.value_types,
-                                  DagValue(condcode, 0), cmp_node)
-
-        return setcc_node
-
-    def lower_brcond(self, node: DagNode, dag: Dag):
-        chain = node.operands[0]
-        cond = node.operands[1]
-        dest = node.operands[2]
-
-        if cond.node.opcode == VirtualDagOps.SETCC:
-            cond = DagValue(self.lower_setcc(cond.node, dag), 0)
-
-        if cond.node.opcode == RISCVDagOps.SETCC:
-            condcode = cond.node.operands[0]
-            glue = cond.node.operands[1]
-            cond = DagValue(dag.add_target_register_node(
-                MachineValueType(ValueType.I32), CPSR), 0)
-
-            return dag.add_node(RISCVDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
-        else:
-            if cond.ty == MachineValueType(ValueType.I1):
-                cond = DagValue(dag.add_node(VirtualDagOps.ZERO_EXTEND, [
-                                MachineValueType(ValueType.I32)], cond), 0)
-
-            one = DagValue(dag.add_constant_node(cond.ty, 1), 0)
-            condcode = DagValue(dag.add_condition_code_node(CondCode.SETEQ), 0)
-            cond = DagValue(dag.add_node(VirtualDagOps.SETCC, [
-                            MachineValueType(ValueType.I1)], cond, one, condcode), 0)
-            cond = DagValue(self.lower_setcc(cond.node, dag), 0)
-
-            condcode = cond.node.operands[0]
-            glue = cond.node.operands[1]
-            cond = DagValue(dag.add_target_register_node(
-                MachineValueType(ValueType.I32), CPSR), 0)
-
-            return dag.add_node(RISCVDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+        self.reg_count_for_vt[MachineValueType(
+            ValueType.V4F32)] = 4
 
     def lower_global_address(self, node: DagNode, dag: Dag):
-        target_address = dag.add_global_address_node(
-            node.value_types[0], node.value, True)
-        return dag.add_node(RISCVDagOps.WRAPPER, node.value_types, DagValue(target_address, 0))
+        data_layout = dag.mfunc.func_info.func.module.data_layout
+        ptr_ty = self.get_pointer_type(data_layout)
+
+        global_addr_hi = DagValue(dag.add_global_address_node(
+            node.value_types[0], node.value, True, target_flags=RISCVOperandFlag.HI.value), 0)
+
+        global_addr_lo = DagValue(dag.add_global_address_node(
+            node.value_types[0], node.value, True, target_flags=RISCVOperandFlag.LO.value), 0)
+
+        global_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.LUI,
+                                                        [ptr_ty], global_addr_hi), 0)
+
+        global_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.ADDI,
+                                                        [ptr_ty], global_addr, global_addr_lo), 0)
+
+        return global_addr.node
 
     def lower_global_tls_address(self, node: DagNode, dag: Dag):
         data_layout = dag.mfunc.func_info.func.module.data_layout
@@ -1178,38 +1077,23 @@ class RISCVTargetLowering(TargetLowering):
         global_value = node.value
 
         if global_value.thread_local == ThreadLocalMode.GeneralDynamicTLSModel:
-            pc_label_id = dag.mfunc.func_info.create_pic_label_id()
+            ga = DagValue(dag.add_global_address_node(
+                ptr_ty, global_value, True), 0)
 
-            cp_value = RISCVConstantPoolConstant(
-                global_value.ty, pc_label_id, global_value, RISCVConstantPoolKind.Value, RISCVConstantPoolModifier.TLSGlobalDesc, 8, True)
-
-            argument = DagValue(
-                dag.add_constant_pool_node(ptr_ty, cp_value, True, 4), 0)
-
-            argument = DagValue(dag.add_node(
-                RISCVDagOps.WRAPPER, [MachineValueType(ValueType.I32)], argument), 0)
-
-            argument = DagValue(dag.add_load_node(
-                ptr_ty, dag.entry, argument, False), 0)
-
-            chain = argument.get_value(1)
-
-            pic_label = DagValue(dag.add_target_constant_node(
-                ptr_ty, ConstantInt(pc_label_id, i32)), 0)
-
-            argument = DagValue(dag.add_node(RISCVDagOps.PIC_ADD,
-                                             [ptr_ty], argument, pic_label), 0)
+            ga_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.PseudoLA_TLS_GD,
+                                                        [ptr_ty], ga), 0)
 
             arg_list = []
-            arg_list.append(ArgListEntry(argument, i32))
+            arg_list.append(ArgListEntry(
+                ga_addr, get_integer_type(ptr_ty.get_size_in_bits())))
 
             tls_get_addr_func = DagValue(
-                dag.add_external_symbol_node(ptr_ty, "__tls_get_addr"), 0)
+                dag.add_external_symbol_node(ptr_ty, "__tls_get_addr", True, RISCVOperandFlag.CALL), 0)
 
             calling_conv = dag.mfunc.target_info.get_calling_conv()
 
             tls_addr = calling_conv.lower_call_info(
-                CallInfo(dag, chain, i32, tls_get_addr_func, arg_list))
+                CallInfo(dag, dag.entry, get_integer_type(ptr_ty.get_size_in_bits()), tls_get_addr_func, arg_list))
 
             return tls_addr.node
 
@@ -1225,19 +1109,27 @@ class RISCVTargetLowering(TargetLowering):
         assert(isinstance(node, ConstantFPDagNode))
         data_layout = dag.mfunc.func_info.func.module.data_layout
 
-        cp_hi = DagValue(dag.add_constant_pool_node(
-            self.get_pointer_type(data_layout), node.value, True), 0)
+        position_independent = True  # TODO
+        if position_independent:
+            cp = DagValue(dag.add_constant_pool_node(
+                self.get_pointer_type(data_layout), node.value, True), 0)
 
-        cp_lo = DagValue(dag.add_constant_pool_node(
-            self.get_pointer_type(data_layout), node.value, True), 0)
+            cp_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.PseudoLLA,
+                                                        [self.get_pointer_type(data_layout)], cp), 0)
+        else:
+            cp_hi = DagValue(dag.add_constant_pool_node(
+                self.get_pointer_type(data_layout), node.value, True, target_flags=RISCVOperandFlag.HI.value), 0)
 
-        cp = DagValue(dag.add_machine_dag_node(RISCVMachineOps.LUI,
-                                               [MachineValueType(ValueType.I32)], cp_hi), 0)
+            cp_lo = DagValue(dag.add_constant_pool_node(
+                self.get_pointer_type(data_layout), node.value, True, target_flags=RISCVOperandFlag.LO.value), 0)
 
-        cp = DagValue(dag.add_machine_dag_node(RISCVMachineOps.ADDI,
-                                               [MachineValueType(ValueType.I32)], cp, cp_lo), 0)
+            cp_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.LUI,
+                                                        [MachineValueType(ValueType.I32)], cp_hi), 0)
 
-        return dag.add_load_node(node.value_types[0], dag.entry, cp, False)
+            cp_addr = DagValue(dag.add_machine_dag_node(RISCVMachineOps.ADDI,
+                                                        [MachineValueType(ValueType.I32)], cp_addr, cp_lo), 0)
+
+        return dag.add_load_node(node.value_types[0], dag.entry, cp_addr, False)
 
     def lower_constant_pool(self, node: DagNode, dag: Dag):
         assert(isinstance(node, ConstantPoolDagNode))
@@ -1251,9 +1143,12 @@ class RISCVTargetLowering(TargetLowering):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
         operands = []
         for operand in node.operands:
-            target_constant_fp = dag.add_target_constant_fp_node(
-                operand.node.value_types[0], operand.node.value)
-            operands.append(DagValue(target_constant_fp, 0))
+            if operand.node == VirtualDagOps.CONSTANT_FP:
+                target_constant_fp = dag.add_target_constant_fp_node(
+                    operand.node.value_types[0], operand.node.value)
+                operands.append(DagValue(target_constant_fp, 0))
+            else:
+                operands.append(operand)
 
         assert(len(operands) > 0)
 
@@ -1267,20 +1162,6 @@ class RISCVTargetLowering(TargetLowering):
             return dag.add_node(RISCVDagOps.VDUP, node.value_types, operands[0])
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
-
-    def shuffle_param(self, fp3, fp2, fp1, fp0):
-        return (fp3 << 6) | (fp2 << 4) | (fp1 << 2) | fp0
-
-    def get_x86_shuffle_mask_v4(self, mask, dag):
-        mask_val = self.shuffle_param(mask[3], mask[2], mask[1], mask[0])
-        return DagValue(dag.add_target_constant_node(MachineValueType(ValueType.I8), mask_val), 0)
-
-    def _mm_set_ps1(self, val):
-        vec = DagValue(dag.add_node(
-            VirtualDagOps.SCALAR_TO_VECTOR, [vec.ty], val), 0)
-        param = self.create_i8_constant(self.shuffle_param(0, 0, 0, 0))
-
-        return DagValue(dag.add_node(RISCVDagOps.SHUFP, node.value_types, vec, vec, param), 0)
 
     def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
@@ -1383,12 +1264,6 @@ class RISCVTargetLowering(TargetLowering):
     def lower(self, node: DagNode, dag: Dag):
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
-        if node.opcode == VirtualDagOps.BRCOND:
-            return self.lower_brcond(node, dag)
-        elif node.opcode == VirtualDagOps.SETCC:
-            return self.lower_setcc(node, dag)
-        elif node.opcode == VirtualDagOps.SUB:
-            return self.lower_sub(node, dag)
         elif node.opcode == VirtualDagOps.GLOBAL_ADDRESS:
             return self.lower_global_address(node, dag)
         elif node.opcode == VirtualDagOps.CONSTANT_FP:
@@ -1410,6 +1285,18 @@ class RISCVTargetLowering(TargetLowering):
         else:
             return node
 
+    def get_register_type(self, vt):
+        if vt in self.reg_type_for_vt:
+            return self.reg_type_for_vt[vt]
+
+        raise NotImplementedError()
+
+    def get_register_count(self, vt):
+        if vt in self.reg_count_for_vt:
+            return self.reg_count_for_vt[vt]
+
+        raise NotImplementedError()
+
     def lower_arguments(self, func: Function, builder: DagBuilder):
         arg_load_chains = []
         chain = builder.root
@@ -1429,8 +1316,8 @@ class RISCVTargetLowering(TargetLowering):
             offset_in_arg = 0
 
             for val_idx, vt in enumerate(vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
+                reg_vt = self.get_register_type(vt)
+                reg_count = self.get_register_count(vt)
 
                 for reg_idx in range(reg_count):
                     flags = CCArgFlags()
@@ -1455,13 +1342,11 @@ class RISCVTargetLowering(TargetLowering):
                 elif arg_vt.value_type == ValueType.I32:
                     regclass = GPR
                 elif arg_vt.value_type == ValueType.I64:
-                    raise ValueError()
+                    regclass = GPR
                 elif arg_vt.value_type == ValueType.F32:
                     regclass = FPR32
                 elif arg_vt.value_type == ValueType.F64:
                     regclass = FPR64
-                elif arg_vt.value_type == ValueType.V2F64:
-                    raise NotImplementedError()
                 else:
                     raise ValueError()
 
@@ -1480,6 +1365,12 @@ class RISCVTargetLowering(TargetLowering):
                 elif loc_info == CCArgLocInfo.BCvt:
                     arg_val_node = DagValue(
                         builder.g.add_node(VirtualDagOps.BITCAST, [arg_val.vt], arg_val_node), 0)
+                elif loc_info == CCArgLocInfo.SExt:
+                    arg_val_node = DagValue(
+                        builder.g.add_node(VirtualDagOps.SIGN_EXTEND, [arg_val.vt], arg_val_node), 0)
+                elif loc_info == CCArgLocInfo.ZExt:
+                    arg_val_node = DagValue(
+                        builder.g.add_node(VirtualDagOps.ZERO_EXTEND, [arg_val.vt], arg_val_node), 0)
                 else:
                     raise ValueError()
             else:
@@ -1511,13 +1402,11 @@ class RISCVTargetLowering(TargetLowering):
             arg_parts = []
 
             for val_idx, vt in enumerate(vts):
-                reg_vt = reg_info.get_register_type(vt)
-                reg_count = reg_info.get_register_count(vt)
+                reg_vt = self.get_register_type(vt)
+                reg_count = self.get_register_count(vt)
 
-                if reg_count > 1:
-                    raise NotImplementedError()
-
-                arg_parts.append(arg_vals[idx])
+                arg_parts.append(get_copy_from_parts(
+                    arg_vals[idx:idx+reg_count], reg_vt, vt, builder.g))
 
                 idx += reg_count
 
@@ -1526,7 +1415,7 @@ class RISCVTargetLowering(TargetLowering):
             if val.node.opcode == VirtualDagOps.COPY_FROM_REG:
                 reg = val.node.operands[1].node.reg
                 if isinstance(reg, MachineVirtualRegister):
-                    mfunc.func_info.reg_value_map[arg] = reg
+                    mfunc.func_info.reg_value_map[arg] = [reg]
 
             builder.set_inst_value(arg, val)
 
@@ -1559,58 +1448,19 @@ class RISCVTargetLowering(TargetLowering):
 
         front_inst = bb.insts[0]
 
-        push_fp_lr_inst = MachineInstruction(RISCVMachineOps.STMDB_UPD)
-        push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
-        push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
-        push_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
-        push_fp_lr_inst.add_reg(MachineRegister(LR), RegState.Non)
-
-        push_fp_lr_inst.insert_before(front_inst)
-
-        mov_esp_inst = MachineInstruction(RISCVMachineOps.MOVr)
-        mov_esp_inst.add_reg(MachineRegister(R11), RegState.Define)  # To
-        mov_esp_inst.add_reg(MachineRegister(SP), RegState.Non)  # From
-
-        mov_esp_inst.insert_before(front_inst)
-
-        callee_save_regs = [R4, R5, R6, R7, R8, R9,
-                            R10, D8, D9, D10, D11, D12, D13, D14, D15]
-
-        def is_reg_modified(reg):
-            for alias_reg in iter_reg_aliases(reg):
-                if func.reg_info.get_reg_use_def_chain(MachineRegister(alias_reg)):
-                    return True
-
-            return False
-
-        for reg in callee_save_regs:
-            if not is_reg_modified(reg):
-                continue
-
-            regclass = reg_info.get_regclass_from_reg(reg)
-            mvt = regclass.tys[0]
-            align = int(data_layout.get_pref_type_alignment(
-                mvt.get_ir_type()) / 8)
-            size = mvt.get_size_in_byte()
-
-            frame_idx = func.frame.create_stack_object(size, align)
-            func.frame.calee_save_info.append(CalleeSavedInfo(reg, frame_idx))
-
         stack_size = func.frame.estimate_stack_size(
             RISCVMachineOps.ADJCALLSTACKDOWN, RISCVMachineOps.ADJCALLSTACKUP)
 
         max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
-        stack_size = int(
+        stack_size = func.frame.stack_size = int(
             int((stack_size + max_align - 1) / max_align) * max_align)
 
-        assert(get_mod_imm(stack_size) != -1)
+        alloc_frame = MachineInstruction(RISCVMachineOps.ADDI)
+        alloc_frame.add_reg(MachineRegister(X2), RegState.Define)
+        alloc_frame.add_reg(MachineRegister(X2), RegState.Non)
+        alloc_frame.add_imm(-stack_size)
 
-        sub_sp_inst = MachineInstruction(RISCVMachineOps.SUBri)
-        sub_sp_inst.add_reg(MachineRegister(SP), RegState.Define)
-        sub_sp_inst.add_reg(MachineRegister(SP), RegState.Non)
-        sub_sp_inst.add_imm(stack_size)
-
-        sub_sp_inst.insert_before(front_inst)
+        alloc_frame.insert_before(front_inst)
 
         for cs_info in func.frame.calee_save_info:
             reg = cs_info.reg
@@ -1619,6 +1469,13 @@ class RISCVTargetLowering(TargetLowering):
 
             inst_info.copy_reg_to_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
+
+        calc_fp = MachineInstruction(RISCVMachineOps.ADDI)
+        calc_fp.add_reg(MachineRegister(X8), RegState.Define)
+        calc_fp.add_reg(MachineRegister(X2), RegState.Non)
+        calc_fp.add_imm(stack_size)
+
+        calc_fp.insert_before(front_inst)
 
     def lower_epilog(self, func: MachineFunction, bb: MachineBasicBlock):
         inst_info = func.target_info.get_inst_info()
@@ -1635,19 +1492,19 @@ class RISCVTargetLowering(TargetLowering):
             inst_info.copy_reg_from_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
 
-        restore_esp_inst = MachineInstruction(RISCVMachineOps.MOVr)
-        restore_esp_inst.add_reg(MachineRegister(SP), RegState.Define)  # To
-        restore_esp_inst.add_reg(MachineRegister(R11), RegState.Non)  # From
+        stack_size = func.frame.estimate_stack_size(
+            RISCVMachineOps.ADJCALLSTACKDOWN, RISCVMachineOps.ADJCALLSTACKUP)
 
-        restore_esp_inst.insert_before(front_inst)
+        max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
+        stack_size = int(
+            int((stack_size + max_align - 1) / max_align) * max_align)
 
-        pop_fp_lr_inst = MachineInstruction(RISCVMachineOps.LDMIA_UPD)
-        pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
-        pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
-        pop_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
-        pop_fp_lr_inst.add_reg(MachineRegister(LR), RegState.Non)
+        restore_frame = MachineInstruction(RISCVMachineOps.ADDI)
+        restore_frame.add_reg(MachineRegister(X2), RegState.Define)
+        restore_frame.add_reg(MachineRegister(X2), RegState.Non)
+        restore_frame.add_imm(stack_size)
 
-        pop_fp_lr_inst.insert_before(front_inst)
+        restore_frame.insert_before(front_inst)
 
     def eliminate_call_frame_pseudo_inst(self, func, inst: MachineInstruction):
         inst.remove()
@@ -1683,7 +1540,7 @@ class RISCVTargetLowering(TargetLowering):
             if offset != 0:
                 src_ty = src_op.ty
                 size_node = DagValue(
-                    builder.g.add_target_constant_node(src_ty, offset), 0)
+                    builder.g.add_constant_node(src_ty, offset), 0)
                 src_ptr = DagValue(builder.g.add_node(
                     VirtualDagOps.ADD, [src_ty], src_op, size_node), 0)
             else:
@@ -1692,7 +1549,7 @@ class RISCVTargetLowering(TargetLowering):
             if offset != 0:
                 dst_ty = dst_op.ty
                 size_node = DagValue(
-                    builder.g.add_target_constant_node(dst_ty, offset), 0)
+                    builder.g.add_constant_node(dst_ty, offset), 0)
                 dst_ptr = DagValue(builder.g.add_node(
                     VirtualDagOps.ADD, [dst_ty], dst_op, size_node), 0)
             else:
@@ -1717,9 +1574,18 @@ class RISCVTargetRegisterInfo(TargetRegisterInfo):
 
     def get_reserved_regs(self):
         reserved = []
-        reserved.extend([R11, R12, SP, LR, PC])
+        reserved.extend([X0, X1, X2, X3, X4, X8])
 
         return reserved
+
+    def get_callee_saved_regs(self):
+        callee_save_regs = []
+        callee_save_regs.extend(
+            [X8, X9, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27])
+        callee_save_regs.extend(
+            [F8_F, F9_F, F18_F, F19_F, F20_F, F21_F, F22_F, F23_F, F24_F, F25_F, F26_F, F27_F])
+
+        return callee_save_regs
 
     def get_ordered_regs(self, regclass):
         reserved_regs = self.get_reserved_regs()
@@ -1782,16 +1648,28 @@ class RISCVTargetRegisterInfo(TargetRegisterInfo):
             subreg_idx = subreg_idx.subreg_b
         return find_subreg(reg, subreg_idx)
 
+    @property
+    def frame_register(self):
+        return X8
+
 
 class RISCVFrameLowering(TargetFrameLowering):
     def __init__(self, alignment):
         super().__init__(alignment)
 
-        self.frame_spill_size = 8
+        self.frame_spill_size = 4
 
     @property
     def stack_grows_direction(self):
         return StackGrowsDirection.Down
+
+    def determinate_callee_saves(self, func, regs):
+        regs = super().determinate_callee_saves(func, regs)
+
+        regs.append(X1)
+        regs.append(X8)
+
+        return regs
 
 
 class RISCVLegalizer(Legalizer):
@@ -1799,38 +1677,278 @@ class RISCVLegalizer(Legalizer):
         super().__init__()
 
     def promote_integer_result_setcc(self, node, dag, legalized):
-        setcc_ty = MachineValueType(ValueType.I32)
+        if dag.mfunc.target_info.triple.arch == ArchType.RISCV64:
+            setcc_ty = MachineValueType(ValueType.I64)
+        else:
+            setcc_ty = MachineValueType(ValueType.I32)
 
         return dag.add_node(node.opcode, [setcc_ty], *node.operands)
 
     def get_legalized_op(self, operand, legalized):
-        if operand.node in legalized:
-            return DagValue(legalized[operand.node], operand.index)
+        if operand.node not in legalized:
+            return operand
 
-        return operand
+        legalized_node = legalized[operand.node]
+
+        if isinstance(legalized_node, (list, tuple)):
+            return [DagValue(n, operand.index) for n in legalized_node]
+
+        return DagValue(legalized_node, operand.index)
 
     def promote_integer_result_bin(self, node, dag, legalized):
         lhs = self.get_legalized_op(node.operands[0], legalized)
         rhs = self.get_legalized_op(node.operands[1], legalized)
+        opcode = node.opcode
 
-        return dag.add_node(node.opcode, [lhs.ty], lhs, rhs)
+        if node.opcode == VirtualDagOps.SRA:
+            opcode = RISCVDagOps.SRAW
+        elif node.opcode == VirtualDagOps.SRL:
+            opcode = RISCVDagOps.SRLW
+        elif node.opcode == VirtualDagOps.SHL:
+            opcode = RISCVDagOps.SLLW
+
+        return dag.add_node(opcode, [lhs.ty], lhs, rhs)
 
     def promote_integer_result(self, node, dag, legalized):
         if node.opcode == VirtualDagOps.SETCC:
             return self.promote_integer_result_setcc(node, dag, legalized)
-        elif node.opcode in [VirtualDagOps.AND, VirtualDagOps.OR]:
+        elif node.opcode in [
+                VirtualDagOps.ADD, VirtualDagOps.SUB, VirtualDagOps.MUL, VirtualDagOps.SDIV, VirtualDagOps.UDIV,
+                VirtualDagOps.FADD, VirtualDagOps.FSUB, VirtualDagOps.FMUL, VirtualDagOps.FDIV,
+                VirtualDagOps.SRL, VirtualDagOps.SRA, VirtualDagOps.SHL,
+                VirtualDagOps.AND, VirtualDagOps.OR, VirtualDagOps.XOR]:
             return self.promote_integer_result_bin(node, dag, legalized)
-        elif node.opcode in [VirtualDagOps.LOAD]:
-            return dag.add_node(node.opcode, [MachineValueType(ValueType.I32)], *node.operands)
-        else:
-            raise ValueError("No method to promote.")
+        elif node.opcode == VirtualDagOps.LOAD:
+            chain = node.operands[0]
+            ptr = node.operands[1]
+            return dag.add_load_node(MachineValueType(ValueType.I64), chain, ptr, False, mem_operand=node.mem_operand)
+        elif node.opcode == VirtualDagOps.ZERO_EXTEND:
+            return dag.add_node(node.opcode, [MachineValueType(ValueType.I64)], *node.operands)
+        elif node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
+            return dag.add_constant_node(MachineValueType(ValueType.I64), node.value)
 
-    def legalize_node_type(self, node: DagNode, dag: Dag, legalized):
+        return None
+
+    def split_vector_result_build_vec(self, node, dag, legalized):
+        return tuple([operand.node for operand in node.operands])
+
+    def split_vector_result_bin(self, node, dag, legalized):
+        ops_lhs = self.get_legalized_op(node.operands[0], legalized)
+        ops_rhs = self.get_legalized_op(node.operands[1], legalized)
+
+        assert(len(ops_lhs) == len(ops_rhs))
+
+        values = []
+        for lhs_val, rhs_val in zip(ops_lhs, ops_rhs):
+
+            values.append(dag.add_node(
+                node.opcode, [rhs_val.ty], lhs_val, rhs_val))
+
+        return tuple(values)
+
+    def split_value_type(self, dag: Dag, vt):
+        if vt.value_type == ValueType.V4F32:
+            return [vt.get_vector_elem_type()] * vt.get_num_vector_elems()
+
+        raise NotImplementedError()
+
+    def split_vector_result_load(self, node, dag, legalized):
+        ops_chain = node.operands[0]
+        ops_ptr = node.operands[1]
+
+        vts = self.split_value_type(dag, node.value_types[0])
+
+        ofs = 0
+        values = []
+        for vt in vts:
+            elem_size = vt.get_size_in_byte()
+
+            if ofs != 0:
+                offset = DagValue(dag.add_constant_node(ops_ptr.ty, ofs), 0)
+                addr = DagValue(dag.add_node(VirtualDagOps.ADD, [
+                                ops_ptr.ty], ops_ptr, offset), 0)
+            else:
+                addr = ops_ptr
+
+            value = dag.add_load_node(vt, ops_chain, addr, False)
+            values.append(value)
+
+            ofs += elem_size
+
+        return values
+
+    def split_vector_result_ins_vec_elt(self, node, dag, legalized):
+        vec_op = node.operands[0]
+        ins_elem_op = node.operands[1]
+        index_op = node.operands[2]
+
+        assert(index_op.node.opcode in [
+               VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT])
+        index = index_op.node.value.value
+
+        values = []
+        legalized_vec_op = legalized[vec_op.node]
+
+        for i, elem in enumerate(legalized_vec_op):
+            if i == index:
+                values.append(ins_elem_op.node)
+            else:
+                values.append(elem)
+
+        return values
+
+    def split_vector_result(self, node, dag, legalized):
+        if node.opcode == VirtualDagOps.BUILD_VECTOR:
+            return self.split_vector_result_build_vec(node, dag, legalized)
+        if node.opcode in [VirtualDagOps.FADD, VirtualDagOps.FSUB, VirtualDagOps.FMUL, VirtualDagOps.FDIV]:
+            return self.split_vector_result_bin(node, dag, legalized)
+        if node.opcode == VirtualDagOps.LOAD:
+            return self.split_vector_result_load(node, dag, legalized)
+        if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
+            return self.split_vector_result_ins_vec_elt(node, dag, legalized)
+
+        return None
+
+    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
         for vt in node.value_types:
             if vt.value_type == ValueType.I1:
                 return self.promote_integer_result(node, dag, legalized)
 
-        return node
+            if vt.value_type == ValueType.I32:
+                if dag.mfunc.target_info.triple.arch == ArchType.RISCV32:
+                    return None
+
+                return self.promote_integer_result(node, dag, legalized)
+
+            if vt.value_type in [ValueType.V4F32]:
+                return self.split_vector_result(node, dag, legalized)
+
+        return None
+
+    def split_vector_operand_store(self, node, i, dag: Dag, legalized):
+        ops_chain = self.get_legalized_op(node.operands[0], legalized)
+        ops_src_vec = self.get_legalized_op(node.operands[1], legalized)
+        ops_ptr = node.operands[2]
+
+        vts = self.split_value_type(dag, node.operands[1].node.value_types[0])
+
+        ofs = 0
+        chains = []
+        for idx, vt in enumerate(vts):
+            elem_size = vt.get_size_in_byte()
+
+            if ofs != 0:
+                offset = DagValue(dag.add_constant_node(ops_ptr.ty, ofs), 0)
+                addr = DagValue(dag.add_node(VirtualDagOps.ADD, [
+                                ops_ptr.ty], ops_ptr, offset), 0)
+            else:
+                addr = ops_ptr
+
+            ops_src = ops_src_vec[idx]
+
+            chain = DagValue(dag.add_store_node(
+                ops_chain, addr, ops_src, False, mem_operand=node.mem_operand), 0)
+            chains.append(chain)
+
+            ofs += elem_size
+
+        return dag.add_node(VirtualDagOps.TOKEN_FACTOR, [MachineValueType(ValueType.OTHER)], *chains)
+
+    def split_vector_operand_ext_vec_elt(self, node, i, dag: Dag, legalized):
+        vec_op = self.get_legalized_op(node.operands[0], legalized)
+        index_op = node.operands[1]
+
+        assert(index_op.node.opcode == VirtualDagOps.TARGET_CONSTANT)
+        index = index_op.node.value.value
+
+        return vec_op[index]
+
+    def promote_integer_operand_setcc(self, node, i, dag: Dag, legalized):
+        lhs = self.get_legalized_op(node.operands[0], legalized)
+        rhs = self.get_legalized_op(node.operands[1], legalized)
+        condcode = node.operands[2]
+
+        return dag.add_node(node.opcode, node.value_types, lhs, rhs, condcode)
+
+    def promote_integer_operand_brcond(self, node, i, dag: Dag, legalized):
+        chain_op = self.get_legalized_op(node.operands[0], legalized)
+        cond_op = self.get_legalized_op(node.operands[1], legalized)
+        dst_op = self.get_legalized_op(node.operands[2], legalized)
+
+        return dag.add_node(VirtualDagOps.BRCOND, node.value_types, chain_op, cond_op, dst_op)
+
+    def promote_integer_operand_copy_to_reg(self, node, i, dag: Dag, legalized):
+        chain_op = node.operands[0]
+        dst_op = node.operands[1]
+        src_op = self.get_legalized_op(node.operands[2], legalized)
+
+        return dag.add_node(VirtualDagOps.COPY_TO_REG, node.value_types, chain_op, dst_op, src_op)
+
+    def legalize_node_operand(self, node, i, dag: Dag, legalized):
+        operand = node.operands[i]
+        vt = operand.ty
+
+        if vt.value_type == ValueType.I1:
+            if node.opcode == VirtualDagOps.BRCOND:
+                return self.promote_integer_operand_brcond(
+                    node, i, dag, legalized)
+
+        if vt.value_type == ValueType.I32:
+            if dag.mfunc.target_info.triple.arch == ArchType.RISCV32:
+                return None
+
+            if node.opcode == VirtualDagOps.COPY_TO_REG:
+                return self.promote_integer_operand_copy_to_reg(
+                    node, i, dag, legalized)
+
+            if node.opcode == VirtualDagOps.ADD:
+                return None
+
+            if node.opcode == VirtualDagOps.SETCC:
+                return self.promote_integer_operand_setcc(
+                    node, i, dag, legalized)
+
+            if node.opcode == RISCVDagOps.RETURN:
+                ops = []
+                for op in node.operands:
+                    ops.append(self.get_legalized_op(op, legalized))
+                return dag.add_node(node.opcode, node.value_types, *ops)
+
+            if node.opcode == VirtualDagOps.STORE:
+                op_chain = node.operands[0]
+                op_val = self.get_legalized_op(node.operands[1], legalized)
+                op_ptr = node.operands[2]
+                return dag.add_store_node(op_chain, op_ptr, op_val, False, mem_operand=node.mem_operand)
+
+            if node.opcode == VirtualDagOps.BRCOND:
+                return self.promote_integer_operand_brcond(
+                    node, dag, i, legalized)
+
+            if node.opcode == VirtualDagOps.CALLSEQ_START:
+                return None
+            if node.opcode == VirtualDagOps.CALLSEQ_END:
+                return None
+
+            return None
+
+        if vt.value_type == ValueType.V4F32:
+            if node.opcode == VirtualDagOps.STORE:
+                return self.split_vector_operand_store(
+                    node, i, dag, legalized)
+            if node.opcode == VirtualDagOps.EXTRACT_VECTOR_ELT:
+                return self.split_vector_operand_ext_vec_elt(
+                    node, i, dag, legalized)
+
+            if node.opcode in [
+                    VirtualDagOps.FADD, VirtualDagOps.FSUB, VirtualDagOps.FMUL, VirtualDagOps.FDIV]:
+                return None
+
+            if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
+                return None
+
+            raise NotImplementedError()
+
+        return None
 
 
 class RISCVTargetInfo(TargetInfo):
@@ -1838,7 +1956,7 @@ class RISCVTargetInfo(TargetInfo):
         super().__init__(triple)
 
         self._inst_info = RISCVTargetInstInfo()
-        self._lowering = RISCVTargetLowering()
+        self._lowering = RISCVTargetLowering(self)
         self._reg_info = RISCVTargetRegisterInfo()
         self._calling_conv = RISCVCallingConv()
         self._isel = RISCVInstructionSelector()
@@ -1866,6 +1984,15 @@ class RISCVTargetInfo(TargetInfo):
     def get_frame_lowering(self) -> TargetFrameLowering:
         return self._frame_lowering
 
+    @property
+    def hwmode(self) -> MachineHWMode:
+        if self.triple.arch == ArchType.RISCV32:
+            return RV32
+        elif self.triple.arch == ArchType.RISCV64:
+            return RV64
+
+        raise ValueError("Invalid arch type")
+
 
 class RISCVTargetMachine:
     def __init__(self, triple):
@@ -1889,6 +2016,10 @@ class RISCVTargetMachine:
 
             if objformat == ObjectFormatType.ELF:
                 target_writer = RISCVELFObjectWriter()
+
+                if self.triple.arch == ArchType.RISCV64:
+                    target_writer.is_64bit = True
+
                 writer = ELFObjectWriter(output, target_writer)
                 stream = ELFObjectStream(mccontext, backend, writer, emitter)
 

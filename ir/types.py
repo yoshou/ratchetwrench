@@ -195,6 +195,10 @@ def get_integer_type(width):
     return PrimitiveType(f"i{width}")
 
 
+def get_array_type(elem_ty, size):
+    return ArrayType(elem_ty, size)
+
+
 def get_primitive_size(ty):
     if isinstance(ty, PrimitiveType):
         if ty.name == "i1":

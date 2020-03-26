@@ -1143,8 +1143,9 @@ class X86CallingConv(CallingConv):
             vts = compute_value_types(
                 return_ty, inst.block.func.module.data_layout)
             assert(len(vts) == 1)
+            assert(len(demote_reg) == 1)
             ret_val = DagValue(
-                builder.g.add_register_node(vts[0], demote_reg), 0)
+                builder.g.add_register_node(vts[0], demote_reg[0]), 0)
 
             if ret_val.ty == MachineValueType(ValueType.I32):
                 ret_reg = EAX
@@ -1586,8 +1587,12 @@ class X64TargetInstInfo(TargetInstInfo):
         return copy_inst
 
     def copy_reg_to_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         if size == 4:
@@ -1626,8 +1631,12 @@ class X64TargetInstInfo(TargetInstInfo):
         return copy_inst
 
     def copy_reg_from_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         if size == 1:
@@ -1780,6 +1789,23 @@ def find_if(values, pred):
 class X64TargetLowering(TargetLowering):
     def __init__(self):
         super().__init__()
+
+        self.reg_type_for_vt = {MachineValueType(
+            e): MachineValueType(e) for e in ValueType}
+
+        self.reg_count_for_vt = {MachineValueType(e): 1 for e in ValueType}
+
+    def get_register_type(self, vt):
+        if vt in self.reg_type_for_vt:
+            return self.reg_type_for_vt[vt]
+
+        raise NotImplementedError()
+
+    def get_register_count(self, vt):
+        if vt in self.reg_count_for_vt:
+            return self.reg_count_for_vt[vt]
+
+        raise NotImplementedError()
 
     def lower_setcc(self, node: DagNode, dag: Dag):
         op1 = node.operands[0]
@@ -2221,7 +2247,7 @@ class X64TargetLowering(TargetLowering):
             if val.node.opcode == VirtualDagOps.COPY_FROM_REG:
                 reg = val.node.operands[1].node.reg
                 if isinstance(reg, MachineVirtualRegister):
-                    mfunc.func_info.reg_value_map[arg] = reg
+                    mfunc.func_info.reg_value_map[arg] = [reg]
 
             builder.set_inst_value(arg, val)
 
@@ -2266,20 +2292,12 @@ class X64TargetLowering(TargetLowering):
 
         mov_esp_inst.insert_before(front_inst)
 
-        # The stack and base pointer is aligned by 16 bytes.
+        # The stack and base pointer is aligned by 16 bytes here.
 
-        callee_save_regs = [RBX, R12, R13, R14, R15, RDI, RSI, XMM6,
-                            XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]
-
-        for reg in callee_save_regs:
+        for cs_info in func.frame.calee_save_info:
+            reg = cs_info.reg
             regclass = reg_info.get_regclass_from_reg(reg)
-            mvt = regclass.tys[0]
-            align = int(data_layout.get_pref_type_alignment(
-                mvt.get_ir_type()) / 8)
-            size = mvt.get_size_in_byte()
-
-            frame_idx = func.frame.create_stack_object(size, align)
-            func.frame.calee_save_info.append(CalleeSavedInfo(reg, frame_idx))
+            frame_idx = cs_info.frame_idx
 
             inst_info.copy_reg_to_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
@@ -2397,6 +2415,12 @@ class X64TargetRegisterInfo(TargetRegisterInfo):
 
         return reserved
 
+    def get_callee_saved_regs(self):
+        callee_save_regs = [RBX, R12, R13, R14, R15, RDI, RSI, XMM6,
+                            XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]
+
+        return callee_save_regs
+
     def get_ordered_regs(self, regclass):
         reserved_regs = self.get_reserved_regs()
 
@@ -2480,12 +2504,32 @@ class X64Legalizer(Legalizer):
         else:
             raise ValueError("No method to promote.")
 
-    def legalize_node_type(self, node: DagNode, dag: Dag, legalized):
+    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
         for vt in node.value_types:
             if vt.value_type == ValueType.I1:
                 return self.promote_integer_result(node, dag, legalized)
 
         return node
+
+    def promote_integer_operand_brcond(self, node, dag: Dag, legalized):
+        chain_op = node.operands[0]
+        cond_op = node.operands[1]
+        dst_op = node.operands[2]
+
+        cond_op = DagValue(legalized[cond_op.node], cond_op.index)
+
+        return dag.add_node(VirtualDagOps.BRCOND, node.value_types, chain_op, cond_op, dst_op)
+
+    def legalize_node_operand(self, node, i, dag: Dag, legalized):
+        operand = node.operands[i]
+        vt = operand.ty
+
+        if vt.value_type == ValueType.I1:
+            if node.opcode == VirtualDagOps.BRCOND:
+                return self.promote_integer_operand_brcond(
+                    node, dag, legalized)
+
+        return None
 
 
 class X64TargetInfo(TargetInfo):
@@ -2515,6 +2559,13 @@ class X64TargetInfo(TargetInfo):
 
     def get_frame_lowering(self) -> TargetFrameLowering:
         return X64FrameLowering(16)
+
+    @property
+    def hwmode(self) -> MachineHWMode:
+        if self.triple.arch == ArchType.X86_64:
+            return X64
+
+        raise ValueError("Invalid arch type")
 
 
 class X64TargetMachine:

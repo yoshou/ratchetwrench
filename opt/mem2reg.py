@@ -54,7 +54,7 @@ class Mem2Reg(FunctionPass):
             if isinstance(use, StoreInst):
                 continue
 
-            assert(isinstance(use, LoadInst))
+            assert(isinstance(use, (LoadInst, BitCastInst)))
 
             for load_use in use.uses:
                 for i, operand in enumerate(load_use.operands):
@@ -91,6 +91,7 @@ class Mem2Reg(FunctionPass):
                 pass
             elif isinstance(use, BitCastInst):
                 pass
+                return False
             elif isinstance(use, GetElementPtrInst):
                 if not use.has_all_zero_indices:
                     return False

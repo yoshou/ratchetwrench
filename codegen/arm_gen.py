@@ -140,7 +140,10 @@ class ARMInstructionSelector(InstructionSelector):
         in_type = node.operands[0].ty
         out_type = node.value_types[0]
 
-        if in_type in SPR.tys and out_type.value_type == ValueType.V4F32:
+        hwmode = dag.mfunc.target_info.hwmode
+        tys = SPR.get_types(hwmode)
+
+        if in_type in tys and out_type.value_type == ValueType.V4F32:
             lane = DagValue(dag.add_target_constant_node(
                 MachineValueType(ValueType.I32), 0), 0)
             return dag.add_machine_dag_node(ARMMachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
@@ -152,9 +155,12 @@ class ARMInstructionSelector(InstructionSelector):
         elem = node.operands[1]
         idx = node.operands[2]
 
+        hwmode = dag.mfunc.target_info.hwmode
+
         if isinstance(idx.node, ConstantDagNode):
             if node.value_types[0].value_type == ValueType.V4F32:
-                if elem.ty in SPR.tys:
+                tys = SPR.get_types(hwmode)
+                if elem.ty in tys:
                     idx = DagValue(dag.add_target_constant_node(
                         idx.ty, idx.node.value), 0)
                     subreg_idx = idx.node.value.value
@@ -335,8 +341,9 @@ class ARMCallingConv(CallingConv):
             vts = compute_value_types(
                 return_ty, inst.block.func.module.data_layout)
             assert(len(vts) == 1)
+            assert(len(demote_reg) == 1)
             ret_val = DagValue(
-                builder.g.add_register_node(vts[0], demote_reg), 0)
+                builder.g.add_register_node(vts[0], demote_reg[0]), 0)
 
             if ret_val.ty == MachineValueType(ValueType.I32):
                 ret_reg = R0
@@ -682,8 +689,12 @@ class ARMTargetInstInfo(TargetInstInfo):
         copy_inst.insert_after(inst)
 
     def copy_reg_to_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         noreg = MachineRegister(NOREG)
@@ -744,8 +755,12 @@ class ARMTargetInstInfo(TargetInstInfo):
         return copy_inst
 
     def copy_reg_from_stack(self, reg, stack_slot, regclass, inst: MachineInstruction):
+        hwmode = inst.mbb.func.target_info.hwmode
+
+        tys = regclass.get_types(hwmode)
+
         align = int(regclass.align / 8)
-        size = regclass.tys[0].get_size_in_bits()
+        size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
         noreg = MachineRegister(NOREG)
@@ -1057,6 +1072,23 @@ class ARMTargetLowering(TargetLowering):
     def __init__(self):
         super().__init__()
 
+        self.reg_type_for_vt = {MachineValueType(
+            e): MachineValueType(e) for e in ValueType}
+
+        self.reg_count_for_vt = {MachineValueType(e): 1 for e in ValueType}
+
+    def get_register_type(self, vt):
+        if vt in self.reg_type_for_vt:
+            return self.reg_type_for_vt[vt]
+
+        raise NotImplementedError()
+
+    def get_register_count(self, vt):
+        if vt in self.reg_count_for_vt:
+            return self.reg_count_for_vt[vt]
+
+        raise NotImplementedError()
+
     def lower_setcc(self, node: DagNode, dag: Dag):
         op1 = node.operands[0]
         op2 = node.operands[1]
@@ -1357,8 +1389,12 @@ class ARMTargetLowering(TargetLowering):
         return dag.add_node(ARMDagOps.SUB, node.value_types, *node.operands)
 
     def lower_bitcast(self, node: DagNode, dag: Dag):
-        if node.operands[0].ty in QPR.tys:
-            if node.value_types[0] in QPR.tys:
+        hwmode = dag.mfunc.target_info.hwmode
+
+        tys = QPR.get_types(hwmode)
+
+        if node.operands[0].ty in tys:
+            if node.value_types[0] in tys:
                 return dag.add_node(VirtualDagOps.OR, node.value_types, node.operands[0], node.operands[0])
 
         return node
@@ -1509,7 +1545,7 @@ class ARMTargetLowering(TargetLowering):
             if val.node.opcode == VirtualDagOps.COPY_FROM_REG:
                 reg = val.node.operands[1].node.reg
                 if isinstance(reg, MachineVirtualRegister):
-                    mfunc.func_info.reg_value_map[arg] = reg
+                    mfunc.func_info.reg_value_map[arg] = [reg]
 
             builder.set_inst_value(arg, val)
 
@@ -1555,29 +1591,6 @@ class ARMTargetLowering(TargetLowering):
         mov_esp_inst.add_reg(MachineRegister(SP), RegState.Non)  # From
 
         mov_esp_inst.insert_before(front_inst)
-
-        callee_save_regs = [R4, R5, R6, R7, R8, R9,
-                            R10, D8, D9, D10, D11, D12, D13, D14, D15]
-
-        def is_reg_modified(reg):
-            for alias_reg in iter_reg_aliases(reg):
-                if func.reg_info.get_reg_use_def_chain(MachineRegister(alias_reg)):
-                    return True
-
-            return False
-
-        for reg in callee_save_regs:
-            if not is_reg_modified(reg):
-                continue
-
-            regclass = reg_info.get_regclass_from_reg(reg)
-            mvt = regclass.tys[0]
-            align = int(data_layout.get_pref_type_alignment(
-                mvt.get_ir_type()) / 8)
-            size = mvt.get_size_in_byte()
-
-            frame_idx = func.frame.create_stack_object(size, align)
-            func.frame.calee_save_info.append(CalleeSavedInfo(reg, frame_idx))
 
         stack_size = func.frame.estimate_stack_size(
             ARMMachineOps.ADJCALLSTACKDOWN, ARMMachineOps.ADJCALLSTACKUP)
@@ -1695,14 +1708,22 @@ class ARMTargetLowering(TargetLowering):
 
 
 class ARMTargetRegisterInfo(TargetRegisterInfo):
-    def __init__(self):
+    def __init__(self, target_info):
         super().__init__()
+
+        self.target_info = target_info
 
     def get_reserved_regs(self):
         reserved = []
         reserved.extend([R11, R12, SP, LR, PC])
 
         return reserved
+
+    def get_callee_saved_regs(self):
+        callee_save_regs = [R4, R5, R6, R7, R8, R9,
+                            R10, D8, D9, D10, D11, D12, D13, D14, D15]
+
+        return callee_save_regs
 
     def get_ordered_regs(self, regclass):
         reserved_regs = self.get_reserved_regs()
@@ -1745,8 +1766,10 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
         raise ValueError("Could not find the register class.")
 
     def get_regclass_for_vt(self, vt):
+        hwmode = self.target_info.hwmode
         for regclass in arm_regclasses:
-            if vt in regclass.tys:
+            tys = regclass.get_types(hwmode)
+            if vt in tys:
                 return regclass
 
         raise ValueError("Could not find the register class.")
@@ -1808,12 +1831,160 @@ class ARMLegalizer(Legalizer):
         else:
             raise ValueError("No method to promote.")
 
-    def legalize_node_type(self, node: DagNode, dag: Dag, legalized):
+    def split_vector_result_build_vec(self, node, dag, legalized):
+        return tuple([operand.node for operand in node.operands])
+
+    def split_vector_result_bin(self, node, dag, legalized):
+        ops_lhs = legalized[node.operands[0].node]
+        ops_rhs = legalized[node.operands[1].node]
+
+        assert(len(ops_lhs) == len(ops_rhs))
+
+        values = []
+        for lhs, rhs in zip(ops_lhs, ops_rhs):
+            lhs_val = DagValue(lhs, node.operands[0].index)
+            rhs_val = DagValue(rhs, node.operands[1].index)
+
+            values.append(dag.add_node(
+                node.opcode, [rhs_val.ty], lhs_val, rhs_val))
+
+        return tuple(values)
+
+    def split_value_type(self, dag: Dag, vt):
+        if vt.value_type == ValueType.V4F32:
+            return [vt.get_vector_elem_type()] * vt.get_num_vector_elems()
+
+        raise NotImplementedError()
+
+    def split_vector_result_load(self, node, dag, legalized):
+        ops_chain = DagValue(
+            legalized[node.operands[0].node], node.operands[0].index)
+        ops_ptr = DagValue(
+            legalized[node.operands[1].node], node.operands[1].index)
+
+        vts = self.split_value_type(dag, node.value_types[0])
+
+        ofs = 0
+        values = []
+        for vt in vts:
+            elem_size = vt.get_size_in_byte()
+
+            if ofs != 0:
+                offset = DagValue(dag.add_constant_node(ops_ptr.ty, ofs), 0)
+                addr = DagValue(dag.add_node(VirtualDagOps.ADD, [
+                                ops_ptr.ty], ops_ptr, offset), 0)
+            else:
+                addr = ops_ptr
+
+            value = dag.add_load_node(vt, ops_chain, addr, False)
+            values.append(value)
+
+            ofs += elem_size
+
+        return values
+
+    def split_vector_result_ins_vec_elt(self, node, dag, legalized):
+        vec_op = node.operands[0]
+        ins_elem_op = node.operands[1]
+        index_op = node.operands[2]
+
+        assert(index_op.node.opcode in [
+               VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT])
+        index = index_op.node.value.value
+
+        values = []
+        legalized_vec_op = legalized[vec_op.node]
+
+        for i, elem in enumerate(legalized_vec_op):
+            if i == index:
+                values.append(ins_elem_op.node)
+            else:
+                values.append(elem)
+
+        return values
+
+    def split_vector_result(self, node, dag, legalized):
+        if node.opcode == VirtualDagOps.BUILD_VECTOR:
+            return self.split_vector_result_build_vec(node, dag, legalized)
+        if node.opcode in [VirtualDagOps.FADD, VirtualDagOps.FSUB, VirtualDagOps.FMUL, VirtualDagOps.FDIV]:
+            return self.split_vector_result_bin(node, dag, legalized)
+        if node.opcode == VirtualDagOps.LOAD:
+            return self.split_vector_result_load(node, dag, legalized)
+        if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
+            return self.split_vector_result_ins_vec_elt(node, dag, legalized)
+
+        return node
+
+    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
         for vt in node.value_types:
             if vt.value_type == ValueType.I1:
                 return self.promote_integer_result(node, dag, legalized)
 
         return node
+
+    def split_vector_operand_store(self, node, dag: Dag, legalized):
+
+        ops_chain = DagValue(
+            legalized[node.operands[0].node], node.operands[0].index)
+        ops_src_vec = [DagValue(n, node.operands[1].index)
+                       for n in legalized[node.operands[1].node]]
+        ops_ptr = DagValue(
+            legalized[node.operands[2].node], node.operands[2].index)
+
+        vts = self.split_value_type(dag, node.operands[1].node.value_types[0])
+
+        ofs = 0
+        chains = []
+        for idx, vt in enumerate(vts):
+            elem_size = vt.get_size_in_byte()
+
+            if ofs != 0:
+                offset = DagValue(dag.add_constant_node(ops_ptr.ty, ofs), 0)
+                addr = DagValue(dag.add_node(VirtualDagOps.ADD, [
+                                ops_ptr.ty], ops_ptr, offset), 0)
+            else:
+                addr = ops_ptr
+
+            ops_src = ops_src_vec[idx]
+
+            chain = DagValue(dag.add_store_node(
+                ops_chain, addr, ops_src, False), 0)
+            chains.append(chain)
+
+            ofs += elem_size
+
+        return dag.add_node(VirtualDagOps.TOKEN_FACTOR, [MachineValueType(ValueType.OTHER)], *chains)
+
+    def split_vector_operand_ext_vec_elt(self, node, dag: Dag, legalized):
+        vec_op = node.operands[0]
+        index_op = node.operands[1]
+
+        assert(index_op.node.opcode == VirtualDagOps.TARGET_CONSTANT)
+        index = index_op.node.value.value
+
+        legalized_vec_op = legalized[vec_op.node]
+
+        return legalized_vec_op[index]
+
+    def promote_integer_operand_brcond(self, node, dag: Dag, legalized):
+        chain_op = node.operands[0]
+        cond_op = node.operands[1]
+        dst_op = node.operands[2]
+
+        cond_op = DagValue(legalized[cond_op.node], cond_op.index)
+
+        return dag.add_node(VirtualDagOps.BRCOND, node.value_types, chain_op, cond_op, dst_op)
+
+    def legalize_node_operand(self, node, i, dag: Dag, legalized):
+        operand = node.operands[i]
+        vt = operand.ty
+
+        if vt.value_type == ValueType.I1:
+            if node.opcode == VirtualDagOps.BRCOND:
+                return self.promote_integer_operand_brcond(
+                    node, dag, legalized)
+
+        return None
 
 
 class ARMTargetInfo(TargetInfo):
@@ -1822,7 +1993,7 @@ class ARMTargetInfo(TargetInfo):
 
         self._inst_info = ARMTargetInstInfo()
         self._lowering = ARMTargetLowering()
-        self._reg_info = ARMTargetRegisterInfo()
+        self._reg_info = ARMTargetRegisterInfo(self)
         self._calling_conv = ARMCallingConv()
         self._isel = ARMInstructionSelector()
         self._legalizer = ARMLegalizer()
@@ -1848,6 +2019,13 @@ class ARMTargetInfo(TargetInfo):
 
     def get_frame_lowering(self) -> TargetFrameLowering:
         return self._frame_lowering
+
+    @property
+    def hwmode(self) -> MachineHWMode:
+        if self.triple.arch == ArchType.ARM:
+            return ARM
+
+        raise ValueError("Invalid arch type")
 
 
 class ARMTargetMachine:

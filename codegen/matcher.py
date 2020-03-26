@@ -56,7 +56,7 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
     ops = []
     for name, opnd in inst.ins.items():
-        ops.extend(opnd.apply(dic[name].value))
+        ops.extend(opnd.apply(dic[name].value, dag))
 
     # Capture chain
     chain = None
@@ -123,10 +123,10 @@ class NodePatternMatcher(PatternMatcher):
         self.props = dict(props)
 
     def match(self, node, values, idx, dag):
-        from codegen.types import ValueType
+        from codegen.types import ValueType, MachineValueType
         from codegen.spec import MachineRegisterDef
         from codegen.mir import MachineRegister
-        from codegen.dag import VirtualDagOps, DagValue
+        from codegen.dag import VirtualDagOps, DagValue, StoreDagNode, LoadDagNode
 
         if idx >= len(values):
             return idx, None
@@ -139,6 +139,13 @@ class NodePatternMatcher(PatternMatcher):
         _, res = self.opcode.match(None, [value], 0, dag)
         if not res:
             return idx, None
+
+        mem_vt = self.props["mem_vt"] if "mem_vt" in self.props else None
+        if mem_vt:
+            assert(isinstance(node, (StoreDagNode, LoadDagNode)))
+
+            if node.mem_operand.size != MachineValueType(mem_vt).get_size_in_byte():
+                return idx, None
 
         # Check operands
         operand_idx = 0
@@ -231,7 +238,7 @@ def create_matcher(matcher_or_tuple):
     elif isinstance(matcher_or_tuple, MachineRegisterDef):
         return RegValueMatcher(matcher_or_tuple, matcher_or_tuple)
     else:
-        assert(isinstance(matcher_or_tuple, NodePatternMatcher))
+        assert(isinstance(matcher_or_tuple, PatternMatcher))
         return matcher_or_tuple
 
 
@@ -253,6 +260,7 @@ class NodePatternMatcherGen:
 
 
 from codegen.dag import VirtualDagOps
+from codegen.types import ValueType
 
 
 add_ = NodePatternMatcherGen(VirtualDagOps.ADD)
@@ -273,7 +281,9 @@ fmul_ = NodePatternMatcherGen(VirtualDagOps.FMUL)
 fdiv_ = NodePatternMatcherGen(VirtualDagOps.FDIV)
 
 load_ = NodePatternMatcherGen(VirtualDagOps.LOAD)
+extloadi32_ = NodePatternMatcherGen(VirtualDagOps.LOAD, mem_vt=ValueType.I32)
 store_ = NodePatternMatcherGen(VirtualDagOps.STORE)
+extstorei32_ = NodePatternMatcherGen(VirtualDagOps.STORE, mem_vt=ValueType.I32)
 br_ = NodePatternMatcherGen(VirtualDagOps.BR)
 brcond_ = NodePatternMatcherGen(VirtualDagOps.BRCOND)
 
@@ -302,6 +312,8 @@ frameindex_ = NodeOpcodePatternMatcher(VirtualDagOps.FRAME_INDEX)
 tframeindex_ = NodeOpcodePatternMatcher(VirtualDagOps.TARGET_FRAME_INDEX)
 externalsym_ = NodeOpcodePatternMatcher(VirtualDagOps.EXTERNAL_SYMBOL)
 texternalsym_ = NodeOpcodePatternMatcher(VirtualDagOps.TARGET_EXTERNAL_SYMBOL)
+tglobaltlsaddr_ = NodeOpcodePatternMatcher(
+    VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS)
 
 
 class ValueTypeMatcher(NodeValuePatternMatcher):
@@ -354,6 +366,51 @@ f64_ = ValueTypeMatcherGen(ValueType.F64)
 v4f32_ = ValueTypeMatcherGen(ValueType.V4F32)
 
 
+class CondCodePatternMatcher(PatternMatcher):
+    def __init__(self, condcode, name=None):
+        super().__init__(name)
+
+        self.condcode = condcode
+
+    def match(self, node, values, idx, dag):
+        if idx >= len(values):
+            return idx, None
+
+        value = values[idx]
+
+        if value.node.opcode != VirtualDagOps.CONDCODE:
+            return idx, None
+
+        if value.node.cond != self.condcode:
+            return idx, None
+
+        return idx + 1, MatcherResult(self.name, value)
+
+
+from codegen.dag import CondCode
+
+SETOEQ = CondCodePatternMatcher(CondCode.SETOEQ)
+SETOGT = CondCodePatternMatcher(CondCode.SETOGT)
+SETOGE = CondCodePatternMatcher(CondCode.SETOGE)
+SETOLT = CondCodePatternMatcher(CondCode.SETOLT)
+SETOLE = CondCodePatternMatcher(CondCode.SETOLE)
+SETONE = CondCodePatternMatcher(CondCode.SETONE)
+SETO = CondCodePatternMatcher(CondCode.SETO)
+SETUO = CondCodePatternMatcher(CondCode.SETUO)
+SETUEQ = CondCodePatternMatcher(CondCode.SETUEQ)
+SETUGT = CondCodePatternMatcher(CondCode.SETUGT)
+SETUGE = CondCodePatternMatcher(CondCode.SETUGE)
+SETULT = CondCodePatternMatcher(CondCode.SETULT)
+SETULE = CondCodePatternMatcher(CondCode.SETULE)
+SETUNE = CondCodePatternMatcher(CondCode.SETUNE)
+SETEQ = CondCodePatternMatcher(CondCode.SETEQ)
+SETGT = CondCodePatternMatcher(CondCode.SETGT)
+SETGE = CondCodePatternMatcher(CondCode.SETGE)
+SETLT = CondCodePatternMatcher(CondCode.SETLT)
+SETLE = CondCodePatternMatcher(CondCode.SETLE)
+SETNE = CondCodePatternMatcher(CondCode.SETNE)
+
+
 class ComplexOperandMatcher(NodeValuePatternMatcher):
     def __init__(self, func, name=None):
         super().__init__(name)
@@ -402,9 +459,11 @@ class RegClassMatcher(NodeValuePatternMatcher):
         if idx >= len(values):
             return idx, None
 
+        tys = self.regclass.get_types(dag.mfunc.target_info.hwmode)
+
         value = values[idx]
 
-        if value.ty in self.regclass.tys:
+        if value.ty in tys:
             return idx + 1, MatcherResult(self.name, value)
 
         return idx, None
@@ -467,7 +526,7 @@ class SimplePattern(PatternMatcher):
         from codegen.mir import MachineRegister
         from codegen.dag import VirtualDagOps, DagValue
 
-        value = DagValue(node, 0) 
+        value = DagValue(node, 0)
 
         return self.pattern.match(None, [value], 0, dag)
 
@@ -488,3 +547,60 @@ def def_pat(pattern, result, patterns):
         opcode_matcher, operand_matchers, value_matchers, {})
 
     patterns.append(SimplePattern(matcher, result))
+
+
+def setoeq_(lhs, rhs): return setcc_(lhs, rhs, SETOEQ)
+
+
+def setoeq_(lhs, rhs): return setcc_(lhs, rhs, SETOEQ)
+
+
+def setogt_(lhs, rhs): return setcc_(lhs, rhs, SETOGT)
+
+
+def setoge_(lhs, rhs): return setcc_(lhs, rhs, SETOGE)
+
+
+def setolt_(lhs, rhs): return setcc_(lhs, rhs, SETOLT)
+
+
+def setole_(lhs, rhs): return setcc_(lhs, rhs, SETOLE)
+
+
+def setone_(lhs, rhs): return setcc_(lhs, rhs, SETONE)
+
+
+def seteq_(lhs, rhs): return setcc_(lhs, rhs, SETEQ)
+
+
+def setgt_(lhs, rhs): return setcc_(lhs, rhs, SETGT)
+
+
+def setge_(lhs, rhs): return setcc_(lhs, rhs, SETGE)
+
+
+def setlt_(lhs, rhs): return setcc_(lhs, rhs, SETLT)
+
+
+def setle_(lhs, rhs): return setcc_(lhs, rhs, SETLE)
+
+
+def setne_(lhs, rhs): return setcc_(lhs, rhs, SETNE)
+
+
+def setueq_(lhs, rhs): return setcc_(lhs, rhs, SETUEQ)
+
+
+def setugt_(lhs, rhs): return setcc_(lhs, rhs, SETUGT)
+
+
+def setuge_(lhs, rhs): return setcc_(lhs, rhs, SETUGE)
+
+
+def setult_(lhs, rhs): return setcc_(lhs, rhs, SETULT)
+
+
+def setule_(lhs, rhs): return setcc_(lhs, rhs, SETULE)
+
+
+def setune_(lhs, rhs): return setcc_(lhs, rhs, SETUNE)

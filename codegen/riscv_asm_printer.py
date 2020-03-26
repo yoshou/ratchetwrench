@@ -18,13 +18,12 @@ def get_bb_symbol(bb: BasicBlock, ctx: MCContext):
     bb_num = bb.number
     func_num = bb.func.func_info.func.module.funcs.index(
         bb.func.func_info.func)
-    prefix = ".LBB"
+    prefix = f"{get_private_global_prefix()}BB"
     return ctx.get_or_create_symbol(f"{prefix}{str(func_num)}_{str(bb_num)}")
 
 
 def get_global_symbol(g: GlobalValue, ctx: MCContext):
-    # name = "_" + g.name
-    name = g.name
+    name = f"{get_global_prefix()}{g.name}"
     return ctx.get_or_create_symbol(name)
 
 
@@ -36,6 +35,10 @@ class RISCVMCExprVarKind(Enum):
     Non = auto()
     Lo = auto()
     Hi = auto()
+    PCRelLo = auto()
+    PCRelHi = auto()
+    TLSGDHi = auto()
+    Call = auto()
 
 
 class RISCVMCExpr(MCTargetExpr):
@@ -44,6 +47,43 @@ class RISCVMCExpr(MCTargetExpr):
 
         self.kind = kind
         self.expr = expr
+
+    @property
+    def pcrel_hi_fixup(self):
+        auipc_sym = self.expr.symbol
+        fragment = auipc_sym.fragment
+
+        if not fragment:
+            return None
+
+        for fixup in fragment.fixups:
+            if fixup.kind not in [RISCVFixupKind.RISCV_PCREL_HI20, RISCVFixupKind.RISCV_TLS_GD_HI20]:
+                continue
+            if fixup.offset == auipc_sym.offset:
+                return fixup
+
+        return None
+
+    def evaluate_expr_as_relocatable(self, layout, fixup: MCFixup):
+        result = evaluate_expr_as_relocatable(
+            self.expr, layout.asm, layout, fixup)
+        if not result:
+            return None
+
+        if fixup.kind in [RISCVFixupKind.RISCV_PCREL_LO12_I, RISCVFixupKind.RISCV_PCREL_LO12_S]:
+            pcrel_hi_fixup = self.pcrel_hi_fixup
+
+            result_hi = evaluate_expr_as_relocatable(
+                pcrel_hi_fixup.value.expr, layout.asm, layout, pcrel_hi_fixup)
+            if not result_hi:
+                return None
+
+            if result_hi.symbol1.symbol.section == self.expr.symbol.section:
+                auipc_offset = layout.get_symbol_offset(result.symbol1.symbol)
+
+                return MCValue(fixup.offset - auipc_offset, result_hi.symbol1, None)
+
+        return result
 
 
 class RISCVMCInstLower:
@@ -69,10 +109,18 @@ class RISCVMCInstLower:
 
         expr = MCSymbolRefExpr(symbol)
 
-        if operand.target_flags & RISCVOperandFlag.MO_LO16.value:
+        if operand.target_flags & RISCVOperandFlag.LO.value:
             expr = RISCVMCExpr(RISCVMCExprVarKind.Lo, expr)
-        elif operand.target_flags & RISCVOperandFlag.MO_HI16.value:
+        elif operand.target_flags & RISCVOperandFlag.HI.value:
             expr = RISCVMCExpr(RISCVMCExprVarKind.Hi, expr)
+        elif operand.target_flags & RISCVOperandFlag.PCREL_LO.value:
+            expr = RISCVMCExpr(RISCVMCExprVarKind.PCRelLo, expr)
+        elif operand.target_flags & RISCVOperandFlag.PCREL_HI.value:
+            expr = RISCVMCExpr(RISCVMCExprVarKind.PCRelHi, expr)
+        elif operand.target_flags & RISCVOperandFlag.TLS_GD_HI.value:
+            expr = RISCVMCExpr(RISCVMCExprVarKind.TLSGDHi, expr)
+        elif operand.target_flags & RISCVOperandFlag.CALL.value:
+            expr = RISCVMCExpr(RISCVMCExprVarKind.Call, expr)
 
         if not operand.is_jti and not operand.is_mbb and operand.offset != 0:
             expr = MCBinaryExpr(MCBinaryOpcode.Add, expr,
@@ -196,11 +244,50 @@ class RISCVAsmPrinter(AsmPrinter):
 
         func = self.mfunc.func_info.func
         func_num = func.module.funcs.index(func)
-        name = f"CPI{func_num}_{index}"
+        name = f"{get_private_global_prefix()}CPI{func_num}_{index}"
         return self.ctx.get_or_create_symbol(name)
 
     def emit_constant_pool(self):
-        pass
+        cp = self.mfunc.constant_pool
+        if len(cp.constants) == 0:
+            return
+
+        cp_sections = OrderedDict()
+        for idx, entry in enumerate(cp.constants):
+            align = entry.alignment
+            kind = self.get_cp_section_kind(entry)
+
+            section = self.ctx.obj_file_info.get_section_for_const(
+                kind, entry.value, align)
+
+            if section not in cp_sections:
+                cp_indices = []
+                cp_sections[section] = cp_indices
+            else:
+                cp_indices = cp_sections[section]
+
+            cp_indices.append(idx)
+
+        for section, cp_indices in cp_sections.items():
+            offset = 0
+            self.stream.switch_section(section)
+            for cp_index in cp_indices:
+                symbol = self.get_cp_index_symbol(cp_index)
+                self.stream.emit_label(symbol)
+
+                cp_entry = cp.constants[cp_index]
+                align = cp_entry.alignment
+
+                aligned_offset = int(int((offset + align - 1) / align) * align)
+
+                self.stream.emit_zeros(aligned_offset - offset)
+                offset = aligned_offset
+
+                data_layout = self.module.data_layout
+                value_size = data_layout.get_type_alloc_size(cp_entry.value.ty)
+                self.emit_global_constant(data_layout, cp_entry.value)
+
+                offset += value_size
 
     def emit_function_header(self, func):
         self.emit_constant_pool()
@@ -247,42 +334,18 @@ class RISCVAsmPrinter(AsmPrinter):
     def emit_instruction(self, inst: MachineInstruction):
         data_layout = self.func.module.data_layout
 
-        if inst.opcode == RISCVMachineOps.CPEntry:
-            label_id = inst.operands[0].val
-            cp_idx = inst.operands[1].index
-
-            self.stream.emit_label(self.get_constant_pool_symbol(cp_idx))
-
-            cp_entry = self.mfunc.constant_pool.constants[cp_idx]
-
-            if cp_entry.is_machine_cp_entry:
-                self.emit_machine_cp_value(data_layout, cp_entry.value)
-            else:
-                self.emit_global_constant(data_layout, cp_entry.value)
-            return
-
-        if inst.opcode == RISCVMachineOps.PIC_ADD:
-            pic_label_id = inst.operands[2].val
-            func_number = self.func.module.funcs.index(self.func)
-            self.stream.emit_label(get_pic_label(
-                pic_label_id, func_number, self.ctx))
-
-            mc_inst = MCInst(RISCVMachineOps.ADDrr)
-            mc_inst.add_operand(MCOperandReg(inst.operands[0].reg))
-            mc_inst.add_operand(MCOperandReg(MachineRegister(PC)))
-            mc_inst.add_operand(MCOperandReg(inst.operands[1].reg))
-            self.emit_mc_inst(mc_inst)
-            return
-
         mc_inst_lower = RISCVMCInstLower(self.ctx, inst.mbb.func, self)
         mc_inst = mc_inst_lower.lower(inst)
 
         for operand in mc_inst.operands:
             if operand.is_expr:
-                if operand.expr.ty == MCExprType.SymbolRef:
+                expr = operand.expr
+                if expr.ty == MCExprType.Target:
+                    expr = expr.expr
+
+                if expr.ty == MCExprType.SymbolRef:
                     if hasattr(self.stream, "assembler"):
-                        self.stream.assembler.register_symbol(
-                            operand.expr.symbol)
+                        self.stream.assembler.register_symbol(expr.symbol)
 
         self.emit_mc_inst(mc_inst)
 
@@ -521,6 +584,10 @@ def get_fixup_size_by_kind(kind: MCFixupKind):
     raise ValueError("kind")
 
 
+def is_int_range(value, bits):
+    return -(1 << (bits - 1)) <= value and value < (1 << (bits - 1))
+
+
 class RISCVAsmBackend(MCAsmBackend):
     def __init__(self):
         super().__init__()
@@ -533,21 +600,26 @@ class RISCVAsmBackend(MCAsmBackend):
 
     def get_fixup_kind_info(self, kind):
         table = {
-            RISCVFixupKind.RISCV_COND_BRANCH: MCFixupKindInfo(
-                "RISCV_COND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            RISCVFixupKind.RISCV_UNCOND_BRANCH: MCFixupKindInfo(
-                "RISCV_UNCOND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            RISCVFixupKind.RISCV_UNCOND_BL: MCFixupKindInfo(
-                "RISCV_UNCOND_BL", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            RISCVFixupKind.RISCV_PCREL_10: MCFixupKindInfo(
-                "RISCV_PCREL_10", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            RISCVFixupKind.RISCV_LDST_PCREL_12: MCFixupKindInfo(
-                "RISCV_LDST_PCREL_12", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            RISCVFixupKind.RISCV_MOVT_HI16: MCFixupKindInfo(
-                "RISCV_MOVT_HI16", 0, 20, MCFixupKindInfoFlag.Non),
-            RISCVFixupKind.RISCV_MOVW_LO16: MCFixupKindInfo(
-                "RISCV_MOVW_LO16", 0, 20, MCFixupKindInfoFlag.Non)
-
+            RISCVFixupKind.RISCV_HI20: MCFixupKindInfo(
+                "RISCV_HI20", 12, 20, MCFixupKindInfoFlag.Non),
+            RISCVFixupKind.RISCV_LO12_I: MCFixupKindInfo(
+                "RISCV_LO12_I", 20, 12, MCFixupKindInfoFlag.Non),
+            RISCVFixupKind.RISCV_LO12_S: MCFixupKindInfo(
+                "RISCV_LO12_S", 0, 32, MCFixupKindInfoFlag.Non),
+            RISCVFixupKind.RISCV_PCREL_HI20: MCFixupKindInfo(
+                "RISCV_PCREL_HI20", 12, 20, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_PCREL_LO12_I: MCFixupKindInfo(
+                "RISCV_PCREL_LO12_I", 20, 12, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_PCREL_LO12_S: MCFixupKindInfo(
+                "RISCV_PCREL_LO12_S", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_TLS_GD_HI20: MCFixupKindInfo(
+                "RISCV_TLS_GD_HI20", 12, 20, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_BRANCH: MCFixupKindInfo(
+                "RISCV_BRANCH", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_CALL: MCFixupKindInfo(
+                "RISCV_CALL", 0, 64, MCFixupKindInfoFlag.IsPCRel),
+            RISCVFixupKind.RISCV_JAL: MCFixupKindInfo(
+                "RISCV_JAL", 12, 20, MCFixupKindInfoFlag.IsPCRel)
         }
 
         if kind in table:
@@ -562,57 +634,52 @@ class RISCVAsmBackend(MCAsmBackend):
     def adjust_fixup_value(self, fixup: MCFixup, fixed_value: int):
         kind = fixup.kind
 
-        if kind in [RISCVFixupKind.RISCV_COND_BRANCH, RISCVFixupKind.RISCV_UNCOND_BRANCH, RISCVFixupKind.RISCV_UNCOND_BL]:
-            return 0xffffff & ((fixed_value - 8) >> 2)
+        if kind in [RISCVFixupKind.RISCV_PCREL_HI20, RISCVFixupKind.RISCV_HI20]:
+            return ((fixed_value + 0x800) >> 12) & 0xfffff
 
-        if kind in [RISCVFixupKind.RISCV_PCREL_10]:
-            fixed_value = fixed_value - 8
-            is_add = 1
-            if fixed_value < 0:
-                is_add = 0
-                fixed_value = -fixed_value
+        if kind in [RISCVFixupKind.RISCV_PCREL_LO12_I, RISCVFixupKind.RISCV_LO12_I]:
+            return fixed_value & 0xfff
 
-            fixed_value = fixed_value >> 2
+        if kind in [RISCVFixupKind.RISCV_JAL]:
+            assert(is_int_range(fixed_value, 21))
+            assert((fixed_value & 1) == 0)
 
-            assert(fixed_value < 256)
+            sign = (fixed_value >> 20) & 0x1
+            hi8 = (fixed_value >> 12) & 0xff
+            mid1 = (fixed_value >> 11) & 0x1
+            lo10 = (fixed_value >> 1) & 0x3ff
 
-            fixed_value = fixed_value | (is_add << 23)
-            return fixed_value
+            return (sign << 19) | (lo10 << 9) | (mid1 << 8) | hi8
 
-        if kind in [RISCVFixupKind.RISCV_LDST_PCREL_12]:
-            fixed_value = fixed_value - 8
-            is_add = 1
-            if fixed_value < 0:
-                is_add = 0
-                fixed_value = -fixed_value
+        if kind in [RISCVFixupKind.RISCV_BRANCH]:
+            assert(is_int_range(fixed_value, 13))
+            assert((fixed_value & 1) == 0)
 
-            fixed_value = get_mod_imm(fixed_value)
+            sign = (fixed_value >> 12) & 0x1
+            hi1 = (fixed_value >> 11) & 0x1
+            mid6 = (fixed_value >> 5) & 0x3f
+            lo4 = (fixed_value >> 1) & 0xf
 
-            assert(fixed_value >= 0)
+            return (sign << 31) | (mid6 << 25) | (lo4 << 8) | (hi1 << 7)
 
-            fixed_value = fixed_value | (is_add << 23)
-            return fixed_value
+        if kind in [RISCVFixupKind.RISCV_CALL]:
+            hi = (fixed_value + 0x800) & 0xfffff000
+            lo = fixed_value & 0xfff
 
-        if kind in [RISCVFixupKind.RISCV_MOVT_HI16]:
-            fixed_value = fixed_value >> 16
-        if kind in [RISCVFixupKind.RISCV_MOVT_HI16, RISCVFixupKind.RISCV_MOVW_LO16]:
-            hi4 = (fixed_value >> 12) & 0xF
-            lo12 = fixed_value & 0xFFF
-
-            return (hi4 << 16) | lo12
-
-        if kind in [MCFixupKind.Data_1, MCFixupKind.Data_2, MCFixupKind.Data_4]:
-            return fixed_value
+            return hi | ((lo << 20) << 32)
 
         raise NotImplementedError()
 
     def apply_fixup(self, fixup: MCFixup, fixed_value: int, contents):
-        size = get_fixup_size_by_kind(fixup.kind)
-        offset = fixup.offset
-        fixed_value = self.adjust_fixup_value(fixup, fixed_value)
+        size_in_bits = self.get_fixup_kind_info(fixup.kind).size
+        offset_in_bits = self.get_fixup_kind_info(fixup.kind).offset
+        size = int((offset_in_bits + size_in_bits + 7) / 8)
 
         if fixed_value == 0:
             return
+
+        offset = fixup.offset
+        fixed_value = self.adjust_fixup_value(fixup, fixed_value)
 
         def to_bytes(value, order):
             import struct
@@ -626,6 +693,8 @@ class RISCVAsmBackend(MCAsmBackend):
         assert(offset < len(contents))
         assert(offset + size <= len(contents))
 
+        fixed_value = fixed_value << offset_in_bits
+
         order = 'little'
         bys = list(to_bytes(fixed_value, order))
 
@@ -633,8 +702,16 @@ class RISCVAsmBackend(MCAsmBackend):
             contents[offset + idx] |= bys[idx]
 
     def should_force_relocation(self, asm, fixup: MCFixup, target):
-        if fixup.kind == RISCVFixupKind.RISCV_UNCOND_BL:
+        if fixup.kind == RISCVFixupKind.RISCV_TLS_GD_HI20:
             return True
+
+        if fixup.kind in [RISCVFixupKind.RISCV_PCREL_LO12_I, RISCVFixupKind.RISCV_PCREL_LO12_S]:
+            pcrel_hi_fixup = fixup.value.pcrel_hi_fixup
+
+            assert(pcrel_hi_fixup.kind in [
+                   RISCVFixupKind.RISCV_PCREL_HI20, RISCVFixupKind.RISCV_TLS_GD_HI20])
+            if pcrel_hi_fixup.value.expr.symbol.section != fixup.value.expr.symbol.section:
+                return True
 
         return False
 
@@ -644,13 +721,81 @@ class RISCVTSFlags(IntFlag):
 
 
 class RISCVFixupKind(Enum):
-    RISCV_COND_BRANCH = auto()
-    RISCV_UNCOND_BRANCH = auto()
-    RISCV_UNCOND_BL = auto()
-    RISCV_PCREL_10 = auto()
-    RISCV_LDST_PCREL_12 = auto()
-    RISCV_MOVW_LO16 = auto()
-    RISCV_MOVT_HI16 = auto()
+    RISCV_HI20 = auto()
+    RISCV_LO12_I = auto()
+    RISCV_LO12_S = auto()
+    RISCV_JAL = auto()
+    RISCV_BRANCH = auto()
+    RISCV_RVC_JUMP = auto()
+    RISCV_RVC_BRANCH = auto()
+    RISCV_PCREL_HI20 = auto()
+    RISCV_PCREL_LO12_I = auto()
+    RISCV_PCREL_LO12_S = auto()
+    RISCV_TLS_GD_HI20 = auto()
+    RISCV_CALL = auto()
+
+
+def get_reg_code(operand):
+    assert(isinstance(operand, MCOperandReg))
+
+    return operand.reg.spec.encoding
+
+
+def get_imm_common_code(inst, operand, fixups):
+
+    assert(operand.is_expr)
+
+    expr = operand.expr
+    ty = expr.ty
+
+    if ty == MCExprType.Target:
+        if expr.kind == RISCVMCExprVarKind.PCRelHi:
+            fixup_kind = RISCVFixupKind.RISCV_PCREL_HI20
+        elif expr.kind == RISCVMCExprVarKind.PCRelLo:
+            if inst.opcode in [RISCVMachineOps.ADDI]:
+                fixup_kind = RISCVFixupKind.RISCV_PCREL_LO12_I
+            else:
+                raise NotImplementedError()
+        elif expr.kind == RISCVMCExprVarKind.Hi:
+            fixup_kind = RISCVFixupKind.RISCV_HI20
+        elif expr.kind == RISCVMCExprVarKind.Lo:
+            if inst.opcode in [RISCVMachineOps.ADDI]:
+                fixup_kind = RISCVFixupKind.RISCV_LO12_I
+            else:
+                raise NotImplementedError()
+        elif expr.kind == RISCVMCExprVarKind.TLSGDHi:
+            fixup_kind = RISCVFixupKind.RISCV_TLS_GD_HI20
+        elif expr.kind == RISCVMCExprVarKind.Call:
+            fixup_kind = RISCVFixupKind.RISCV_CALL
+        else:
+            raise NotImplementedError()
+    elif ty == MCExprType.SymbolRef and expr.kind == MCVariantKind.Non:
+        if inst.opcode == RISCVMachineOps.JAL:
+            fixup_kind = RISCVFixupKind.RISCV_JAL
+        elif inst.opcode in [RISCVMachineOps.BNE]:
+            fixup_kind = RISCVFixupKind.RISCV_BRANCH
+        else:
+            raise NotImplementedError()
+
+    fixups.append(MCFixup(0, expr, fixup_kind))
+
+    return 0
+
+
+def get_imm12_code(inst, operand, fixups):
+    if operand.is_imm:
+        assert(operand.imm < ((1 << 12) - 1))
+        return operand.imm
+
+    return get_imm_common_code(inst, operand, fixups)
+
+
+def get_imm20_code(inst, operand, fixups):
+    if operand.is_imm:
+        assert(operand.imm < ((1 << 20) - 1))
+        return operand.imm
+
+    return get_imm_common_code(inst, operand, fixups)
 
 
 def write_bits(value, bits, offset, count):
@@ -658,945 +803,205 @@ def write_bits(value, bits, offset, count):
     return (value & ~mask) | ((bits << offset) & mask)
 
 
-def get_binop_opcode(inst: MCInst):
-    opcode = inst.opcode
-    if opcode in [RISCVMachineOps.MOVr, RISCVMachineOps.MOVCCi, RISCVMachineOps.MOVCCr]:
-        return 0b1101
-    if opcode in [RISCVMachineOps.ANDri, RISCVMachineOps.ANDrr, RISCVMachineOps.ANDrsi]:
-        return 0b0000
-    if opcode in [RISCVMachineOps.XORri, RISCVMachineOps.XORrr, RISCVMachineOps.XORrsi]:
-        return 0b0001
-    if opcode in [RISCVMachineOps.ORri, RISCVMachineOps.ORrr, RISCVMachineOps.ORrsi]:
-        return 0b1100
-    if opcode in [RISCVMachineOps.ADDri, RISCVMachineOps.ADDrr, RISCVMachineOps.ADDrsi]:
-        return 0b0100
-    if opcode in [RISCVMachineOps.SUBri, RISCVMachineOps.SUBrr, RISCVMachineOps.SUBrsi]:
-        return 0b0010
-    if opcode in [RISCVMachineOps.CMPri, RISCVMachineOps.CMPrr, RISCVMachineOps.CMPrsi]:
-        return 0b1010
-
-    raise NotImplementedError()
-
-
-def get_binop_inst_code(inst: MCInst, cond, imm_op, set_cond, rn, rd):
-    opc = get_binop_opcode(inst)
-
-    if opc == 0b1101:
-        rn = rd
-
-    code = get_inst_code(inst, rn, rd)
-
-    code = write_bits(code, cond, 28, 4)
-
-    code = write_bits(code, 0b0, 26, 2)
-    code = write_bits(code, imm_op, 25, 1)
-    code = write_bits(code, opc, 21, 4)
-
-    if opc == 0b1101:
-        code = write_bits(code, 0, 16, 4)
-
-    if opc == 0b1010:
-        code = write_bits(code, 0, 12, 4)
-        code = write_bits(code, 1, 20, 1)
-
-    if imm_op == 0:
-        code = write_bits(code, get_reg_code(inst.operands[-1]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        imm = get_modimm_code(inst.operands[-1])
-        code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
-def get_inst_code(inst: MCInst, rn, rd):
-    code = 0
-    code = write_bits(code, 0b1110, 28, 4)
-    code = write_bits(code, get_reg_code(rd), 12, 4)
-    code = write_bits(code, get_reg_code(rn), 16, 4)
-    code = write_bits(code, 1, 23, 1)
-
-    return code
-
-
-def get_reg_code(operand):
-    return operand.reg.spec.encoding
-
-
-def get_imm16_code(operand):
-    return read_bits(operand.imm, 0, 16)
-
-
-def get_imm_code(operand):
-    simm = operand.imm
-    is_add = 1
-    if simm < 0:
-        is_add = 0
-        simm = -simm
-
-    return (is_add, simm)
-
-
-def get_shift_opcode(operand):
-    opc = operand.imm & 0b111
-
-    if opc == 0x2:  # lsl
-        return 0x0
-    if opc == 0x3:  # lsr
-        return 0x2
-    if opc == 0x1:  # asr
-        return 0x4
-    if opc == 0x4:  # ror
-        return 0x6
-
-    raise NotImplementedError()
-
-
-def get_shift_offset(operand):
-    return operand.imm >> 3
-
-
-def get_so_imm_code(inst, idx):
-    operands = inst.operands
-
-    value = get_reg_code(operands[idx])
-    shift_op = get_shift_opcode(operands[idx + 1])
-    offset = get_shift_offset(operands[idx + 1])
-
-    return value | (shift_op << 4) | (offset << 7)
-
-
-def get_modimm_code(operand):
-    imm = operand.imm
-    return get_mod_imm(imm)
-
-
-def get_ldst_inst_code(inst: MCInst, is_load, is_byte, imm_op, fixups):
-    code = 0
-    code = write_bits(code, 0b1110, 28, 4)  # always
-    code = write_bits(code, get_reg_code(inst.operands[0]), 12, 4)
-    code = write_bits(code, 1, 23, 1)
-
-    code = write_bits(code, 0b01, 26, 2)
-    code = write_bits(code, 1, 24, 1)  # Pre
-    code = write_bits(code, is_byte, 22, 1)  # Byte
-    code = write_bits(code, 0, 21, 1)  # Write-back
-    code = write_bits(code, is_load, 20, 1)  # Load
-
-    if imm_op == 0:
-        raise NotImplementedError()
-        code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-        code = write_bits(code, reg, 16, 4)
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, is_add, 23, 1)
-
-    return code
-
-
-def get_indexed_ldst_inst_code(inst: MCInst, is_load, is_byte, is_pre, imm_op, rn, rd):
-    code = get_inst_code(inst, rn, rd)
-
-    code = write_bits(code, 0b01, 26, 2)
-    code = write_bits(code, is_pre, 24, 1)
-    code = write_bits(code, is_byte, 22, 1)
-    code = write_bits(code, is_pre, 21, 1)
-    code = write_bits(code, is_load, 20, 1)
-
-    if imm_op == 0:
-        code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        is_add, imm = get_imm_code(inst.operands[2])
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, is_add, 23, 1)
-
-    return code
-
-
-def get_addr_mode_imm12_code(inst, operands, idx):
-    reg_op = operands[idx]
-    imm_op = operands[idx + 1]
-
-    reg = get_reg_code(reg_op)
-    is_add, imm = get_imm_code(imm_op)
-
-    return (reg, is_add, read_bits(imm, 0, 12))
-
-
-def get_indexed_st_inst_code(inst: MCInst, is_byte, is_pre, imm_op, rn, rd, fixups):
-    code = get_indexed_ldst_inst_code(inst, 0, is_byte, is_pre, imm_op, rn, rd)
-
-    reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-
-    code = write_bits(code, 0b0, 25, 1)
-    code = write_bits(code, is_add, 23, 1)
-    code = write_bits(code, reg, 16, 4)
-    code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
-def get_indexed_ld_inst_code(inst: MCInst, is_byte, is_pre, imm_op, rn, rd, fixups):
-    code = get_indexed_ldst_inst_code(inst, 1, is_byte, is_pre, imm_op, rn, rd)
-
-    reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-
-    code = write_bits(code, 0b0, 25, 1)
-    code = write_bits(code, is_add, 23, 1)
-    code = write_bits(code, reg, 16, 4)
-    code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
 def read_bits(value, offset, count):
     mask = (0x1 << count) - 1
     return (value >> offset) & mask
 
 
-def get_hilo16_imm_code(inst: MCInst, idx, fixups):
-    operand = inst.operands[idx]
-    if operand.is_imm:
-        return get_imm16_code(operand)
+def get_rv_inst_r(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.ADD: (0b0110011, 0b000, 0b0000000),
+        RISCVMachineOps.SUB: (0b0110011, 0b000, 0b0100000),
+        RISCVMachineOps.SLL: (0b0110011, 0b001, 0b0000000),
+        RISCVMachineOps.SLT: (0b0110011, 0b010, 0b0000000),
+        RISCVMachineOps.SLTU: (0b0110011, 0b011, 0b0000000),
+        RISCVMachineOps.XOR: (0b0110011, 0b100, 0b0000000),
+        RISCVMachineOps.SRL: (0b0110011, 0b101, 0b0000000),
+        RISCVMachineOps.SRA: (0b0110011, 0b101, 0b0100000),
+        RISCVMachineOps.OR: (0b0110011, 0b110, 0b0000000),
+        RISCVMachineOps.AND: (0b0110011, 0b111, 0b0000000),
 
-    assert(operand.is_expr)
+        RISCVMachineOps.SLLW: (0b0111011, 0b001, 0b0000000),
+        RISCVMachineOps.SRLW: (0b0111011, 0b101, 0b0000000),
+        RISCVMachineOps.SRAW: (0b0111011, 0b101, 0b0100000),
 
-    expr = operand.expr
-    assert(expr.ty == MCExprType.Target)
+        RISCVMachineOps.FADD_S: (0b1010011, 0b000, 0b0000000),
+        RISCVMachineOps.FSUB_S: (0b1010011, 0b000, 0b0000100),
+        RISCVMachineOps.FMUL_S: (0b1010011, 0b000, 0b0001000),
+        RISCVMachineOps.FDIV_S: (0b1010011, 0b000, 0b0001100),
+        RISCVMachineOps.FSGNJ_S: (0b1010011, 0b000, 0b0010000),
 
-    subexpr = expr.expr
+        RISCVMachineOps.FEQ_S: (0b1010011, 0b010, 0b1010000),
+        RISCVMachineOps.FLT_S: (0b1010011, 0b001, 0b1010000),
+        RISCVMachineOps.FLE_S: (0b1010011, 0b000, 0b1010000),
+    }
 
-    if isinstance(subexpr, MCConstantExpr):
-        raise NotImplementedError()
+    opcode, funct3, funct7 = OPCODE_TABLE[inst.opcode]
 
-    assert(isinstance(subexpr, MCExpr))
-    if expr.kind == RISCVMCExprVarKind.Lo:
-        fixup_kind = RISCVFixupKind.RISCV_MOVW_LO16
-    elif expr.kind == RISCVMCExprVarKind.Hi:
-        fixup_kind = RISCVFixupKind.RISCV_MOVT_HI16
-    else:
-        assert(0)
+    rd = get_reg_code(inst.operands[0])
+    rs1 = get_reg_code(inst.operands[1])
+    rs2 = get_reg_code(inst.operands[2])
 
-    fixups.append(MCFixup(0, subexpr, fixup_kind))
-
-    return 0
-
-
-def get_mov_immediate_inst_code(inst: MCInst, opcode, idx, fixups):
     code = 0
-
-    code = write_bits(code, 0b1110, 28, 4)  # cond
-    code = write_bits(code, opcode, 21, 4)  # opcod
-    code = write_bits(code, 0b00, 26, 2)  #
-    code = write_bits(code, get_reg_code(inst.operands[idx]), 12, 4)
-
-    imm = get_hilo16_imm_code(inst, idx+1, fixups)
-
-    code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-    code = write_bits(code, read_bits(imm, 12, 4), 16, 4)
-
-    code = write_bits(code, 0b0, 20, 1)
-    code = write_bits(code, 0b1, 25, 1)
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, rd, 7, 5)
+    code = write_bits(code, funct3, 12, 3)
+    code = write_bits(code, rs1, 15, 5)
+    code = write_bits(code, rs2, 20, 5)
+    code = write_bits(code, funct7, 25, 7)
 
     return code
 
 
-def get_branch_target_code(inst: MCInst, idx, fixup_kind, fixups):
-    operand = inst.operands[idx]
+def get_rv_inst_i(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.ADDI: (0b0010011, 0b000),
+        RISCVMachineOps.SLTI: (0b0010011, 0b010),
+        RISCVMachineOps.SLTIU: (0b0010011, 0b011),
+        RISCVMachineOps.XORI: (0b0010011, 0b100),
+        RISCVMachineOps.ORI: (0b0010011, 0b110),
+        RISCVMachineOps.ANDI: (0b0010011, 0b111),
+        RISCVMachineOps.LW: (0b0000011, 0b010),
+        RISCVMachineOps.FLW: (0b0000111, 0b010),
+        RISCVMachineOps.LD: (0b0000011, 0b011),
+        RISCVMachineOps.FLD: (0b0000111, 0b011),
+        RISCVMachineOps.JALR: (0b1100111, 0b000),
+    }
 
-    if operand.is_expr:
-        expr = operand.expr
-        fixups.append(MCFixup(0, expr, fixup_kind))
-        return 0
+    opcode, funct3 = OPCODE_TABLE[inst.opcode]
 
-    return operand.imm >> 2
+    rd = get_reg_code(inst.operands[0])
+    rs1 = get_reg_code(inst.operands[1])
+    imm = get_imm12_code(inst, inst.operands[2], fixups)
 
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, rd, 7, 5)
+    code = write_bits(code, funct3, 12, 3)
+    code = write_bits(code, rs1, 15, 5)
+    code = write_bits(code, imm, 20, 12)
 
-def get_addr_mode5_code(inst: MCInst, idx, fixups):
-    operands = inst.operands
-
-    op1 = operands[idx]
-
-    if op1.is_expr:
-        reg = PC.encoding
-        is_add, imm = 0, 0
-
-        expr = op1.expr
-        fixups.append(MCFixup(0, expr, RISCVFixupKind.RISCV_PCREL_10))
-    else:
-        imm_op = operands[idx + 1]
-
-        reg = get_reg_code(op1)
-        is_add, imm = get_imm_code(imm_op)
-
-    return (reg, is_add, read_bits(imm, 0, 8))
+    return code
 
 
-def get_addr_mode_imm12_code(inst: MCInst, idx, fixups):
-    operands = inst.operands
+def get_rv_inst_s(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.SW: (0b0100011, 0b010),
+        RISCVMachineOps.FSW: (0b0100111, 0b010),
+        RISCVMachineOps.SD: (0b0100011, 0b011),
+        RISCVMachineOps.FSD: (0b0100111, 0b011),
+    }
 
-    op1 = operands[idx]
+    opcode, funct3 = OPCODE_TABLE[inst.opcode]
 
-    if op1.is_expr:
-        reg = PC.encoding
-        is_add, imm = 0, 0
+    rs2 = get_reg_code(inst.operands[0])
+    rs1 = get_reg_code(inst.operands[1])
+    imm = get_imm12_code(inst, inst.operands[2], fixups)
 
-        expr = op1.expr
-        fixups.append(MCFixup(0, expr, RISCVFixupKind.RISCV_LDST_PCREL_12))
-    else:
-        imm_op = operands[idx + 1]
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, read_bits(imm, 0, 5), 7, 5)
+    code = write_bits(code, funct3, 12, 3)
+    code = write_bits(code, rs1, 15, 5)
+    code = write_bits(code, rs2, 20, 5)
+    code = write_bits(code, read_bits(imm, 5, 7), 25, 7)
 
-        reg = get_reg_code(op1)
-        is_add, imm = get_imm_code(imm_op)
+    return code
 
-    return (reg, is_add, read_bits(imm, 0, 12))
+
+def get_rv_inst_b(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.BEQ: (0b1100011, 0b000),
+        RISCVMachineOps.BNE: (0b1100011, 0b001),
+        RISCVMachineOps.BLT: (0b1100011, 0b100),
+        RISCVMachineOps.BGE: (0b1100011, 0b101),
+        RISCVMachineOps.BLTU: (0b1100011, 0b110),
+        RISCVMachineOps.BGEU: (0b1100011, 0b111),
+    }
+
+    opcode, funct3 = OPCODE_TABLE[inst.opcode]
+
+    rs1 = get_reg_code(inst.operands[0])
+    rs2 = get_reg_code(inst.operands[1])
+    imm = get_imm12_code(inst, inst.operands[2], fixups)
+
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, read_bits(imm, 0, 5), 7, 5)
+    code = write_bits(code, funct3, 12, 3)
+    code = write_bits(code, rs1, 15, 5)
+    code = write_bits(code, rs2, 20, 5)
+    code = write_bits(code, read_bits(imm, 5, 7), 25, 7)
+
+    return code
+
+
+def get_rv_inst_u(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.LUI: (0b0110111),
+        RISCVMachineOps.AUIPC: (0b0010111),
+    }
+
+    opcode = OPCODE_TABLE[inst.opcode]
+
+    rd = get_reg_code(inst.operands[0])
+    imm = get_imm20_code(inst, inst.operands[1], fixups)
+
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, rd, 7, 5)
+    code = write_bits(code, imm, 12, 20)
+
+    return code
+
+
+def get_rv_inst_j(inst: MCInst, fixups):
+
+    if inst.opcode == RISCVMachineOps.JAL:
+        opcode = 0b1101111
+
+    rd = get_reg_code(inst.operands[0])
+    imm = get_imm20_code(inst, inst.operands[1], fixups)
+    imm = read_bits(imm, 12, 8) | (read_bits(imm, 11, 1) << 8) | \
+        (read_bits(imm, 1, 10) << 9) | (read_bits(imm, 20, 1) << 19)
+
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, rd, 7, 5)
+    code = write_bits(code, imm, 12, 20)
+
+    return code
 
 
 def get_inst_binary_code(inst: MCInst, fixups):
     opcode = inst.opcode
     num_operands = len(inst.operands)
 
-    if opcode == RISCVMachineOps.STRi12:
-        return get_ldst_inst_code(inst, 0, 0, 1, fixups)
-
-    if opcode == RISCVMachineOps.LDRi12:
-        return get_ldst_inst_code(inst, 1, 0, 1, fixups)
-
-    if opcode == RISCVMachineOps.MOVi:
-        rd = inst.operands[0]
-
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # cond
-        code = write_bits(code, 0b1101, 21, 4)  # opcod
-        code = write_bits(code, 0b00, 26, 2)  #
-        code = write_bits(code, get_reg_code(rd), 12, 4)
-
-        imm = get_imm16_code(inst.operands[-1])
-
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, 0b0000, 16, 4)
-
-        code = write_bits(code, 0b1, 25, 1)
-
-        return code
-
-    if opcode == RISCVMachineOps.MOVi16:
-        return get_mov_immediate_inst_code(inst, 0b1000, 0, fixups)
-
-    if opcode == RISCVMachineOps.MOVTi16:
-        return get_mov_immediate_inst_code(inst, 0b1010, 1, fixups)
-
-    if opcode == RISCVMachineOps.MOVsi:
-        rd = inst.operands[0]
-
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # cond
-        code = write_bits(code, 0b1101, 21, 4)  # opcod
-        code = write_bits(code, 0b00, 26, 2)  #
-        code = write_bits(code, get_reg_code(rd), 12, 4)
-
-        imm = get_so_imm_code(inst, 1)
-
-        code = write_bits(code, read_bits(imm, 0, 4), 0, 4)
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, read_bits(imm, 5, 7), 5, 7)
-
-        code = write_bits(code, 0b0000, 16, 4)
-
-        code = write_bits(code, 0b0, 25, 1)
-
-        return code
-
-    if opcode == RISCVMachineOps.MOVPCLR:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b0001101000001111000000001110, 0, 28)
-        return code
-
-    if opcode == RISCVMachineOps.STR_PRE_IMM:
-        return get_indexed_st_inst_code(inst, 0, 1, 1, inst.operands[1], inst.operands[0], fixups)
-
-    if opcode == RISCVMachineOps.LDR_POST_IMM:
-        return get_indexed_ld_inst_code(inst, 0, 0, 1, inst.operands[1], inst.operands[0], fixups)
-
-    if opcode in [RISCVMachineOps.MOVr, RISCVMachineOps.ADDrr, RISCVMachineOps.ANDrr, RISCVMachineOps.ORrr, RISCVMachineOps.SUBrr, RISCVMachineOps.XORrr]:
-        return get_binop_inst_code(
-            inst, 0b1110, 0, 0, inst.operands[1], inst.operands[0])
-
-    if opcode in [RISCVMachineOps.CMPrr]:
-        return get_binop_inst_code(
-            inst, 0b1110, 0, 0, inst.operands[0], inst.operands[0])
-
-    if opcode in [RISCVMachineOps.ADDri, RISCVMachineOps.ANDri, RISCVMachineOps.ORri, RISCVMachineOps.SUBri, RISCVMachineOps.XORri]:
-        return get_binop_inst_code(
-            inst, 0b1110, 1, 0, inst.operands[1], inst.operands[0])
-
-    if opcode in [RISCVMachineOps.CMPri]:
-        return get_binop_inst_code(
-            inst, 0b1110, 1, 0, inst.operands[0], inst.operands[0])
-
-    # vfp (between RISCV core register and single-precision register)
-    if opcode in [RISCVMachineOps.VMOVSR]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11100000, 20, 8)  # opc1
-        code = write_bits(code, 0b1010, 8, 4)
-        code = write_bits(code, 0b1, 4, 1)
-
-        code = write_bits(code, 0b0, 5, 2)  # opc2
-
-        code = write_bits(code, 0b0000, 0, 4)
-
-        sn = inst.operands[0]
-        rt = inst.operands[1]
-
-        sn_reg = get_reg_code(sn)
-
-        code = write_bits(code, read_bits(sn_reg, 1, 4), 16, 4)  # Vd
-        code = write_bits(code, read_bits(sn_reg, 0, 1), 7, 1)  # D
-
-        code = write_bits(code, get_reg_code(rt), 12, 4)  # Rt
-
-        return code
-
-    if opcode in [RISCVMachineOps.VLDRS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b01, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
-        return code
-
-    if opcode in [RISCVMachineOps.VLDRD]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b01, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
-        return code
-
-    if opcode in [RISCVMachineOps.VSTRS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b00, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
-        return code
-
-    if opcode in [RISCVMachineOps.VSTRD]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b00, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
-        return code
-
-    if opcode in [RISCVMachineOps.VADDS, RISCVMachineOps.VSUBS, RISCVMachineOps.VMULS, RISCVMachineOps.VDIVS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-
-        if opcode in [RISCVMachineOps.VADDS, RISCVMachineOps.VSUBS, RISCVMachineOps.VMULS]:
-            code = write_bits(code, 0b11100, 23, 5)  # opc1
-        elif opcode in [RISCVMachineOps.VDIVS]:
-            code = write_bits(code, 0b11101, 23, 5)  # opc1
-
-        if opcode in [RISCVMachineOps.VADDS]:
-            code = write_bits(code, 0b11, 20, 2)  # opc2
-        elif opcode in [RISCVMachineOps.VSUBS]:
-            code = write_bits(code, 0b11, 20, 2)
-        elif opcode in [RISCVMachineOps.VMULS]:
-            code = write_bits(code, 0b10, 20, 2)
-        elif opcode in [RISCVMachineOps.VDIVS]:
-            code = write_bits(code, 0b00, 20, 2)
-
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        if opcode in [RISCVMachineOps.VADDS]:
-            code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [RISCVMachineOps.VMULS]:
-            code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [RISCVMachineOps.VSUBS]:
-            code = write_bits(code, 0b1, 6, 1)
-
-        sd = inst.operands[0]
-        sn = inst.operands[1]
-        sm = inst.operands[2]
-
-        sn_reg = get_reg_code(sn)
-        sd_reg = get_reg_code(sd)
-        sm_reg = get_reg_code(sm)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 1, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 0, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VCMPS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11101, 23, 5)  # opc1
-        code = write_bits(code, 0b11, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # dp_operation = (sz == ‘1’)
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, 0b0100, 16, 4)  # Vn
-        code = write_bits(code, 0b0, 7, 1)  # quiet_nan_exc = (E == ‘1’)
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.Bcc]:
-        target = get_branch_target_code(
-            inst, 0, RISCVFixupKind.RISCV_COND_BRANCH, fixups)
-
-        code = 0
-        code = write_bits(code, inst.operands[1].imm, 28, 4)
-        code = write_bits(code, 0b1010, 24, 4)
-        code = write_bits(code, target, 0, 24)
-        return code
-
-    if opcode in [RISCVMachineOps.B]:
-        target = get_branch_target_code(
-            inst, 0, RISCVFixupKind.RISCV_UNCOND_BRANCH, fixups)
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1010, 24, 4)
-        code = write_bits(code, target, 0, 24)
-
-        return code
-
-    if opcode in [RISCVMachineOps.BL]:
-        target = get_branch_target_code(
-            inst, 0, RISCVFixupKind.RISCV_UNCOND_BL, fixups)
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1011, 24, 4)
-        code = write_bits(code, target, 0, 24)
-
-        return code
-
-    if opcode in [RISCVMachineOps.VADDfq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VORRq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)
-        code = write_bits(code, 0b000, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b1, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VST1q64]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b01000, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b1010, 8, 4)  # type == '2' (regs = 2)
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        align_amt = count_trailing_zeros(inst.operands[2].imm)
-
-        if align_amt == 0:
-            align = 0
-        else:
-            assert(align_amt >= 1 and align_amt < 4)
-            align_amt = align_amt - 1
-            assert((inst.operands[2].imm & (2 << align_amt))
-                   == inst.operands[2].imm)
-
-        code = write_bits(code, 3, 6, 2)  # size = log2(nbytes / 8)
-
-        # alignment = if align == ‘00’ then 1 else 4 << UInt(align);
-        code = write_bits(code, align_amt, 4, 2)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        rn_reg = get_reg_code(inst.operands[1])
-        rm_reg = 0b1111
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(rn_reg, 0, 4), 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(rm_reg, 0, 4), 0, 4)  # Rm
-
-        return code
-
-    if opcode in [RISCVMachineOps.VLD1q64]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b01000, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b1010, 8, 4)  # type == '2' (regs = 2)
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        align_amt = count_trailing_zeros(inst.operands[2].imm)
-
-        if align_amt == 0:
-            align = 0
-        else:
-            assert(align_amt >= 1 and align_amt < 4)
-            align_amt = align_amt - 1
-            assert((inst.operands[2].imm & (2 << align_amt))
-                   == inst.operands[2].imm)
-
-        code = write_bits(code, 3, 6, 2)  # size = log2(nbytes / 8)
-
-        # alignment = if align == ‘00’ then 1 else 4 << UInt(align);
-        code = write_bits(code, align_amt, 4, 2)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        rn_reg = get_reg_code(inst.operands[1])
-        rm_reg = 0b1111
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(rn_reg, 0, 4), 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(rm_reg, 0, 4), 0, 4)  # Rm
-
-        return code
-
-    if opcode in [RISCVMachineOps.FMSTAT]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)
-        code = write_bits(code, 0b111011110001, 16, 12)
-        code = write_bits(code, 0b101000010000, 0, 12)
-        code = write_bits(code, 0b1111, 12, 4)
-        return code
-
-    if opcode in [RISCVMachineOps.MOVCCr, RISCVMachineOps.MOVCCi]:
-        cond = inst.operands[3].imm
-        rn, rd = inst.operands[1], inst.operands[0]
-        imm_op = 1 if inst.operands[2].is_imm else 0
-
-        opc = get_binop_opcode(inst)
-
-        if opc == 0b1101:
-            rn = rd
-
-        code = get_inst_code(inst, rn, rd)
-
-        code = write_bits(code, cond, 28, 4)
-
-        code = write_bits(code, 0b0, 26, 2)
-        code = write_bits(code, imm_op, 25, 1)
-        code = write_bits(code, opc, 21, 4)
-
-        if opc == 0b1101:
-            code = write_bits(code, 0, 16, 4)
-
-        if opc == 0b1010:
-            code = write_bits(code, 0, 12, 4)
-            code = write_bits(code, 1, 20, 1)
-
-        if imm_op == 0:
-            code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-        else:
-            assert(imm_op == 1)
-            imm = inst.operands[2].imm
-            code = write_bits(code, imm, 0, 12)
-
-        return code
-
-    if opcode in [RISCVMachineOps.VDUPLN32q]:
-        lane = (inst.operands[2].imm << 4) | 0b100
-
-        code = 0
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00111, 23, 5)  # opc1
-
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 20, 1)
-        code = write_bits(code, 0b0, 8, 1)
-        code = write_bits(code, 0b0, 7, 1)
-
-        code = write_bits(code, lane, 16, 4)  # ln
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1]) >> 1
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VMULfq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00110, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b1, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VSUBfq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.VMOVS]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11101, 23, 5)  # opc1
-        code = write_bits(code, 0b11, 20, 2)
-        code = write_bits(code, 0b0000, 16, 4)
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b01, 6, 2)
-
-        code = write_bits(code, 0b101, 9, 3)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
-        return code
-
-    if opcode in [RISCVMachineOps.STMDB_UPD]:
-        rd = inst.operands[0]
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b10, 23, 2)  # op
-        code = write_bits(code, 0b0, 22, 1)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 27, 1)
-
-        code = write_bits(code, get_reg_code(rd), 16, 4)
-
-        bits = 0
-        for operand in inst.operands[2:]:
-            reg = get_reg_code(operand)
-
-            bits = bits | (1 << reg)
-
-        code = write_bits(code, bits, 0, 16)
-
-        return code
-
-    if opcode in [RISCVMachineOps.LDMIA_UPD]:
-        rd = inst.operands[0]
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b01, 23, 2)  # op
-        code = write_bits(code, 0b0, 22, 1)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 27, 1)
-        code = write_bits(code, 0b1, 20, 1)
-
-        code = write_bits(code, get_reg_code(rd), 16, 4)
-
-        bits = 0
-        for operand in inst.operands[2:]:
-            reg = get_reg_code(operand)
-
-            bits = bits | (1 << reg)
-
-        code = write_bits(code, bits, 0, 16)
-
-        return code
+    if opcode in [
+            RISCVMachineOps.ADD, RISCVMachineOps.SUB, RISCVMachineOps.SLT, RISCVMachineOps.SLTU, RISCVMachineOps.AND,
+            RISCVMachineOps.OR, RISCVMachineOps.SRL, RISCVMachineOps.SRA, RISCVMachineOps.SLL, RISCVMachineOps.XOR,
+            RISCVMachineOps.SLLW, RISCVMachineOps.SRAW, RISCVMachineOps.SRLW,
+            RISCVMachineOps.FADD_S, RISCVMachineOps.FSUB_S, RISCVMachineOps.FMUL_S, RISCVMachineOps.FDIV_S,
+            RISCVMachineOps.FLE_S, RISCVMachineOps.FLT_S, RISCVMachineOps.FSGNJ_S]:
+        return get_rv_inst_r(inst, fixups)
+
+    if opcode in [
+            RISCVMachineOps.ADDI, RISCVMachineOps.XORI, RISCVMachineOps.SLTI, RISCVMachineOps.SLTIU,
+            RISCVMachineOps.JALR,
+            RISCVMachineOps.LW, RISCVMachineOps.LD, RISCVMachineOps.FLW, RISCVMachineOps.FLD]:
+        return get_rv_inst_i(inst, fixups)
+
+    if opcode in [RISCVMachineOps.SW, RISCVMachineOps.SD, RISCVMachineOps.FSW, RISCVMachineOps.FSD]:
+        return get_rv_inst_s(inst, fixups)
+
+    if opcode in [RISCVMachineOps.LUI, RISCVMachineOps.AUIPC]:
+        return get_rv_inst_u(inst, fixups)
+
+    if opcode in [RISCVMachineOps.JAL]:
+        return get_rv_inst_j(inst, fixups)
+
+    if opcode in [RISCVMachineOps.BNE]:
+        return get_rv_inst_b(inst, fixups)
 
     raise NotImplementedError()
 
@@ -1612,9 +1017,35 @@ class RISCVCodeEmitter(MCCodeEmitter):
     def emit_constant(self, value, size, output):
         output.write(value.to_bytes(size, byteorder="little", signed=False))
 
+    def expand_func_call(self, inst: MCInst, fixups, output):
+        func = inst.operands[0]
+        ra = MachineRegister(X1)
+
+        func_expr = func.expr
+
+        mcinst = MCInst(RISCVMachineOps.AUIPC)
+        mcinst.add_operand(MCOperandReg(ra))
+
+        mcinst.add_operand(MCOperandExpr(func_expr))
+
+        code = get_inst_binary_code(mcinst, fixups)
+        self.emit_constant(code, 4, output)
+
+        mcinst = MCInst(RISCVMachineOps.JALR)
+        mcinst.add_operand(MCOperandReg(ra))
+        mcinst.add_operand(MCOperandReg(ra))
+        mcinst.add_operand(MCOperandImm(0))
+
+        code = get_inst_binary_code(mcinst, fixups)
+        self.emit_constant(code, 4, output)
+
     def encode_instruction(self, inst: MCInst, fixups, output):
         opcode = inst.opcode
         num_operands = len(inst.operands)
+
+        if opcode == RISCVMachineOps.PseudoCALL:
+            self.expand_func_call(inst, fixups, output)
+            return
 
         code = get_inst_binary_code(inst, fixups)
 

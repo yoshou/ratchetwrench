@@ -198,6 +198,9 @@ VR128 = def_regclass("VR128", [ValueType.V4F32], 128, [
 
 CCR = def_regclass("CCR", [ValueType.I32], 32, [EFLAGS])
 
+X64 = MachineHWMode("x64")
+
+# build register graph
 reg_graph = compute_reg_graph()
 reg_groups = compute_reg_groups(reg_graph)
 compute_reg_subregs_all(reg_graph)
@@ -734,10 +737,10 @@ class X64MachineOps:
                        )
 
     VMOVSSrm = def_inst("movss_rm",
-                       outs=[("dst", VR128)],
-                       ins=[("src", F32Mem)],
-                       patterns=[set_(("dst", FR32), load_(("src", addr)))]
-                       )
+                        outs=[("dst", VR128)],
+                        ins=[("src", F32Mem)],
+                        patterns=[set_(("dst", FR32), load_(("src", addr)))]
+                        )
 
     # movsd
     MOVSDmi = def_inst("movsd_mi",
@@ -1482,15 +1485,19 @@ class X64MachineOps:
                           patterns=[x64membarrier]
                           )
 
-loadf32_ = lambda addr: f32_(load_(addr))
+
+def loadf32_(addr): return f32_(load_(addr))
+
 
 V_SET0 = def_inst_node_(X64MachineOps.V_SET0)
 VMOVSSrm = def_inst_node_(X64MachineOps.VMOVSSrm)
 
 x64_patterns = []
 
+
 def def_pat_x64(pattern, result):
     def_pat(pattern, result, x64_patterns)
+
 
 def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
 # def_pat(v4f32_(scalar_to_vector_(loadf32_(("src", addr)))), VMOVSSrm(("src", F32Mem)))

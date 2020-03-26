@@ -273,7 +273,7 @@ def infer_subregclass_and_subreg(regclass):
         # Create a new regclass for the registers of the subreg_idx.
         # Types can't be infered.
         subregclass = def_regclass(
-            regclass.name + "_with_" + subreg_idx.name, tys=regclass.tys, align=regclass.align, regs=regs)
+            regclass.name + "_with_" + subreg_idx.name, tys=regclass.ty_infos, align=regclass.align, regs=regs)
         regclass.subclass_and_subregs[subreg_idx] = subregclass
 
 
@@ -281,25 +281,59 @@ NOREG = def_reg("noreg")
 
 
 class MachineOperandDef:
-    def apply(self, values):
+    def apply_value(self, value, dag):
+        return value
+
+    def apply(self, values, dag):
         if not self.operand_info:
-            return [values]
+            value = values
+            return [self.apply_value(value, dag)]
 
         assert(len(self.operand_info) == len(values))
         results = []
         for operand, value in zip(self.operand_info, values):
-            results.extend(operand.apply(value))
+            results.extend(operand.apply(value, dag))
         return results
+
+
+class MachineHWMode:
+    def __init__(self, features):
+        self.features = features
+
+
+class ValueTypeByHWMode:
+    def __init__(self, types):
+        assert(isinstance(types, dict))
+        for hwmode, ty in types.items():
+            assert(isinstance(hwmode, MachineHWMode))
+            assert(isinstance(ty, ValueType))
+
+        self.types = types
+
+    def get_type(self, hwmode: MachineHWMode):
+        return self.types[hwmode]
 
 
 class MachineRegisterClassDef(MachineOperandDef):
     def __init__(self, name, tys, align, regs):
         self.name = name
-        self.tys = [ty if isinstance(
-            ty, MachineValueType) else MachineValueType(ty) for ty in tys]
+        self.ty_infos = tys
+        for ty in tys:
+            assert(isinstance(ty, (ValueType, ValueTypeByHWMode)))
         self.align = align
         self.regs = regs
         self.subclass_and_subregs = {}
+
+    def get_types(self, hwmode):
+        tys = []
+        for ty in self.ty_infos:
+            if isinstance(ty, ValueTypeByHWMode):
+                tys.append(MachineValueType(ty.get_type(hwmode)))
+            else:
+                assert(isinstance(ty, ValueType))
+                tys.append(MachineValueType(ty))
+
+        return tys
 
     @property
     def operand_info(self):
@@ -309,6 +343,19 @@ class MachineRegisterClassDef(MachineOperandDef):
 class ValueOperandDef(MachineOperandDef):
     def __init__(self, ty):
         self.ty = ty
+
+    def apply_value(self, value, dag):
+        from codegen.dag import VirtualDagOps, DagValue
+
+        if value.node.opcode == VirtualDagOps.CONSTANT:
+            value = DagValue(dag.add_target_constant_node(
+                value.ty, value.node.value), 0)
+
+        if value.node.opcode == VirtualDagOps.FRAME_INDEX:
+            value = DagValue(dag.add_frame_index_node(
+                value.ty, value.node.index, True), 0)
+
+        return value
 
     @property
     def operand_info(self):
@@ -355,16 +402,39 @@ def def_node_xform_(opcode, func):
 
 def get_builder(builder_or_tuple):
     if isinstance(builder_or_tuple, tuple):
-        class MatchedOperandBuilder:
-            def __init__(self, name, operand):
+        class MatchedValueBuilder:
+            def __init__(self, name, value):
                 self.name = name
-                self.operand = operand
+                self.value = value
 
             def construct(self, node, dag, result):
                 value = result.values_as_dict[self.name].value
-                return self.operand.apply(value)
+                return self.value.apply(value, dag)
 
-        return MatchedOperandBuilder(*builder_or_tuple)
+        return MatchedValueBuilder(*builder_or_tuple)
+    elif isinstance(builder_or_tuple, int):
+        class ConstantIntBuilder:
+            def __init__(self, value):
+                self.value = value
+
+            def construct(self, node, dag, result):
+                from codegen.dag import DagValue
+
+                return [DagValue(dag.add_target_constant_node(node.value_types[0], self.value), 0)]
+
+        return ConstantIntBuilder(builder_or_tuple)
+    elif isinstance(builder_or_tuple, MachineRegisterDef):
+        class RegisterBuilder:
+            def __init__(self, reg):
+                self.reg = reg
+
+            def construct(self, node, dag, result):
+                from codegen.dag import DagValue
+                from codegen.mir import MachineRegister
+
+                return [DagValue(dag.add_register_node(node.value_types[0], MachineRegister(self.reg)), 0)]
+
+        return RegisterBuilder(builder_or_tuple)
     else:
         return builder_or_tuple
 
@@ -384,9 +454,62 @@ def def_inst_node_(opcode):
 
             inst = self.opcode
 
+            # Capture chain
+            chain = None
+            operand_idx = 0
+            if operand_idx < len(node.operands) and node.operands[operand_idx].ty.value_type == ValueType.OTHER:
+                chain = node.operands[operand_idx]
+                operand_idx += 1
+
+            stack = []
+            if chain is None:
+                stack.append(node)
+
+            while len(stack) > 0:
+                parent_node = stack.pop()
+
+                if len(parent_node.operands) == 0:
+                    break
+
+                if parent_node.operands[0].ty.value_type == ValueType.OTHER:
+                    chain = parent_node.operands[0]
+                    break
+
+                for operand in parent_node.operands:
+                    stack.append(operand.node)
+
+            if not chain:
+                chain = dag.entry
+
+            glue = None
+            for reg in inst.uses:
+                assert(isinstance(reg, MachineRegisterDef))
+                operand = dic[reg].value
+
+                if not operand:
+                    continue
+
+                reg_node = DagValue(dag.add_target_register_node(
+                    operand.ty, reg), 0)
+
+                chain = DagValue(dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)],
+                                              chain, reg_node, operand), 0)
+
+                glue = chain.get_value(1)
+
+            if len(node.operands) > 0 and node.operands[-1].ty.value_type == ValueType.GLUE:
+                glue = node.operands[-1]
+
+            if chain:
+                ops.append(chain)
+
+            if glue:
+                ops.append(glue)
+
             return [DagValue(dag.add_machine_dag_node(inst, node.value_types, *ops), 0)]
 
     return lambda *operands: SDNodeInst(opcode, list(operands))
+
 
 class Constraint:
     def __init__(self, op1, op2):
@@ -395,7 +518,7 @@ class Constraint:
 
 
 class MachineInstructionDef:
-    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False):
+    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False, enabled=None):
         self.mnemonic = mnemonic
         self.outs = OrderedDict(outs)
         self.ins = OrderedDict(ins)
@@ -407,6 +530,8 @@ class MachineInstructionDef:
         self.is_compare = is_compare
         self.is_terminator = is_terminator
         self.is_call = is_call
+
+        self.enabled = enabled
 
         for pattern in self.patterns:
             pattern.inst = self
@@ -609,6 +734,18 @@ class TargetFrameLowering:
     @property
     def stack_grows_direction(self):
         raise NotImplementedError()
+
+    def determinate_callee_saves(self, func, regs):
+        from codegen.mir import MachineRegister
+
+        def is_reg_modified(reg):
+            for alias_reg in iter_reg_aliases(reg):
+                if func.reg_info.get_reg_use_def_chain(MachineRegister(alias_reg)):
+                    return True
+
+            return False
+
+        return [reg for reg in regs if is_reg_modified(reg)]
 
 
 class TargetLowering:

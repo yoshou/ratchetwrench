@@ -115,7 +115,17 @@ def def_riscv_regclass(*args, **kwargs):
     return regclass
 
 
-GPR = def_riscv_regclass("GPR", [ValueType.I32], 32, [
+RV32 = MachineHWMode("rv32")
+RV64 = MachineHWMode("rv64")
+RV128 = MachineHWMode("rv128")
+
+XLenVT = ValueTypeByHWMode({
+    RV32: ValueType.I32,
+    RV64: ValueType.I64,
+    RV128: ValueType.I128,
+})
+
+GPR = def_riscv_regclass("GPR", [XLenVT], 32, [
                          globals()[f"X{idx}"] for idx in range(32)])
 
 
@@ -172,23 +182,11 @@ class RISCVDagOp(DagOp):
 class RISCVDagOps(Enum):
     LUI = RISCVDagOp("lui")
     ADDI = RISCVDagOp("addi")
+    SLLW = RISCVDagOp("sllw")
+    SRAW = RISCVDagOp("sraw")
+    SRLW = RISCVDagOp("srlw")
 
     SUB = RISCVDagOp("sub")
-    CMP = RISCVDagOp("cmp")
-    SETCC = RISCVDagOp("setcc")
-    BRCOND = RISCVDagOp("brcond")
-
-    VDUP = RISCVDagOp("vdup")
-
-    SHUFP = RISCVDagOp("shufp")
-    UNPCKL = RISCVDagOp("unpckl")
-    UNPCKH = RISCVDagOp("unpckh")
-
-    MOVSS = RISCVDagOp("movss")
-    MOVSD = RISCVDagOp("movsd")
-
-    CMPFP = RISCVDagOp("cmpfp")
-    FMSTAT = RISCVDagOp("fmstat")
 
     CALL = RISCVDagOp("call")
     RETURN = RISCVDagOp("return")
@@ -200,17 +198,15 @@ class RISCVDagOps(Enum):
     PIC_ADD = RISCVDagOp("pic_add")
 
 
-riscv_brcond_ = NodePatternMatcherGen(RISCVDagOps.BRCOND)
 riscv_sub_ = NodePatternMatcherGen(RISCVDagOps.SUB)
-riscv_cmp_ = NodePatternMatcherGen(RISCVDagOps.CMP)
-riscv_cmpfp_ = NodePatternMatcherGen(RISCVDagOps.CMPFP)
-riscv_fmstat_ = NodePatternMatcherGen(RISCVDagOps.FMSTAT)
-riscv_setcc_ = NodePatternMatcherGen(RISCVDagOps.SETCC)
-riscv_movss_ = NodePatternMatcherGen(RISCVDagOps.MOVSS)
-riscv_shufp_ = NodePatternMatcherGen(RISCVDagOps.SHUFP)
 riscv_let_ = NodePatternMatcherGen(RISCVDagOps.RETURN)
+riscv_call_ = NodePatternMatcherGen(RISCVDagOps.CALL)
 riscv_wrapper_ = NodePatternMatcherGen(RISCVDagOps.WRAPPER)
 riscv_pic_add_ = NodePatternMatcherGen(RISCVDagOps.PIC_ADD)
+
+riscv_sllw_ = NodePatternMatcherGen(RISCVDagOps.SLLW)
+riscv_sraw_ = NodePatternMatcherGen(RISCVDagOps.SRAW)
+riscv_srlw_ = NodePatternMatcherGen(RISCVDagOps.SRLW)
 
 
 def in_bits_signed(value, bits):
@@ -222,162 +218,6 @@ def in_bits_signed(value, bits):
 def in_bits_unsigned(value, bits):
     mx = (1 << (bits)) - 1
     return value >= 0 and value <= mx
-
-# addrmode imm12 'reg +/- imm12'
-
-
-def match_addrmode_imm12(node, values, idx, dag):
-    from codegen.dag import VirtualDagOps, DagValue
-    from codegen.types import ValueType
-
-    value = values[idx]
-
-    if value.node.opcode == VirtualDagOps.FRAME_INDEX:
-        index = value.node.index
-        base = DagValue(
-            dag.add_frame_index_node(value.ty, index, True), 0)
-        offset = DagValue(dag.add_target_constant_node(
-            value.ty, 0), 0)
-
-        return idx + 1, MatcherResult([base, offset])
-
-    if value.node.opcode == VirtualDagOps.ADD:
-        value1 = value.node.operands[0]
-        value2 = value.node.operands[1]
-
-        if value1.node.opcode == VirtualDagOps.CONSTANT:
-            base = value2
-            offset = DagValue(dag.add_target_constant_node(
-                value1.ty, value1.node.value), 0)
-
-            return idx + 1, MatcherResult([base, offset])
-        elif value2.node.opcode == VirtualDagOps.CONSTANT:
-            base = value1
-            offset = DagValue(dag.add_target_constant_node(
-                value2.ty, value2.node.value), 0)
-
-            return idx + 1, MatcherResult([base, offset])
-
-    if value.node.opcode == VirtualDagOps.SUB:
-        if value2.node.opcode == VirtualDagOps.CONSTANT:
-            raise NotImplementedError()
-
-    # if value.node.opcode == RISCVDagOps.WRAPPER:
-    #     base = value.node.operands[0]
-    #     offset = DagValue(dag.add_target_constant_node(
-    #         value.ty, 0), 0)
-
-    #     return idx + 1, MatcherResult([base, offset])
-
-    # only base.
-    base = value
-
-    assert(base.node.opcode != VirtualDagOps.TARGET_CONSTANT)
-
-    offset = DagValue(dag.add_target_constant_node(
-        value.ty, 0), 0)
-
-    return idx + 1, MatcherResult([base, offset])
-
-
-addrmode_imm12 = ComplexOperandMatcher(match_addrmode_imm12)
-
-
-# addrmode 5 'reg +/- (imm8 << 2)'
-def match_addrmode5(node, values, idx, dag: Dag):
-    from codegen.dag import VirtualDagOps, DagValue
-    from codegen.types import ValueType
-
-    value = values[idx]
-
-    if value.node.opcode == VirtualDagOps.FRAME_INDEX:
-        index = value.node.index
-        base = DagValue(
-            dag.add_frame_index_node(value.ty, index, True), 0)
-        offset = DagValue(dag.add_target_constant_node(
-            value.ty, 0), 0)
-
-        return idx + 1, MatcherResult([base, offset])
-
-    if value.node.opcode == VirtualDagOps.ADD:
-        value1 = value.node.operands[0]
-        value2 = value.node.operands[1]
-
-        if value1.node.opcode == VirtualDagOps.CONSTANT:
-            base = value2
-
-            assert(value1.node.value.value % 4 == 0)
-            offset = DagValue(dag.add_target_constant_node(
-                value1.ty, ConstantInt(value1.node.value.value >> 2, value1.node.value.ty)), 0)
-
-            return idx + 1, MatcherResult([base, offset])
-        elif value2.node.opcode == VirtualDagOps.CONSTANT:
-            base = value1
-
-            assert(value2.node.value.value % 4 == 0)
-            offset = DagValue(dag.add_target_constant_node(
-                value2.ty, ConstantInt(value2.node.value.value >> 2, value2.node.value.ty)), 0)
-
-            return idx + 1, MatcherResult([base, offset])
-
-    if value.node.opcode == VirtualDagOps.SUB:
-        if value2.node.opcode == VirtualDagOps.CONSTANT:
-            raise NotImplementedError()
-
-    # if value.node.opcode == RISCVDagOps.WRAPPER:
-    #     base = value.node.operands[0]
-    #     offset = DagValue(dag.add_target_constant_node(
-    #         value.ty, 0), 0)
-
-    #     return idx + 1, MatcherResult([base, offset])
-
-    # only base.
-    base = value
-
-    assert(base.node.opcode != VirtualDagOps.TARGET_CONSTANT)
-
-    offset = DagValue(dag.add_target_constant_node(
-        value.ty, 0), 0)
-
-    return idx + 1, MatcherResult([base, offset])
-
-
-addrmode5 = ComplexOperandMatcher(match_addrmode5)
-
-
-# addrmode 6
-def match_addrmode6(node, values, idx, dag: Dag):
-    from codegen.dag import VirtualDagOps, DagValue
-    from codegen.types import ValueType
-
-    value = values[idx]
-
-    addr = value
-
-    align = DagValue(dag.add_target_constant_node(
-        value.ty, 1), 0)  # TODO: Need alignment information
-
-    return idx + 1, MatcherResult([addr, align])
-
-
-addrmode6 = ComplexOperandMatcher(match_addrmode6)
-
-
-def match_imm0_65535(node, values, idx, dag):
-    from codegen.dag import VirtualDagOps
-    from codegen.types import ValueType
-
-    value = values[idx]
-    if value.node.opcode not in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-        return idx, None
-
-    if not in_bits_unsigned(value.node.value.value, 16):
-        return idx, None
-
-    target_value = DagValue(dag.add_target_constant_node(
-        value.ty, value.node.value), 0)
-
-    return idx + 1, MatcherResult([target_value])
 
 
 def match_addr(node, values, idx, dag):
@@ -437,6 +277,27 @@ def match_addr(node, values, idx, dag):
 addr = ComplexOperandMatcher(match_addr)
 
 
+def match_fi_addr(node, values, idx, dag):
+    from codegen.dag import VirtualDagOps, DagValue
+    from codegen.types import ValueType
+
+    value = values[idx]
+
+    if value.node.opcode == VirtualDagOps.FRAME_INDEX:
+        index = value.node.index
+        fi = DagValue(
+            dag.add_frame_index_node(value.ty, index, True), 0)
+
+        return idx + 1, fi
+
+    return idx, None
+
+
+fi_addr = ComplexOperandMatcher(match_fi_addr)
+
+CallSymbol = ValueOperandDef(ValueType.I32)
+
+
 class RISCVMachineOps:
 
     @classmethod
@@ -449,27 +310,204 @@ class RISCVMachineOps:
         "lw",
         outs=[("dst", GPR)],
         ins=[("src", AddrMode_Imm12)],
-        patterns=[set_(("dst", GPR), load_(("src", addr)))]
+        patterns=[set_(("dst", GPR), load_(("src", addr)))],
+        enabled=lambda target_info: target_info.hwmode == RV32,
     )
 
-    LFW = def_inst(
-        "lfw",
+    LD = def_inst(
+        "ld",
+        outs=[("dst", GPR)],
+        ins=[("src", AddrMode_Imm12)],
+        # patterns=[set_(("dst", GPR), load_(("src", addr)))]
+    )
+
+    FLW = def_inst(
+        "flw",
         outs=[("dst", FPR32)],
         ins=[("src", AddrMode_Imm12)],
         patterns=[set_(("dst", FPR32), load_(("src", addr)))]
     )
 
+    FLD = def_inst(
+        "fld",
+        outs=[("dst", FPR64)],
+        ins=[("src", AddrMode_Imm12)],
+        patterns=[set_(("dst", FPR64), load_(("src", addr)))]
+    )
+
+    SW = def_inst(
+        "sw",
+        outs=[],
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)],
+        patterns=[store_(("dst", GPR), ("src", addr))],
+        enabled=lambda target_info: target_info.hwmode == RV32,
+    )
+
+    SD = def_inst(
+        "sd",
+        outs=[],
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)],
+        # patterns=[store_(("dst", GPR), ("src", addr))]
+    )
+
+    FSW = def_inst(
+        "fsw",
+        outs=[],
+        ins=[("dst", FPR32), ("src", AddrMode_Imm12)],
+        patterns=[store_(("dst", FPR32), ("src", addr))]
+    )
+
+    FSD = def_inst(
+        "fsd",
+        outs=[],
+        ins=[("dst", FPR64), ("src", AddrMode_Imm12)],
+        patterns=[store_(("dst", FPR64), ("src", addr))]
+    )
+
     LUI = def_inst(
         "lui",
         outs=[("dst", GPR)],
-        ins=[("src", imm)],
+        ins=[("src", I32Imm)],
+        patterns=[]
+    )
+
+    AUIPC = def_inst(
+        "auipc",
+        outs=[("dst", GPR)],
+        ins=[("src", I32Imm)],
         patterns=[]
     )
 
     ADDI = def_inst(
         "addi",
         outs=[("dst", GPR)],
-        ins=[("src1", GPR), ("src2", imm)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    SLTI = def_inst(
+        "slti",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    SLTIU = def_inst(
+        "sltiu",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    XORI = def_inst(
+        "xori",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    ORI = def_inst(
+        "ori",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    ANDI = def_inst(
+        "andi",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", I32Imm)],
+        patterns=[]
+    )
+
+    ADD = def_inst(
+        "add",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SUB = def_inst(
+        "sub",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SLL = def_inst(
+        "sll",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SLT = def_inst(
+        "slt",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SLTU = def_inst(
+        "sltu",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    XOR = def_inst(
+        "xor",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SRL = def_inst(
+        "srl",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SRA = def_inst(
+        "sra",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    OR = def_inst(
+        "or",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    AND = def_inst(
+        "and",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SLLW = def_inst(
+        "sllw",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SRLW = def_inst(
+        "srlw",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
+        patterns=[]
+    )
+
+    SRAW = def_inst(
+        "sraw",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)],
         patterns=[]
     )
 
@@ -481,424 +519,175 @@ class RISCVMachineOps:
             ("src1", FPR32), ("src2", FPR32)))]
     )
 
-    BR = def_inst(
-        "b",
+    FMUL_S = def_inst(
+        "fmul_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)],
+        patterns=[set_(("dst", FPR32), fmul_(
+            ("src1", FPR32), ("src2", FPR32)))]
+    )
+
+    FDIV_S = def_inst(
+        "fdiv_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)],
+        patterns=[set_(("dst", FPR32), fdiv_(
+            ("src1", FPR32), ("src2", FPR32)))]
+    )
+
+    FSUB_S = def_inst(
+        "fsub_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)],
+        patterns=[set_(("dst", FPR32), fsub_(
+            ("src1", FPR32), ("src2", FPR32)))]
+    )
+
+    FSGNJ_S = def_inst(
+        "fsgnj_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FSGNJN_S = def_inst(
+        "fsgnjn_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FSGNJX_S = def_inst(
+        "fsgnjx_s",
+        outs=[("dst", FPR32)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FEQ_S = def_inst(
+        "feq_s",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FLT_S = def_inst(
+        "flt_s",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FLE_S = def_inst(
+        "fle_s",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR32), ("src2", FPR32)]
+    )
+
+    FSGNJ_D = def_inst(
+        "fsgnj_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    FSGNJN_D = def_inst(
+        "fsgnjn_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    FSGNJX_D = def_inst(
+        "fsgnjx_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    JAL = def_inst(
+        "jal",
+        outs=[],
+        ins=[("rs1", GPR), ("imm", BrTarget8)],
+        is_terminator=True
+    )
+
+    JALR = def_inst(
+        "jalr",
+        outs=[],
+        ins=[("rs1", GPR), ("rs2", GPR), ("imm", BrTarget8)],
+        is_terminator=True
+    )
+
+    BEQ = def_inst(
+        "beq",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    BNE = def_inst(
+        "bne",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    BLT = def_inst(
+        "blt",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    BGE = def_inst(
+        "bge",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    BLTU = def_inst(
+        "blgu",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    BGEU = def_inst(
+        "bgeu",
+        outs=[],
+        ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
+        is_terminator=True
+    )
+
+    PseudoBR = def_inst(
+        "br",
         outs=[],
         ins=[("dst", BrTarget8)],
         patterns=[br_(("dst", bb))],
         is_terminator=True
     )
 
-    # STRi12 = def_inst(
-    #     "str_i12",
-    #     outs=[],
-    #     ins=[("src", GPR), ("dst", AddrMode_Imm12)],
-    #     patterns=[store_(("src", GPR), ("dst", addrmode_imm12))]
-    # )
+    PseudoRET = def_inst(
+        "ret",
+        outs=[],
+        ins=[],
+        patterns=[(riscv_let_())],
+        is_terminator=True
+    )
 
-    # MOVsi = def_inst(
-    #     "mov_si",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", SORegImm)],
-    #     patterns=[set_(("dst", GPR), ("src", so_reg_imm))]
-    # )
+    PseudoCALL = def_inst(
+        "call",
+        outs=[],
+        ins=[("func", CallSymbol)],
+        is_terminator=True,
+        is_call=True,
+    )
 
-    # MOVi = def_inst(
-    #     "mov_i",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", I32Imm)],
-    #     patterns=[set_(("dst", GPR), ("src", mod_imm))]
-    # )
+    PseudoLLA = def_inst(
+        "lla",
+        outs=[("dst", GPR)],
+        ins=[("src", GPR)]
+    )
 
-    # MOVi16 = def_inst(
-    #     "mov_i16",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", I32Imm)],
-    #     patterns=[set_(("dst", GPR), ("src", imm0_65535))]
-    # )
-
-    # MOVTi16 = def_inst(
-    #     "movt_i16",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("imm", I32Imm)],
-    #     constraints=[Constraint("dst", "src")]
-    # )
-
-    # MOVr = def_inst(
-    #     "mov_r",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR)]
-    # )
-
-    # STR_PRE_IMM = def_inst(
-    #     "str_pre_imm",
-    #     outs=[("rn_web", GPR)],
-    #     ins=[("rt", GPR), ("addr", AddrMode_Imm12)]
-    # )
-
-    # LDR_PRE_IMM = def_inst(
-    #     "ldr_pre_imm",
-    #     outs=[("rt", GPR), ("rn_web", GPR)],
-    #     ins=[("addr", AddrMode_Imm12)]
-    # )
-
-    # STR_POST_IMM = def_inst(
-    #     "str_post_imm",
-    #     outs=[("rn_web", GPR)],
-    #     ins=[("rt", GPR), ("addr", AddrMode_Imm12)]
-    # )
-
-    # LDR_POST_IMM = def_inst(
-    #     "ldr_post_imm",
-    #     outs=[("rt", GPR), ("rn_web", GPR)],
-    #     ins=[("addr", AddrMode_Imm12)]
-    # )
-
-    # # load/store multiple and increment after
-    # LDMIA = def_inst(
-    #     "ldm_ia",
-    #     outs=[],
-    #     ins=[("src", GPR), ("regs", reglist)]
-    # )
-
-    # STMIA = def_inst(
-    #     "stm_ia",
-    #     outs=[],
-    #     ins=[("src", GPR), ("regs", reglist)]
-    # )
-
-    # LDMIA_UPD = def_inst(
-    #     "ldm_ia_upd",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)],
-    #     constraints=[Constraint("dst", "src")]
-    # )
-
-    # STMIA_UPD = def_inst(
-    #     "stm_ia_upd",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)],
-    #     constraints=[Constraint("dst", "src")]
-    # )
-
-    # # load/store multiple and decrement before
-    # LDMDB = def_inst(
-    #     "ldm_db",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)]
-    # )
-
-    # STMDB = def_inst(
-    #     "stm_db",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)]
-    # )
-
-    # LDMDB_UPD = def_inst(
-    #     "ldm_db_upd",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)],
-    #     constraints=[Constraint("dst", "src")]
-    # )
-
-    # STMDB_UPD = def_inst(
-    #     "stm_db_upd",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", GPR), ("regs", reglist)],
-    #     constraints=[Constraint("dst", "src")]
-    # )
-
-    # ADDri = def_inst(
-    #     "add_ri",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), add_(("src1", GPR), ("src2", mod_imm)))]
-    # )
-
-    # ADDrsi = def_inst(
-    #     "add_rsi",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), add_(
-    #         ("src1", GPR), ("src2", so_reg_imm)))]
-    # )
-
-    # ADDrr = def_inst(
-    #     "add_rr",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[set_(("dst", GPR), add_(("src1", GPR), ("src2", GPR)))]
-    # )
-
-    # SUBri = def_inst(
-    #     "sub_ri",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), riscv_sub_(
-    #         ("src1", GPR), ("src2", mod_imm)))]
-    # )
-
-    # SUBrsi = def_inst(
-    #     "sub_rsi",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), riscv_sub_(
-    #         ("src1", GPR), ("src2", so_reg_imm)))]
-    # )
-
-    # SUBrr = def_inst(
-    #     "sub_rr",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[set_(("dst", GPR), riscv_sub_(("src1", GPR), ("src2", GPR)))]
-    # )
-
-    # ANDri = def_inst(
-    #     "and_ri",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), and_(("src1", GPR), ("src2", mod_imm)))]
-    # )
-
-    # ANDrsi = def_inst(
-    #     "and_rsi",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), and_(
-    #         ("src1", GPR), ("src2", so_reg_imm)))]
-    # )
-
-    # ANDrr = def_inst(
-    #     "and_rr",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[set_(("dst", GPR), and_(("src1", GPR), ("src2", GPR)))]
-    # )
-
-    # ORri = def_inst(
-    #     "or_ri",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), or_(("src1", GPR), ("src2", mod_imm)))]
-    # )
-
-    # ORrsi = def_inst(
-    #     "or_rsi",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), or_(("src1", GPR), ("src2", so_reg_imm)))]
-    # )
-
-    # ORrr = def_inst(
-    #     "or_rr",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[set_(("dst", GPR), or_(("src1", GPR), ("src2", GPR)))]
-    # )
-
-    # XORri = def_inst(
-    #     "xor_ri",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), xor_(("src1", GPR), ("src2", mod_imm)))]
-    # )
-
-    # XORrsi = def_inst(
-    #     "xor_rsi",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), xor_(
-    #         ("src1", GPR), ("src2", so_reg_imm)))]
-    # )
-
-    # XORrr = def_inst(
-    #     "xor_rr",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[set_(("dst", GPR), xor_(("src1", GPR), ("src2", GPR)))]
-    # )
-
-    # CMPri = def_inst(
-    #     "cmp_ri",
-    #     outs=[],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[riscv_cmp_(("src1", GPR), ("src2", mod_imm))],
-    #     is_terminator=True
-    # )
-
-    # CMPrsi = def_inst(
-    #     "cmp_rsi",
-    #     outs=[],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[riscv_cmp_(("src1", GPR), ("src2", so_reg_imm))],
-    #     is_terminator=True
-    # )
-
-    # CMPrr = def_inst(
-    #     "cmp_rr",
-    #     outs=[],
-    #     ins=[("src1", GPR), ("src2", GPR)],
-    #     patterns=[riscv_cmp_(("src1", GPR), ("src2", GPR))],
-    #     is_terminator=True
-    # )
-
-    # # vfp instructions
-    # VMOVS = def_inst(
-    #     "vmovs",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src", SPR)]
-    # )
-
-    # VMOVSR = def_inst(
-    #     "vmovsr",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src", GPR)],
-    #     patterns=[set_(("dst", SPR), bitconvert_(("src", GPR)))]
-    # )
-
-    # VLDRS = def_inst(
-    #     "vldrs",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src", AddrMode5)],
-    #     patterns=[set_(("dst", SPR), load_(("src", addrmode5)))]
-    # )
-
-    # VSTRS = def_inst(
-    #     "vstrs",
-    #     outs=[],
-    #     ins=[("src", SPR), ("dst", AddrMode5)],
-    #     patterns=[store_(("src", SPR), ("dst", addrmode5))]
-    # )
-
-    # VADDS = def_inst(
-    #     "vadds",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src1", SPR), ("src2", SPR)],
-    #     patterns=[set_(("dst", SPR), fadd_(("src1", SPR), ("src2", SPR)))]
-    # )
-
-    # VSUBS = def_inst(
-    #     "vsubs",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src1", SPR), ("src2", SPR)],
-    #     patterns=[set_(("dst", SPR), fsub_(("src1", SPR), ("src2", SPR)))]
-    # )
-
-    # VMULS = def_inst(
-    #     "vmuls",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src1", SPR), ("src2", SPR)],
-    #     patterns=[set_(("dst", SPR), fmul_(("src1", SPR), ("src2", SPR)))]
-    # )
-
-    # VDIVS = def_inst(
-    #     "vdivs",
-    #     outs=[("dst", SPR)],
-    #     ins=[("src1", SPR), ("src2", SPR)],
-    #     patterns=[set_(("dst", SPR), fdiv_(("src1", SPR), ("src2", SPR)))]
-    # )
-
-    # VCMPS = def_inst(
-    #     "vcmps",
-    #     outs=[],
-    #     ins=[("src1", SPR), ("src2", SPR)],
-    #     patterns=[riscv_cmpfp_(("src1", SPR), ("src2", SPR))]
-    # )
-
-    # VLDRD = def_inst(
-    #     "vldrd",
-    #     outs=[("dst", DPR)],
-    #     ins=[("src", AddrMode5)],
-    #     patterns=[set_(("dst", DPR), load_(("src", addrmode5)))]
-    # )
-
-    # VSTRD = def_inst(
-    #     "vstrd",
-    #     outs=[],
-    #     ins=[("src", DPR), ("dst", AddrMode5)],
-    #     patterns=[store_(("src", DPR), ("dst", addrmode5))]
-    # )
-
-    # FMSTAT = def_inst(
-    #     "fmstat",
-    #     outs=[],
-    #     ins=[],
-    #     patterns=[riscv_fmstat_()]
-    # )
-
-    # # neon instructions
-    # VLD1q64 = def_inst(
-    #     "vld1_q64",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src", AddrMode6)],
-    #     patterns=[set_(("dst", QPR), load_(("src", addrmode6)))]
-    # )
-    # VST1q64 = def_inst(
-    #     "vst1_q64",
-    #     outs=[],
-    #     ins=[("src", QPR), ("dst", AddrMode6)],
-    #     patterns=[store_(("src", QPR), ("dst", addrmode6))]
-    # )
-
-    # VADDfq = def_inst(
-    #     "vadd_fq",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src1", QPR), ("src2", QPR)],
-    #     patterns=[set_(("dst", QPR), fadd_(("src1", QPR), ("src2", QPR)))]
-    # )
-
-    # VSUBfq = def_inst(
-    #     "vsub_fq",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src1", QPR), ("src2", QPR)],
-    #     patterns=[set_(("dst", QPR), fsub_(("src1", QPR), ("src2", QPR)))]
-    # )
-
-    # VMULfq = def_inst(
-    #     "vmul_fq",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src1", QPR), ("src2", QPR)],
-    #     patterns=[set_(("dst", QPR), fmul_(("src1", QPR), ("src2", QPR)))]
-    # )
-
-    # VORRq = def_inst(
-    #     "vorr_q",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src1", QPR), ("src2", QPR)],
-    #     patterns=[set_(("dst", QPR), or_(("src1", QPR), ("src2", QPR)))]
-    # )
-
-    # # # jcc
-    # Bcc = def_inst(
-    #     "bcc",
-    #     outs=[],
-    #     ins=[("dst", BrTarget8), ("cond", I32Imm)],
-    #     patterns=[riscv_brcond_(("dst", bb), ("cond", timm))],
-    #     is_terminator=True
-    # )
-
-    # B = def_inst(
-    #     "b",
-    #     outs=[],
-    #     ins=[("dst", BrTarget8)],
-    #     patterns=[br_(("dst", bb))],
-    #     is_terminator=True
-    # )
-
-    # BL = def_inst(
-    #     "bl",
-    #     outs=[],
-    #     ins=[("dst", riscv_bl_target)],
-    #     is_call=True
-    # )
-
-    # MOVPCLR = def_inst(
-    #     "movpclr",
-    #     outs=[],
-    #     ins=[],
-    #     patterns=[(riscv_let_())],
-    #     is_terminator=True
-    # )
+    PseudoLA_TLS_GD = def_inst(
+        "la_tls_gd",
+        outs=[("dst", GPR)],
+        ins=[("src", GPR)]
+    )
 
     # pseudo instructions
     ADJCALLSTACKDOWN = def_inst(
@@ -913,90 +702,169 @@ class RISCVMachineOps:
         ins=[("amt1", I32Imm), ("amt2", I32Imm)]
     )
 
-    # MOVCCr = def_inst(
-    #     "movcc_r",
-    #     outs=[("dst", GPR)],
-    #     ins=[("false", GPR), ("true", GPR), ("p", cmovpred)],
-    #     constraints=[Constraint("dst", "false")],
-    #     is_terminator=True
-    # )
 
-    # MOVCCi16 = def_inst(
-    #     "movcc_i16",
-    #     outs=[("dst", GPR)],
-    #     ins=[("false", GPR), ("true", I32Imm), ("p", cmovpred)],
-    #     constraints=[Constraint("dst", "false")],
-    #     is_terminator=True
-    # )
+LW = def_inst_node_(RISCVMachineOps.LW)
+LD = def_inst_node_(RISCVMachineOps.LD)
 
-    # MOVCCi = def_inst(
-    #     "movcc_i",
-    #     outs=[("dst", GPR)],
-    #     ins=[("false", GPR), ("true", I32Imm), ("p", cmovpred)],
-    #     constraints=[Constraint("dst", "false")],
-    #     is_terminator=True
-    # )
+SW = def_inst_node_(RISCVMachineOps.SW)
+SD = def_inst_node_(RISCVMachineOps.SD)
 
-    # VDUPLN32q = def_inst(
-    #     "udup_ln32q",
-    #     outs=[("dst", QPR)],
-    #     ins=[("src", SPR), ("lane", VectorIndex32)]
-    # )
+ADD = def_inst_node_(RISCVMachineOps.ADD)
+SUB = def_inst_node_(RISCVMachineOps.SUB)
+AND = def_inst_node_(RISCVMachineOps.AND)
+OR = def_inst_node_(RISCVMachineOps.OR)
+XOR = def_inst_node_(RISCVMachineOps.XOR)
+SRA = def_inst_node_(RISCVMachineOps.SRA)
+SRL = def_inst_node_(RISCVMachineOps.SRL)
+SLL = def_inst_node_(RISCVMachineOps.SLL)
+SLT = def_inst_node_(RISCVMachineOps.SLT)
+SLTU = def_inst_node_(RISCVMachineOps.SLTU)
 
-    # LDRLIT_ga_abs = def_inst(
-    #     "LDRLIT_ga_abs",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", I32Imm)],
-    #     # patterns=[set_(("dst", GPR), riscv_wrapper_(("src", tglobaladdr_)))]
-    # )
-
-    # PIC_ADD = def_inst(
-    #     "pic_add",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src1", GPR), ("src2", I32Imm)],
-    #     patterns=[set_(("dst", GPR), riscv_pic_add_(
-    #         ("src1", GPR), ("src2", timm)))]
-    # )
-
-    # MOVi32imm = def_inst(
-    #     "mov_i32imm",
-    #     outs=[("dst", GPR)],
-    #     ins=[("src", I32Imm)],
-    #     patterns=[set_(("dst", GPR), riscv_wrapper_(("src", tglobaladdr_)))]
-    # )
-
-    # LEApcrel = def_inst(
-    #     "LEApcrel",
-    #     outs=[("dst", GPR)],
-    #     ins=[("label", I32Imm)],
-    #     patterns=[set_(("dst", GPR), riscv_wrapper_(("label", tconstpool_)))]
-    # )
-
-    # CPEntry = def_inst(
-    #     "CPEntry",
-    #     outs=[],
-    #     ins=[("instid", I32Imm), ("cpidx", I32Imm), ("size", I32Imm)]
-    # )
-
+SRAW = def_inst_node_(RISCVMachineOps.SRAW)
+SRLW = def_inst_node_(RISCVMachineOps.SRLW)
+SLLW = def_inst_node_(RISCVMachineOps.SLLW)
 
 ADDI = def_inst_node_(RISCVMachineOps.ADDI)
+XORI = def_inst_node_(RISCVMachineOps.XORI)
+SLTI = def_inst_node_(RISCVMachineOps.SLTI)
+SLTIU = def_inst_node_(RISCVMachineOps.SLTIU)
 LUI = def_inst_node_(RISCVMachineOps.LUI)
+
+BNE = def_inst_node_(RISCVMachineOps.BNE)
+
+PseudoCALL = def_inst_node_(RISCVMachineOps.PseudoCALL)
+
+FEQ_S = def_inst_node_(RISCVMachineOps.FEQ_S)
+FLT_S = def_inst_node_(RISCVMachineOps.FLT_S)
+FLE_S = def_inst_node_(RISCVMachineOps.FLE_S)
 
 
 from codegen.dag import DagValue
 
 
 HI20 = def_node_xform_(I32Imm, lambda node, dag: DagValue(dag.add_target_constant_node(
-    node.value_types[0], node.value), 0))
+    node.value_types[0], ConstantInt(node.value.value >> 12, node.value.ty)), 0))
 
 
-Lo12Sext = def_node_xform_(I32Imm, lambda node, dag: DagValue(dag.add_target_constant_node(
-    node.value_types[0], node.value), 0))
+def get_bits_sext(value, bits):
+    minus = value < 0
+    value = abs(value)
+
+    value = value & ((1 << bits) - 1)
+
+    if minus:
+        value = -value
+
+    return value
+
+
+LO12Sext = def_node_xform_(I32Imm, lambda node, dag: DagValue(dag.add_target_constant_node(
+    node.value_types[0], ConstantInt(get_bits_sext(node.value.value, 12), node.value.ty)), 0))
 
 
 riscv_patterns = []
 
+
 def def_pat_riscv(pattern, result):
     def_pat(pattern, result, riscv_patterns)
 
-def_pat_riscv(("imm", imm), ADDI(LUI(HI20(("imm", I32Imm))), Lo12Sext(("imm", I32Imm))))
+
+def_pat_riscv(extloadi32_(("src", addr)),
+              LW(("src", AddrMode_Imm12)))
+
+def_pat_riscv(load_(("src", addr)),
+              LD(("src", AddrMode_Imm12)))
+
+def_pat_riscv(extstorei32_(("dst", GPR), ("src", addr)),
+              SW(("dst", GPR), ("src", AddrMode_Imm12)))
+
+def_pat_riscv(store_(("dst", GPR), ("src", addr)),
+              SD(("dst", GPR), ("src", AddrMode_Imm12)))
+
+
+# constant
+def_pat_riscv(("imm", imm), ADDI(
+    LUI(HI20(("imm", I32Imm))), LO12Sext(("imm", I32Imm))))
+
+def_pat_riscv(add_(("rs", fi_addr), ("imm", imm)),
+              ADDI(("rs", GPR), ("imm", I32Imm)))
+
+def_pat_riscv(add_(("src1", GPR), ("imm", imm)),
+              ADDI(("src1", GPR), ("imm", I32Imm)))
+def_pat_riscv(add_(("src1", GPR), ("imm", timm)),
+              ADDI(("src1", GPR), ("imm", I32Imm)))
+
+def_pat_riscv(xor_(("src1", GPR), ("imm", imm)),
+              XORI(("src1", GPR), ("imm", I32Imm)))
+def_pat_riscv(xor_(("src1", GPR), ("imm", timm)),
+              XORI(("src1", GPR), ("imm", I32Imm)))
+
+# binary arithematic
+def_pat_riscv(add_(("src1", GPR), ("src2", GPR)),
+              ADD(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(sub_(("src1", GPR), ("src2", GPR)),
+              SUB(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(and_(("src1", GPR), ("src2", GPR)),
+              AND(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(or_(("src1", GPR), ("src2", GPR)),
+              OR(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(xor_(("src1", GPR), ("src2", GPR)),
+              XOR(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(sra_(("src1", GPR), ("src2", GPR)),
+              SRA(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(srl_(("src1", GPR), ("src2", GPR)),
+              SRL(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(shl_(("src1", GPR), ("src2", GPR)),
+              SLL(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(riscv_sraw_(("src1", GPR), ("src2", GPR)),
+              SRAW(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(riscv_srlw_(("src1", GPR), ("src2", GPR)),
+              SRLW(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(riscv_sllw_(("src1", GPR), ("src2", GPR)),
+              SLLW(("src1", GPR), ("src2", GPR)))
+
+# integer compare
+def_pat_riscv(seteq_(("src1", GPR), ("src2", GPR)),
+              SLTIU(XOR(("src1", GPR), ("src2", GPR)), 1))
+def_pat_riscv(seteq_(("src1", GPR), ("imm", imm)),
+              SLTIU(XORI(("src1", GPR), ("imm", I32Imm)), 1))
+
+def_pat_riscv(setne_(("src1", GPR), ("src2", GPR)),
+              SLTU(X0, XOR(("src1", GPR), ("src2", GPR))))
+
+def_pat_riscv(setult_(("src1", GPR), ("src2", GPR)),
+              SLTU(("src1", GPR), ("src2", GPR)))
+def_pat_riscv(setlt_(("src1", GPR), ("src2", GPR)),
+              SLT(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(setugt_(("src1", GPR), ("src2", GPR)),
+              SLTU(("src2", GPR), ("src1", GPR)))
+def_pat_riscv(setgt_(("src1", GPR), ("src2", GPR)),
+              SLT(("src2", GPR), ("src1", GPR)))
+
+# float compare
+def_pat_riscv(setoeq_(("src1", FPR32), ("src2", FPR32)),
+              FEQ_S(("src1", FPR32), ("src2", FPR32)))
+def_pat_riscv(setolt_(("src1", FPR32), ("src2", FPR32)),
+              FLT_S(("src1", FPR32), ("src2", FPR32)))
+def_pat_riscv(setole_(("src1", FPR32), ("src2", FPR32)),
+              FLE_S(("src1", FPR32), ("src2", FPR32)))
+
+def_pat_riscv(setogt_(("src1", FPR32), ("src2", FPR32)),
+              FLT_S(("src2", FPR32), ("src1", FPR32)))
+def_pat_riscv(setoge_(("src1", FPR32), ("src2", FPR32)),
+              FLE_S(("src2", FPR32), ("src1", FPR32)))
+
+# branch, call
+def_pat_riscv(brcond_(("cond", GPR), ("imm", bb)),
+              BNE(("cond", GPR), X0, ("imm", BrTarget8)))
+
+def_pat_riscv(riscv_call_(("func", tglobaladdr_)),
+              PseudoCALL(("func", CallSymbol)))
+
+def_pat_riscv(riscv_call_(("func", tglobaltlsaddr_)),
+              PseudoCALL(("func", CallSymbol)))
+
+def_pat_riscv(riscv_call_(("func", texternalsym_)),
+              PseudoCALL(("func", CallSymbol)))
