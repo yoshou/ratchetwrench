@@ -11,13 +11,23 @@ class DeadMachineCodeElim(MachineFunctionPass):
         super().__init__()
 
     def is_dead_inst(self, inst: MachineInstruction):
+        reg_info = inst.mbb.func.reg_info
+
+        # TODO: Need a flag to indicate side effects.
+        has_def = False
         for operand in inst.operands:
             if not operand.is_reg or not operand.is_def:
                 continue
 
-            for use in operand.get_use_iter():
-                if use != inst:
-                    return False # The register is used by another operand.
+            if operand.is_phys:
+                return False
+
+            has_def = True
+
+            if not reg_info.is_use_empty(operand.reg):
+                return False # The register is used by another operand.
+
+        return has_def
 
 
     def process_instruction(self, inst: MachineInstruction):

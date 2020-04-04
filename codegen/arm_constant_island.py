@@ -18,8 +18,8 @@ class ARMConstantIsland(MachineFunctionPass):
 
         cp = mfunc.constant_pool
 
-        mbb = MachineBasicBlock(mfunc)
-        mfunc.bbs.append(mbb)
+        mbb = MachineBasicBlock()
+        mfunc.append_bb(mbb)
 
         for i, entry in enumerate(cp.constants):
             from codegen.arm_def import ARMMachineOps

@@ -60,6 +60,7 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
     # Capture chain
     chain = None
+
     operand_idx = 0
     if operand_idx < len(node.operands) and node.operands[operand_idx].ty.value_type == ValueType.OTHER:
         chain = node.operands[operand_idx]

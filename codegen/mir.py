@@ -82,7 +82,7 @@ class MachineFrame:
         self.stack_object = []
         self.fixed_count = 0
         self.func = func
-        self.max_alignment = 0
+        self.max_alignment = 1
         self.stack_alignment = stack_alignment
         self.calee_save_info = []
 
@@ -258,6 +258,13 @@ class MachineRegisterInfo:
 
             current = current.next
 
+    def get_use_def_iter(self, reg):
+        current = self.get_reg_use_def_chain(reg)
+
+        while current is not None:
+            yield current
+            current = current.next
+
     def has_one_use(self, reg):
         it = self.get_use_iter(reg)
         if next(it, None) == None:
@@ -302,7 +309,7 @@ class FunctionInfo:
 class MachineFunction:
     def __init__(self, target_info, func: Function):
         self.target_info = target_info
-        self.bbs = []
+        self._bbs = []
 
         stack_align = target_info.get_frame_lowering().stack_alignment
 
@@ -310,6 +317,36 @@ class MachineFunction:
         self.reg_info = MachineRegisterInfo(self)
         self.func_info = FunctionInfo(func, target_info.get_calling_conv())
         self.constant_pool = MachineConstantPool(func.module.data_layout)
+
+    @property
+    def bbs(self):
+        return tuple(self._bbs)
+
+    def append_bb(self, bb):
+        self.insert_bb(bb, len(self._bbs))
+
+    def insert_bb(self, bb, index):
+        if bb.func is not None:
+            raise ValueError("The basic block exists in another.")
+
+        for bb_after in self._bbs[index:]:
+            bb_after.index += 1
+        bb.index = index
+        bb.func = self
+
+        self._bbs.insert(index, bb)
+
+    def remove_bb(self, bb):
+        if bb.func is not self:
+            raise ValueError("The basic block exists in another.")
+
+        index = bb.index
+        for bb_after in self._bbs[index:]:
+            bb_after.index -= 1
+        bb.index = -1
+        bb.func = None
+
+        self._bbs.pop(index)
 
     def create_stack_object(self, size, align):
         return self.frame.create_stack_object(size, align)
@@ -378,15 +415,16 @@ class MachineFunction:
 
 
 class MachineBasicBlock:
-    def __init__(self, func: MachineFunction):
-        self.func = func
+    def __init__(self):
+        self.func = None
         self._insts = []
+        self.index = -1
 
         self.successors = []
         self.predecessors = []
 
     def split_basic_block(self, inst):
-        new_mbb = MachineBasicBlock(self.func)
+        new_mbb = MachineBasicBlock()
 
         split_idx = self._insts.index(inst)
         for inst in self._insts[split_idx:]:
@@ -396,16 +434,22 @@ class MachineBasicBlock:
         for idx in reversed(range(split_idx, len(self._insts))):
             self._insts.pop(idx)
 
-        self.func.bbs.insert(self.number + 1, new_mbb)
+        self.func.insert_bb(new_mbb, self.number + 1)
 
         return new_mbb
 
     def append_inst(self, inst):
         self.insert_inst(inst, len(self._insts))
 
-    def insert_inst(self, inst, idx):
-        self._insts.insert(idx, inst)
+    def insert_inst(self, inst, index):
+        if inst.mbb is not None:
+            raise ValueError("The instruction exists in another.")
+
+        for inst_after in self._insts[index:]:
+            inst_after.index += 1
         inst.mbb = self
+        inst.index = index
+        self._insts.insert(index, inst)
 
         reginfo = self.func.reg_info
         for operand in inst.operands:
@@ -413,13 +457,19 @@ class MachineBasicBlock:
                 reginfo.add_reg_operand_to_use(operand)
 
     def remove_inst(self, inst):
+        if inst.mbb is not self:
+            raise ValueError("The instruction exists in another.")
+
         reginfo = self.func.reg_info
         for operand in inst.operands:
             if operand.is_reg:
                 reginfo.remove_reg_operand_to_use(operand)
 
-        idx = self._insts.index(inst)
-        self._insts.pop(idx)
+        index = self._insts.index(inst)
+        for inst_after in self._insts[index:]:
+            inst_after.index -= 1
+        inst.index = -1
+        self._insts.pop(index)
         inst.mbb = None
 
     @property
@@ -442,7 +492,7 @@ class MachineBasicBlock:
         return tuple(self._insts)
 
     def remove_from_func(self):
-        self.func.bbs.remove(self)
+        self.func.remove_bb(self)
 
     def add_successor(self, bb):
         self.successors.append(bb)
@@ -722,6 +772,7 @@ class MOGlobalAddress(MachineOperand):
 class MachineInstruction:
     def __init__(self, opcode):
         self.mbb = None
+        self.index = -1
         self.opcode = opcode
         self._operands = []
         self.comment = ""
@@ -838,3 +889,21 @@ class MachineInstruction:
 
     def remove(self):
         self.mbb.remove_inst(self)
+
+    @property
+    def prev_inst(self):
+        mbb = self.mbb
+        index = mbb.insts.index(self)
+        if index == 0:
+            return None
+
+        return mbb.insts[index - 1]
+
+    @property
+    def next_inst(self):
+        mbb = self.mbb
+        index = mbb.insts.index(self)
+        if index == len(mbb.insts):
+            return None
+
+        return mbb.insts[index + 1]

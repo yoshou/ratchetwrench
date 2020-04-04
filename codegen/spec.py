@@ -895,3 +895,13 @@ class TargetInfo:
 
     def get_frame_lowering(self) -> TargetFrameLowering:
         raise NotImplementedError()
+
+
+class TargetOption:
+    def __init__(self):
+        self.emulated_tls = False
+
+
+class TargetMachine:
+    def __init__(self, options):
+        self.options = options

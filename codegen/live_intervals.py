@@ -5,15 +5,49 @@ from codegen.mir import *
 from codegen.passes import *
 
 
-class SlotIndex:
-    def __init__(self, index):
-        self.index = index
-
-
 class SlotSegment:
     def __init__(self):
-        self.start = -1
-        self.end = -1
+        self._start = None
+        self._end = None
+
+    @property
+    def start(self):
+        return self._start
+
+    @start.setter
+    def start(self, value):
+        assert(isinstance(value, MachineInstruction))
+        self._start = value
+
+    @property
+    def end(self):
+        return self._end
+
+    @end.setter
+    def end(self, value):
+        assert(isinstance(value, MachineInstruction))
+        self._end = value
+
+
+from functools import cmp_to_key
+
+
+def cmp_inst_func(a, b):
+    if a.mbb.index < b.mbb.index:
+        return -1
+    elif a.mbb.index > b.mbb.index:
+        return 1
+
+    if a.index < b.index:
+        return -1
+    elif a.index > b.index:
+        return 1
+
+    return 0
+
+
+def cmp_interval_start_func(a, b):
+    return cmp_inst_func(a.start, b.start)
 
 
 class LiveRange:
@@ -23,16 +57,16 @@ class LiveRange:
     @property
     def start(self):
         if len(self.segments) == 0:
-            return -1
+            return None
 
-        return min([seg.start for seg in self.segments])
+        return min([seg.start for seg in self.segments], key=cmp_to_key(cmp_inst_func))
 
     @property
     def end(self):
         if len(self.segments) == 0:
-            return -1
+            return None
 
-        return min([seg.end for seg in self.segments])
+        return max([seg.end for seg in self.segments], key=cmp_to_key(cmp_inst_func))
 
 
 class LiveIntervals(MachineFunctionPass):
@@ -61,22 +95,31 @@ class LiveIntervals(MachineFunctionPass):
             gens[inst] = set()
             kills[inst] = set()
 
-        for inst in insts:
-            succ = succs[inst]
+        phys_regs = set()
 
-            for operand in inst.operands:
-                if operand.is_mbb:
-                    succ.append(operand.mbb.insts[0])
+        for mbb in self.mfunc.bbs:
+            for inst in mbb.insts:
+                succ = succs[inst]
 
-                if operand.is_reg and operand.is_virtual:
-                    if operand.is_use:
-                        gens[inst].add(operand.reg)
-                    else:
-                        kills[inst].add(operand.reg)
+                for operand in inst.operands:
+                    if operand.is_mbb:
+                        succ.append(operand.mbb.insts[0])
 
-            if inst != inst.mbb.insts[-1]:
-                idx = inst.mbb.insts.index(inst)
-                succ.append(inst.mbb.insts[idx + 1])
+                    if operand.is_reg:
+                        if operand.is_use:
+                            gens[inst].add(operand.reg)
+
+                            if operand.is_phys:
+                                phys_regs.add(operand.reg)
+                        else:
+                            kills[inst].add(operand.reg)
+
+                if inst != mbb.insts[-1]:
+                    succ.append(inst.next_inst)
+
+                if inst == inst.mbb.insts[-1]:
+                    for phys_reg in phys_regs:
+                        kills[inst].add(phys_reg)
 
         changed = True
         count = 0
@@ -128,15 +171,16 @@ class LiveIntervals(MachineFunctionPass):
                 live_regs.add(new_live_reg)
                 if new_live_reg not in live_ranges:
                     live_ranges[new_live_reg] = LiveRange()
+                    live_ranges[new_live_reg].reg = new_live_reg
 
                 seg = SlotSegment()
-                seg.start = insts.index(inst)
+                seg.start = inst
+                seg.end = inst.mbb.func.bbs[-1].insts[-1]
                 live_ranges[new_live_reg].segments.append(seg)
 
             killed_regs = live_in - live_out
             for killed_reg in killed_regs:
                 live_regs.remove(killed_reg)
-                assert(live_ranges[killed_reg].segments[-1].end == -1)
-                live_ranges[killed_reg].segments[-1].end = insts.index(inst)
+                live_ranges[killed_reg].segments[-1].end = inst
 
         self.mfunc.live_ranges = live_ranges

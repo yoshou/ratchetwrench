@@ -52,8 +52,8 @@ class InstructionSelection(MachineFunctionPass):
 
         for bb in self.func.bbs:
             # Prepare basic block for machine instructions.
-            mbb = MachineBasicBlock(self.mfunc)
-            self.mfunc.bbs.append(mbb)
+            mbb = MachineBasicBlock()
+            self.mfunc.append_bb(mbb)
             self.mbb_map[bb] = mbb
 
             dag_builder = DagBuilder(

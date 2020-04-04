@@ -699,17 +699,23 @@ class ARMTargetInstInfo(TargetInstInfo):
 
         noreg = MachineRegister(NOREG)
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                return reg.regclass == regclass
+            else:
+                return reg.spec in regclass.regs
+
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPRwoPC):
                 copy_inst = MachineInstruction(ARMMachineOps.STRi12)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in SPR.regs:
+            elif has_reg_regclass(reg, SPR):
                 copy_inst = MachineInstruction(ARMMachineOps.VSTRS)
 
                 copy_inst.add_reg(reg, RegState.Non)
@@ -719,7 +725,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in DPR.regs:
+            if has_reg_regclass(reg, DPR):
                 copy_inst = MachineInstruction(ARMMachineOps.VSTRD)
 
                 copy_inst.add_reg(reg, RegState.Non)
@@ -729,7 +735,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if reg.spec in QPR.regs:
+            if has_reg_regclass(reg, QPR):
                 mfunc = inst.mbb.func
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
@@ -765,16 +771,22 @@ class ARMTargetInstInfo(TargetInstInfo):
 
         noreg = MachineRegister(NOREG)
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                return reg.regclass == regclass
+            else:
+                return reg.spec in regclass.regs
+
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPRwoPC):
                 copy_inst = MachineInstruction(ARMMachineOps.LDRi12)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in SPR.regs:
+            elif has_reg_regclass(reg, SPR):
                 copy_inst = MachineInstruction(ARMMachineOps.VLDRS)
 
                 copy_inst.add_reg(reg, RegState.Define)
@@ -783,7 +795,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in DPR.regs:
+            if has_reg_regclass(reg, DPR):
                 copy_inst = MachineInstruction(ARMMachineOps.VLDRD)
 
                 copy_inst.add_reg(reg, RegState.Define)
@@ -792,7 +804,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if reg.spec in QPR.regs:
+            if has_reg_regclass(reg, QPR):
                 mfunc = inst.mbb.func
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
@@ -1718,6 +1730,16 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
         reserved.extend([R11, R12, SP, LR, PC])
 
         return reserved
+
+    @property
+    def allocatable_regs(self):
+        regs = set()
+        regs |= set(GPR.regs)
+        regs |= set(SPR.regs)
+        regs |= set(DPR.regs)
+        regs |= set(QPR.regs)
+
+        return regs
 
     def get_callee_saved_regs(self):
         callee_save_regs = [R4, R5, R6, R7, R8, R9,

@@ -1246,6 +1246,30 @@ def parse_iteration_statement(tokens, pos, ctx):
                     if stmt is not None:
                         return (pos, WhileStmt(cond, stmt))
 
+    pos = save_pos.pop()
+
+    # DO statement WHILE LEFT_PAREN expression RIGHT_PAREN SEMICOLON
+    save_pos.append(pos)
+    if str(tokens[pos]) == "do":
+        pos += 1
+        (pos, stmt) = parse_statement(tokens, pos, ctx)
+        if stmt is not None:
+            if str(tokens[pos]) == "while":
+                pos += 1
+                if str(tokens[pos]) == "(":
+                    pos += 1
+                    (pos, cond) = parse_expression(tokens, pos, ctx)
+                    if cond is not None:
+                        if str(tokens[pos]) == ")":
+                            pos += 1
+                            if str(tokens[pos]) == ";":
+                                pos += 1
+                                return (pos, DoWhileStmt(cond, stmt))
+
+        raise Exception()
+
+    pos = save_pos.pop()
+
     # FOR LEFT_PAREN for_init_statement for_rest_statement RIGHT_PAREN statement_no_new_scope
     save_pos.append(pos)
     if str(tokens[pos]) == "for":
@@ -1333,7 +1357,7 @@ def parse_selection_rest_statement(tokens, pos, ctx):
 def parse_selection_statement(tokens, pos, ctx):
     save_pos = []
 
-    # FOR LEFT_PAREN for_init_statement for_rest_statement RIGHT_PAREN statement_no_new_scope
+    # IF LEFT_PAREN expression RIGHT_PAREN selection_rest_statement
     save_pos.append(pos)
     if str(tokens[pos]) == "if":
         pos += 1
@@ -1351,6 +1375,75 @@ def parse_selection_statement(tokens, pos, ctx):
                     raise Exception
 
     pos = save_pos.pop()
+    return (pos, None)
+
+
+def parse_switch_statement_list(tokens, pos, ctx):
+    save_pos = []
+
+    save_pos.append(pos)
+    (pos, stmts) = parse_statement_list(tokens, pos, ctx)
+
+    return (pos, (stmts))
+
+
+def parse_switch_statement(tokens, pos, ctx):
+    save_pos = []
+
+    # SWITCH LEFT_PAREN expression RIGHT_PAREN LEFT_BRACE switch_statement_list RIGHT_BRACE
+    save_pos.append(pos)
+    if str(tokens[pos]) == "switch":
+        pos += 1
+        if str(tokens[pos]) == "(":
+            pos += 1
+            (pos, expr) = parse_expression(tokens, pos, ctx)
+            if expr is not None:
+                if str(tokens[pos]) == ")":
+                    pos += 1
+                    if str(tokens[pos]) == "{":
+                        pos += 1
+                        (pos, stmt) = parse_switch_statement_list(
+                            tokens, pos, ctx)
+                        if stmt is not None:
+                            if str(tokens[pos]) == "}":
+                                pos += 1
+                                return (pos, SwitchStmt(expr, stmt))
+
+        raise Exception
+
+    pos = save_pos.pop()
+    return (pos, None)
+
+
+def parse_case_label(tokens, pos, ctx):
+    save_pos = []
+
+    # CASE expression COLON
+    save_pos.append(pos)
+    if str(tokens[pos]) == "case":
+        pos += 1
+        (pos, expr) = parse_expression(tokens, pos, ctx)
+        if expr is not None:
+            if str(tokens[pos]) == ":":
+                pos += 1
+                return (pos, CaseLabel(expr))
+
+        raise Exception
+
+    pos = save_pos.pop()
+
+    # DEFAULT COLON
+    save_pos.append(pos)
+    if str(tokens[pos]) == "default":
+        pos += 1
+        if str(tokens[pos]) == ":":
+            pos += 1
+            return (pos, CaseLabel(None))
+
+        raise Exception
+
+    pos = save_pos.pop()
+
     return (pos, None)
 
 
@@ -1408,6 +1501,20 @@ def parse_simple_statement(tokens, pos, ctx):
     # selection_statement
     save_pos.append(pos)
     (pos, stmts) = parse_selection_statement(tokens, pos, ctx)
+    if stmts is not None:
+        return (pos, stmts)
+    pos = save_pos.pop()
+
+    # switch_statement
+    save_pos.append(pos)
+    (pos, stmts) = parse_switch_statement(tokens, pos, ctx)
+    if stmts is not None:
+        return (pos, stmts)
+    pos = save_pos.pop()
+
+    # case_label
+    save_pos.append(pos)
+    (pos, stmts) = parse_case_label(tokens, pos, ctx)
     if stmts is not None:
         return (pos, stmts)
     pos = save_pos.pop()

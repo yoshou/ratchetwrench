@@ -129,6 +129,9 @@ ReturnStmt = define_node('ReturnStmt', ('expr',))
 ContinueStmt = define_node('ContinueStmt', ())
 BreakStmt = define_node('BreakStmt', ())
 
+SwitchStmt = define_node('SwitchStmt', ('cond', 'stmts'))
+CaseLabel = define_node('CaseLabel', ('expr',))
+
 # for semantic analysis
 TypedBinaryOp = define_node('TypedBinaryOp', ('op', 'lhs', 'rhs', 'type'))
 TypedUnaryOp = define_node('TypedUnaryOp', ('op', 'expr', 'type'))

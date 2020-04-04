@@ -56,6 +56,8 @@ EM_88K = 5
 EM_860 = 7
 EM_MIPS = 8
 EM_ARM = 40
+EM_X86_64 = 62
+EM_RISCV = 243
 
 EV_NONE = 0
 EV_CURRENT = 1
@@ -421,6 +423,14 @@ class Elf64_Sym(Struct):
     st_value = Elf64_Addr(0)
     st_size = Elf64_XWord(0)
 
+    @property
+    def binding(self):
+        return self.st_info.value >> 4
+
+    @property
+    def ty(self):
+        return self.st_info.value & 0xF
+
 
 class Elf32_Rel(Struct):
     r_offset = Elf32_Addr(0)
@@ -439,17 +449,41 @@ class Elf64_Rel(Struct):
     r_offset = Elf64_Addr(0)
     r_info = Elf64_XWord(0)
 
+    @property
+    def symbol(self):
+        return (self.r_info.value >> 32) & 0xFFFFFFFF
+
+    @property
+    def type(self):
+        return self.r_info.value & 0xFFFFFFFF
+
 
 class Elf32_Rela(Struct):
     r_offset = Elf32_Addr(0)
     r_info = Elf32_Word(0)
     r_addend = Elf32_SWord(0)
 
+    @property
+    def symbol(self):
+        return (self.r_info.value >> 8) & 0xFFFFFF
+
+    @property
+    def type(self):
+        return self.r_info.value & 0xFF
+
 
 class Elf64_Rela(Struct):
     r_offset = Elf64_Addr(0)
     r_info = Elf64_XWord(0)
     r_addend = Elf64_SXWord(0)
+
+    @property
+    def symbol(self):
+        return (self.r_info.value >> 32) & 0xFFFFFFFF
+
+    @property
+    def type(self):
+        return self.r_info.value & 0xFFFFFFFF
 
 
 from io import BytesIO
@@ -462,9 +496,16 @@ class ElfFile:
     def deserialize(self, data):
         self.data = data
 
-        with BytesIO(self.data) as s:
+        is_64bit = data[4] == ELFCLASS64
 
-            self.header = Elf32_Ehdr()
+        self.Elf_Ehdr = Elf64_Ehdr if is_64bit else Elf32_Ehdr
+        self.Elf_Shdr = Elf64_Shdr if is_64bit else Elf32_Shdr
+        self.Elf_Sym = Elf64_Sym if is_64bit else Elf32_Sym
+        self.Elf_Rel = Elf64_Rel if is_64bit else Elf32_Rel
+        self.Elf_Rela = Elf64_Rela if is_64bit else Elf32_Rela
+
+        with BytesIO(self.data) as s:
+            self.header = self.Elf_Ehdr()
             self.header.deserialize(s)
 
     @property
@@ -474,64 +515,64 @@ class ElfFile:
         if section_table_offset == 0:
             return []
 
-        assert(self.header.e_shentsize.value == Elf32_Shdr().size)
+        assert(self.header.e_shentsize.value == self.Elf_Shdr().size)
 
         filesize = len(self.data)
 
         with BytesIO(self.data[section_table_offset:]) as s:
             for i in range(self.header.e_shnum.value):
-                sec = Elf32_Shdr()
+                sec = self.Elf_Shdr()
                 sec.deserialize(s)
 
                 yield sec
 
-    def symbols(self, section: Elf32_Shdr):
+    def symbols(self, section):
         offset = section.sh_offset.value
         size = section.sh_size.value
 
-        entry_size = Elf32_Sym().size
+        entry_size = self.Elf_Sym().size
 
         assert(size % entry_size == 0)
 
         with BytesIO(self.data[offset:]) as s:
             for i in range(0, size, entry_size):
-                sym = Elf32_Sym()
+                sym = self.Elf_Sym()
                 sym.deserialize(s)
 
                 yield sym
 
-    def rels(self, section: Elf32_Shdr):
+    def rels(self, section):
         if section.sh_type.value & SHT_REL != SHT_REL:
             return []
 
         offset = section.sh_offset.value
         size = section.sh_size.value
 
-        entry_size = Elf32_Rel().size
+        entry_size = self.Elf_Rel().size
 
         assert(size % entry_size == 0)
 
         with BytesIO(self.data[offset:]) as s:
             for i in range(0, size, entry_size):
-                sym = Elf32_Rel()
+                sym = self.Elf_Rel()
                 sym.deserialize(s)
 
                 yield sym
 
-    def relas(self, section: Elf32_Shdr):
+    def relas(self, section):
         if section.sh_type.value & SHT_RELA != SHT_RELA:
             return []
 
         offset = section.sh_offset.value
         size = section.sh_size.value
 
-        entry_size = Elf32_Rela().size
+        entry_size = self.Elf_Rela().size
 
         assert(size % entry_size == 0)
 
         with BytesIO(self.data[offset:]) as s:
             for i in range(0, size, entry_size):
-                sym = Elf32_Rela()
+                sym = self.Elf_Rela()
                 sym.deserialize(s)
 
                 yield sym
@@ -564,6 +605,23 @@ class ELFSectionRefItem(SectionRefItem):
 class ELFObjectFile(ObjectFile):
     def __init__(self):
         super().__init__()
+
+    @property
+    def arch(self):
+        is_64bit = self.data[4] == ELFCLASS64
+
+        from codegen.spec import ArchType
+        if self.header.e_machine.value == EM_ARM:
+            return ArchType.ARM
+        elif self.header.e_machine.value == EM_X86_64:
+            return ArchType.X86_64
+        elif self.header.e_machine.value == EM_RISCV:
+            if is_64bit:
+                return ArchType.RISCV64
+            else:
+                return ArchType.RISCV32
+
+        raise ValueError()
 
     @property
     def is_elf(self):
@@ -657,7 +715,7 @@ class ELFObjectFile(ObjectFile):
     def get_relocated_section(self, section):
         if section.sh_type.value not in [SHT_REL, SHT_RELA]:
             return None
-            
+
         sec = list(self.elf_file.sections)[section.sh_info.value]
         return SectionRef(self, ELFSectionRefItem(sec))
 

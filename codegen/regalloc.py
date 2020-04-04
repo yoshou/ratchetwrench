@@ -194,6 +194,26 @@ class FastRegisterAllocation(MachineFunctionPass):
         operand.is_renamable = True
 
     def allocate_instruction(self, inst: MachineInstruction):
+        # Define phys registers.
+        for operand in inst.operands:
+            if not operand.is_reg or operand.is_implicit:
+                continue
+
+            if not operand.is_phys:
+                continue
+
+            reg = operand.reg
+
+            if operand.is_use:
+                state = PhysRegState.Free if operand.is_kill else PhysRegState.Reserved
+                regs = iter_reg_aliases(reg.spec)
+                for reg in regs:
+                    self.set_phys_reg_state(
+                        MachineRegister(reg), state)
+            else:
+                state = PhysRegState.Free if operand.is_dead else PhysRegState.Reserved
+                self.define_phys_reg(reg, PhysRegState.Reserved, inst)
+
         # Replace using vregs to phys registers.
         kill_list = []
         for operand in inst.operands:
@@ -220,27 +240,6 @@ class FastRegisterAllocation(MachineFunctionPass):
         # Function calling needs to save some registers.
         if inst.is_call:
             self.spill_all(inst)
-
-        # Define phys registers.
-        for operand in inst.operands:
-            if not operand.is_reg or operand.is_implicit:
-                continue
-
-            if not operand.is_phys:
-                continue
-
-            reg = operand.reg
-
-            if operand.is_use:
-                continue
-                state = PhysRegState.Free if operand.is_kill else PhysRegState.Reserved
-                regs = iter_reg_aliases(reg.spec)
-                for reg in regs:
-                    self.set_phys_reg_state(
-                        MachineRegister(reg), state)
-            else:
-                state = PhysRegState.Free if operand.is_dead else PhysRegState.Reserved
-                self.define_phys_reg(reg, PhysRegState.Reserved, inst)
 
         # Allocate virtual registers.
         for operand in inst.operands:
@@ -279,10 +278,10 @@ class FastRegisterAllocation(MachineFunctionPass):
         self.phys_reg_states = {}
 
         for reg, vreg in mfunc.reg_info.live_ins:
-            continue
             alias_regs = iter_reg_aliases(reg.spec)
             for alias_reg in alias_regs:
                 self.set_phys_reg_state(MachineRegister(alias_reg), vreg)
+            continue
             self.live_regs[vreg] = LiveRegInfo(vreg)
             self.live_regs[vreg].phys_reg = reg
 

@@ -961,6 +961,51 @@ else:
         return block
 
 
+def build_ir_switch_stmt(node, block, ctx):
+    stmts = node.stmts
+
+    blocks = {}
+    cur_block = block
+    for stmt in stmts:
+        if isinstance(stmt, CaseLabel):
+            cur_block = BasicBlock(block.func, cur_block)
+            blocks[stmt] = cur_block
+
+    cont_block = BasicBlock(block.func, cur_block)
+
+    block, cond = build_ir_expr(node.cond, block, ctx)
+    assert(cond.ty in [i32])
+
+    cases = []
+    default_block = None
+    for case_label, case_block in blocks.items():
+        if not case_label.expr:
+            default_block = case_block
+            continue
+
+        cases.append(evaluate_constant_expr(ctx, case_label.expr))
+        cases.append(case_block)
+
+    SwitchInst(block, cond, default_block, cases)
+
+    ctx.push_branch_target(cont_block)
+
+    cur_label = None
+    for stmt in stmts:
+        if isinstance(stmt, CaseLabel):
+            cur_label = stmt
+        else:
+            assert(cur_block is not None)
+            blocks[cur_label] = build_ir_stmt(stmt, blocks[cur_label], ctx)
+
+    ctx.pop_branch_target()
+
+    for case_block in blocks.values():
+        JumpInst(case_block, cont_block)
+
+    return cont_block
+
+
 def build_ir_stmt(node, block, ctx):
     if isinstance(node, IfStmt):
         return build_ir_if_stmt(node, block, ctx)
@@ -993,6 +1038,9 @@ def build_ir_stmt(node, block, ctx):
                 build_ir_assign_op(variable, init_expr, block, ctx)
 
         return block
+
+    if isinstance(node, SwitchStmt):
+        return build_ir_switch_stmt(node, block, ctx)
 
     return block
 
@@ -1560,6 +1608,8 @@ def emit_ir(ast, abi, module):
                 thread_local = ThreadLocalMode.GeneralDynamicTLSModel
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
+
+                thread_local = ThreadLocalMode.NotThreadLocal
 
                 global_named_values[ident.val] = module.add_global_variable(
                     GlobalVariable(ty, linkage, ident.val.name, thread_local, init))

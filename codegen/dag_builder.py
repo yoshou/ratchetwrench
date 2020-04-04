@@ -660,8 +660,7 @@ class DagBuilder:
                 if phi in self.func_info.reg_value_map:
                     vreg = self.func_info.reg_value_map[phi]
                 else:
-                    vreg = [MachineVirtualRegister(
-                        self.create_regs(phi.ty), len(self.func_info.reg_value_map))]
+                    vreg = [self.mfunc.reg_info.create_virtual_register(self.create_regs(phi.ty))]
 
                     self.func_info.reg_value_map[phi] = vreg
 

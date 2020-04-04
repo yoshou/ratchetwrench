@@ -835,6 +835,7 @@ class DynamicLinkerELF(DynamicLinker):
         value += reloc.addend
         rel_type = reloc.rel_type
 
+        print(rel_type)
         if rel_type == R_X86_64_PC32:
             value = value - target
             # assert(-0x80000000 <= value and value < 0x80000000)
@@ -884,6 +885,7 @@ class DynamicLinkerELF(DynamicLinker):
             addr = self.mem_mgr.allocate_data(
                 got_section_size, self.got_entry_size, False)
 
+            print(hex(addr))
             self.got_section.addr = addr
             self.got_section.size = got_section_size
             self.got_section.alloc_size = got_section_size
@@ -970,10 +972,10 @@ class DynamicLinkerCOFF(DynamicLinker):
         # 8 bytes absolute address to the target function
 
     def generate_relocation_stub(self, target_section, offset, rel_type, addend, stubs):
-        section_entry = self.section_mems[target_section]
-
         entry_to_stub = RelocationEntry(
-            section_entry, offset, rel_type, addend)
+            self.section_mems[target_section], offset, rel_type, addend)
+
+        section_entry = self.section_mems[target_section]
 
         if entry_to_stub in stubs:
             stub_offset = stubs[entry_to_stub]
@@ -1031,7 +1033,7 @@ class DynamicLinkerCOFF(DynamicLinker):
 
             section_id = self.section_mems[section]
 
-            if section_id not in self.relocations:
+            if section not in self.relocations:
                 self.relocations[section_id] = []
 
             # The symbol value is the offset from the belonging section
@@ -1089,6 +1091,7 @@ class DynamicLinkerCOFF(DynamicLinker):
     def get_or_emit_section(self, obj, section, is_code):
         import struct
 
+        assert(isinstance(section, SectionRef))
         if section in self.section_mems:
             return self.section_mems[section]
 
@@ -1242,6 +1245,21 @@ class SymbolSolver:
         raise NotImplementedError()
 
 
+import ctypes
+
+# tls_gd = bytearray(1024)
+# tls_gd_buf = (ctypes.c_char * len(tls_gd)).from_buffer(tls_gd)
+# tls_gd_ptr = ctypes.cast(tls_gd_buf, ctypes.c_void_p).value
+
+
+# def tls_get_addr(tls_index_ptr):
+#     print(tls_index_ptr)
+
+
+# tls_get_addr_func = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(tls_get_addr)
+# tls_get_addr_func_ptr = ctypes.cast(tls_get_addr_func, ctypes.c_void_p).value
+
+
 class ExecutionEngine(SymbolSolver):
     def __init__(self, target_machine):
         self.target_machine = target_machine
@@ -1267,6 +1285,10 @@ class ExecutionEngine(SymbolSolver):
 
     def lookup_symbol(self, symbol_name):
         import ctypes
+
+        # if symbol_name == "__tls_get_addr":
+        #     print("tls_get_addr", hex(tls_get_addr_func_ptr))
+        #     return tls_get_addr_func_ptr
 
         addr = self.linker.find_symbol(symbol_name)
         if addr is not None:

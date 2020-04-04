@@ -172,6 +172,15 @@ def print_inst(inst, slot_id_map):
     if isinstance(inst, BranchInst):
         return f"br {get_value_type(inst.cond)} {get_value_name(inst.cond)}, {get_value_type(inst.then_target)} {get_value_name(inst.then_target)}, {get_value_type(inst.else_target)} {get_value_name(inst.else_target)}"
 
+    if isinstance(inst, SwitchInst):
+        case_lines = [
+            f"\t\t{get_value_type(value)} {get_value_name(value)}, label {get_value_name(block)}" for value, block in inst.cases]
+
+        cases = "\n".join(case_lines)
+
+        if inst.default:
+            return f"switch {get_value_type(inst.value)} {get_value_name(inst.value)}, label {get_value_name(inst.default)} [\n{cases}\n\t]"
+
     if isinstance(inst, LoadInst):
         return f"{get_value_name(inst)} = load {get_value_type(inst)}, {get_value_type(inst.rs)} {get_value_name(inst.rs)}"
 

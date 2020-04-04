@@ -57,7 +57,7 @@ class FormatableFieldBase(type):
                 return FormatableFieldInstance(order, ty, val, self)
 
             def verify_value(self, val):
-                if ty in ["b", "B", "h", "H", "l", "L", "q", "Q"]:
+                if ty in ["b", "B", "h", "H", "i", "I", "q", "Q"]:
                     if not isinstance(val, int):
                         raise ValueError("The type of value must be int.")
                 else:
@@ -235,11 +235,11 @@ class SInt64B(FormatableFieldBase(">", "q")):
     pass
 
 
-class UInt32B(FormatableFieldBase(">", "L")):
+class UInt32B(FormatableFieldBase(">", "I")):
     pass
 
 
-class SInt32B(FormatableFieldBase(">", "l")):
+class SInt32B(FormatableFieldBase(">", "i")):
     pass
 
 
@@ -267,11 +267,11 @@ class SInt64L(FormatableFieldBase("<", "q")):
     pass
 
 
-class UInt32L(FormatableFieldBase("<", "L")):
+class UInt32L(FormatableFieldBase("<", "I")):
     pass
 
 
-class SInt32L(FormatableFieldBase("<", "l")):
+class SInt32L(FormatableFieldBase("<", "i")):
     pass
 
 

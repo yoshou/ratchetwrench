@@ -918,6 +918,8 @@ class ARMMachineOps:
         "bl",
         outs=[],
         ins=[("dst", arm_bl_target)],
+        uses=[R0, R1, R2, R3, D0, D1, D2, D3, D4, D5, D6, D7],
+        defs=[R0, R1, R2, R3, D0, D1, D2, D3, D4, D5, D6, D7],
         is_call=True
     )
 

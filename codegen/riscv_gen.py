@@ -1578,6 +1578,15 @@ class RISCVTargetRegisterInfo(TargetRegisterInfo):
 
         return reserved
 
+    @property
+    def allocatable_regs(self):
+        regs = set()
+        regs |= set(GPR.regs)
+        regs |= set(FPR32.regs)
+        regs |= set(FPR64.regs)
+
+        return regs
+
     def get_callee_saved_regs(self):
         callee_save_regs = []
         callee_save_regs.extend(

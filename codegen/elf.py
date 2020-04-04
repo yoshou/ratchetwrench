@@ -13,7 +13,7 @@ from codegen.mc import(
     MCExpr, MCSymbolRefExpr, MCVariantKind,
     MCFixup, MCFixupKind,
     MCValue,
-    MCDataFragment,
+    MCDataFragment, MCAlignFragment,
     MCRelaxableFragment,
     MCCodeEmitter,
     SectionKind)
@@ -26,7 +26,7 @@ from io import BytesIO
 
 
 class MCSectionELF(MCSection):
-    def __init__(self, name, ty, flags, symbol, entry_size=0, associated=None):
+    def __init__(self, name, ty, flags, symbol, entry_size=0, associated=None, alignment=4):
         super().__init__()
 
         self.name = name
@@ -35,6 +35,7 @@ class MCSectionELF(MCSection):
         self.entry_size = entry_size
         self.associated_section = associated
         self.symbol = symbol
+        self.alignment = alignment
 
     def __hash__(self):
         return hash((self.name,))
@@ -46,12 +47,13 @@ class MCSectionELF(MCSection):
         return self.name == other.name
 
 
-def create_elf_section(name, ty, flags, entry_size=0, associated=None):
+def create_elf_section(name, ty, flags, entry_size=0, associated=None, alignment=4):
     symbol = MCSymbolELF(name, False)
     symbol.binding = ELFSymbolBinding.STB_LOCAL
     symbol.ty = ELFSymbolType.STT_SECTION
 
-    section = MCSectionELF(name, ty, flags, symbol, entry_size, associated)
+    section = MCSectionELF(name, ty, flags, symbol,
+                           entry_size, associated, alignment)
 
     fragment = MCDataFragment()
     section.add_fragment(fragment)
@@ -164,8 +166,12 @@ class ELFObjectStream(MCObjectStream):
             MCFixup(len(fragment.contents), value, get_fixup_kind_for_size(size, False)))
         fragment.contents.extend(bytearray(size))
 
-    def emit_value_to_alignment(self, align: int):
-        pass
+    def emit_value_to_alignment(self, alignment, value=0, value_size=0):
+        fragment = MCAlignFragment(alignment, value, value_size)
+        self.current_section.add_fragment(fragment)
+
+        if alignment > self.current_section.alignment:
+            self.current_section.alignment = alignment
 
     @property
     def current_section(self):
@@ -228,6 +234,10 @@ class X64ELFObjectWriter(ELFObjectTargetWriter):
                 return R_X86_64_PC8 if is_pcrel else R_X86_64_8
             else:
                 raise NotImplementedError()
+        elif modifier == MCVariantKind.TLSGD:
+            return R_X86_64_TLSGD
+        elif modifier == MCVariantKind.PLT:
+            return R_X86_64_PLT32
         else:
             raise NotImplementedError()
 
@@ -1144,7 +1154,7 @@ class ELFObjectWriter(MCObjectWriter):
             sh_link = self.symbol_table_index
             sh_info = section_indices[section.associated_section]
 
-        alignment = 4
+        alignment = section.alignment
         entry_size = section.entry_size
 
         self.write_section_header_entry(
@@ -1165,8 +1175,25 @@ class ELFObjectWriter(MCObjectWriter):
             self.write_section(section, offset, size, section_indices)
 
     def write_section_data(self, asm, section, layout):
-        for fragment in section.fragments:
-            self.output.write(fragment.contents)
+        with BytesIO() as byte_output:
+            for fragment in section.fragments:
+                if isinstance(fragment, MCAlignFragment):
+                    pos = byte_output.tell()
+
+                    align = fragment.alignment
+                    pos_aligned = int(
+                        int((pos + align - 1) / align) * align)
+
+                    if pos_aligned - pos > 0:
+                        paddings = bytearray(pos_aligned - pos)
+                        byte_output.write(paddings)
+                    continue
+
+                byte_output.write(fragment.contents)
+
+            section_data = byte_output.getvalue()
+
+        self.output.write(section_data)
 
     def align(self, alignment):
         pos = self.output.tell()
@@ -1488,7 +1515,7 @@ class X64ELFTargetObjectFile(MCObjectFileInfo):
         super().__init__()
 
         self._text_section = create_elf_section(
-            ".text", SHT_PROGBITS, SHF_EXECINSTR | SHF_ALLOC)
+            ".text", SHT_PROGBITS, SHF_EXECINSTR | SHF_ALLOC, alignment=16)
         self._bss_section = create_elf_section(
             ".bss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC)
         self._data_section = create_elf_section(
@@ -1496,13 +1523,18 @@ class X64ELFTargetObjectFile(MCObjectFileInfo):
         self._rodata_section = create_elf_section(
             ".rodata", SHT_PROGBITS, SHF_ALLOC)
         self._mergeable_const4_section = create_elf_section(
-            ".rodata.cst4", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 4)
+            ".rodata.cst4", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 4, alignment=4)
         self._mergeable_const8_section = create_elf_section(
-            ".rodata.cst8", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8)
+            ".rodata.cst8", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8, alignment=8)
         self._mergeable_const16_section = create_elf_section(
-            ".rodata.cst16", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 16)
+            ".rodata.cst16", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 16, alignment=16)
         self._mergeable_const32_section = create_elf_section(
-            ".rodata.cst32", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 32)
+            ".rodata.cst32", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 32, alignment=32)
+
+        self._tls_bss_section = create_elf_section(
+            ".tbss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS, alignment=16)
+        self._tls_data_section = create_elf_section(
+            ".tdata", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS, alignment=16)
 
     @property
     def text_section(self) -> MCSection:
@@ -1533,6 +1565,10 @@ class X64ELFTargetObjectFile(MCObjectFileInfo):
             return self._rodata_section
 
         raise ValueError("Invalid section kind.")
+
+    @property
+    def tls_data_section(self) -> MCSection:
+        return self._tls_data_section
 
     @property
     def is_elf(self):

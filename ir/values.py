@@ -795,7 +795,7 @@ class SwitchInst(Instruction):
 
     @property
     def cases(self):
-        return self.operands[2:]
+        return [(val, dest) for val, dest in zip(self.case_vals, self.case_dests)]
 
     @property
     def case_vals(self):

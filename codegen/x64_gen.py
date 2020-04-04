@@ -1394,6 +1394,13 @@ class X86CallingConv(CallingConv):
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
+        if loc_vt.value_type in [ValueType.V4F32]:
+            regs = [XMM0, XMM1, XMM2]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_return_win64_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
@@ -1473,6 +1480,13 @@ class X86CallingConv(CallingConv):
                 return False
 
         if loc_vt.value_type in [ValueType.F32, ValueType.F64, ValueType.F128]:
+            regs = [XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]
+            reg = ccstate.alloc_reg_from_list(regs)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type in [ValueType.V4F32]:
             regs = [XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
@@ -1577,7 +1591,7 @@ class X64TargetInstInfo(TargetInstInfo):
 
         copy_inst = MachineInstruction(opcode)
 
-        copy_inst.add_reg(dst_reg, RegState.Non)
+        copy_inst.add_reg(dst_reg, RegState.Define)
         if opcode in [X64MachineOps.MOVSSrr, X64MachineOps.MOVSDrr]:
             copy_inst.add_reg(dst_reg, RegState.Non)
         copy_inst.add_reg(src_reg, RegState.Kill if kill_src else RegState.Non)
@@ -1595,21 +1609,27 @@ class X64TargetInstInfo(TargetInstInfo):
         size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                return reg.regclass == regclass
+            else:
+                return reg.spec in regclass.regs
+
         if size == 4:
-            if reg.spec in GR32.regs:
+            if has_reg_regclass(reg, GR32):
                 opcode = X64MachineOps.MOV32mr
-            elif reg.spec in FR32.regs:
+            elif has_reg_regclass(reg, FR32):
                 opcode = X64MachineOps.MOVSSmr
         elif size == 1:
-            if reg.spec in GR8.regs:
+            if has_reg_regclass(reg, GR8):
                 opcode = X64MachineOps.MOV8mr
         elif size == 8:
-            if reg.spec in GR64.regs:
+            if has_reg_regclass(reg, GR64):
                 opcode = X64MachineOps.MOV64mr
-            elif reg.spec in FR64.regs:
+            elif has_reg_regclass(reg, FR64):
                 opcode = X64MachineOps.MOVSDmr
         elif size == 16:
-            if reg.spec in VR128.regs:
+            if has_reg_regclass(reg, VR128):
                 opcode = X64MachineOps.MOVAPSmr
         else:
             raise NotImplementedError(
@@ -1639,21 +1659,27 @@ class X64TargetInstInfo(TargetInstInfo):
         size = tys[0].get_size_in_bits()
         size = int(int((size + 7) / 8))
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                return reg.regclass == regclass
+            else:
+                return reg.spec in regclass.regs
+
         if size == 1:
-            if reg.spec in GR8.regs:
+            if has_reg_regclass(reg, GR8):
                 opcode = X64MachineOps.MOV8rm
         elif size == 4:
-            if reg.spec in GR32.regs:
+            if has_reg_regclass(reg, GR32):
                 opcode = X64MachineOps.MOV32rm
-            elif reg.spec in FR32.regs:
+            elif has_reg_regclass(reg, FR32):
                 opcode = X64MachineOps.MOVSSrm
         elif size == 8:
-            if reg.spec in GR64.regs:
+            if has_reg_regclass(reg, GR64):
                 opcode = X64MachineOps.MOV64rm
-            elif reg.spec in FR64.regs:
+            elif has_reg_regclass(reg, FR64):
                 opcode = X64MachineOps.MOVSDrm
         elif size == 16:
-            if reg.spec in VR128.regs:
+            if has_reg_regclass(reg, VR128):
                 opcode = X64MachineOps.MOVAPSrm
         else:
             raise NotImplementedError(
@@ -1914,57 +1940,84 @@ class X64TargetLowering(TargetLowering):
         ptr_ty = self.get_pointer_type(data_layout)
         global_value = node.value
 
-        ptr = get_constant_null_value(PointerType(i8, 256))
-        tls_array = DagValue(dag.add_constant_node(ptr_ty, 0x58), 0)
-
-        thread_ptr = DagValue(dag.add_load_node(
-            ptr_ty, dag.entry, tls_array, False, ptr_info=MachinePointerInfo(ptr)), 0)
-
-        if global_value.thread_local == ThreadLocalMode.LocalExecTLSModel:
+        if dag.mfunc.target_info.machine.options.emulated_tls:
             raise NotImplementedError()
-        else:
-            idx = DagValue(dag.add_external_symbol_node(
-                ptr_ty, "_tls_index", False), 0)
 
-            idx = DagValue(dag.add_node(
-                X64DagOps.WRAPPER_RIP, node.value_types, idx), 0)
+        if dag.mfunc.target_info.triple.os == OS.Linux:
+            if global_value.thread_local == ThreadLocalMode.GeneralDynamicTLSModel:
+                ga = DagValue(dag.add_global_address_node(
+                    ptr_ty, global_value, True), 0)
 
-            idx = DagValue(dag.add_load_node(
-                ptr_ty, dag.entry, idx, False), 0)
+                ops = [dag.entry, ga]
 
-            def log2_uint64_cail(value):
-                if value == 0:
+                chain = DagValue(dag.add_node(X64DagOps.TLSADDR, [
+                                 MachineValueType(ValueType.OTHER)], *ops), 0)
+
+                reg_node = DagValue(dag.add_register_node(
+                    ptr_ty, MachineRegister(RAX)), 0)
+
+                return dag.add_node(VirtualDagOps.COPY_FROM_REG, [ptr_ty, MachineValueType(
+                    ValueType.OTHER)], chain, reg_node)
+
+            raise ValueError("Not supporing TLS model.")
+
+        if dag.mfunc.target_info.triple.os == OS.Windows:
+            ptr = get_constant_null_value(PointerType(i8, 256))
+            tls_array = DagValue(dag.add_constant_node(ptr_ty, 0x58), 0)
+
+            tls_array = DagValue(dag.add_node(
+                X64DagOps.WRAPPER_RIP, node.value_types, tls_array), 0)
+
+            thread_ptr = DagValue(dag.add_load_node(
+                ptr_ty, dag.entry, tls_array, False, ptr_info=MachinePointerInfo(ptr)), 0)
+
+            if global_value.thread_local == ThreadLocalMode.LocalExecTLSModel:
+                raise NotImplementedError()
+            else:
+                idx = DagValue(dag.add_external_symbol_node(
+                    ptr_ty, "_tls_index", False), 0)
+
+                idx = DagValue(dag.add_node(
+                    X64DagOps.WRAPPER_RIP, node.value_types, idx), 0)
+
+                idx = DagValue(dag.add_load_node(
+                    ptr_ty, dag.entry, idx, False), 0)
+
+                def log2_uint64_cail(value):
+                    if value == 0:
+                        return 0
+
+                    value = value - 1
+                    for i in reversed(range(63)):
+                        if (value & (1 << 64)) != 0:
+                            return i
+
+                        value = value << 1
+
                     return 0
 
-                value = value - 1
-                for i in reversed(range(63)):
-                    if (value & (1 << 64)) != 0:
-                        return i
+                scale = DagValue(dag.add_constant_node(
+                    MachineValueType(ValueType.I8), log2_uint64_cail(data_layout.get_pointer_size_in_bits())), 0)
 
-                    value = value << 1
+                idx = DagValue(dag.add_node(
+                    VirtualDagOps.SHL, [ptr_ty], idx, scale), 0)
 
-                return 0
+                thread_ptr = DagValue(dag.add_node(
+                    VirtualDagOps.ADD, [ptr_ty], thread_ptr, idx), 0)
 
-            scale = DagValue(dag.add_constant_node(
-                MachineValueType(ValueType.I8), log2_uint64_cail(data_layout.get_pointer_size_in_bits())), 0)
+            tls_ptr = DagValue(dag.add_load_node(
+                ptr_ty, dag.entry, thread_ptr, False), 0)
 
-            idx = DagValue(dag.add_node(
-                VirtualDagOps.SHL, [ptr_ty], idx, scale), 0)
+            # This value is the offset from the .tls section
+            target_address = DagValue(dag.add_global_address_node(
+                node.value_types[0], node.value, True, target_flags=X64OperandFlag.SECREL), 0)
 
-            thread_ptr = DagValue(dag.add_node(
-                VirtualDagOps.ADD, [ptr_ty], thread_ptr, idx), 0)
+            offset = DagValue(dag.add_node(
+                X64DagOps.WRAPPER, node.value_types, target_address), 0)
 
-        tls_ptr = DagValue(dag.add_load_node(
-            ptr_ty, dag.entry, thread_ptr, False), 0)
+            return dag.add_node(VirtualDagOps.ADD, [ptr_ty], tls_ptr, offset)
 
-        # This value is the offset from the .tls section
-        target_address = DagValue(dag.add_global_address_node(
-            node.value_types[0], node.value, True, target_flags=X64OperandFlag.SECREL), 0)
-
-        offset = DagValue(dag.add_node(
-            X64DagOps.WRAPPER, node.value_types, target_address), 0)
-
-        return dag.add_node(VirtualDagOps.ADD, [ptr_ty], tls_ptr, offset)
+        raise NotImplementedError()
 
     def get_pointer_type(self, data_layout, addr_space=0):
         return get_int_value_type(data_layout.get_pointer_size_in_bits(addr_space))
@@ -2191,6 +2244,8 @@ class X64TargetLowering(TargetLowering):
                     regclass = FR32
                 elif arg_vt.value_type == ValueType.F64:
                     regclass = FR64
+                elif arg_vt.value_type == ValueType.V4F32:
+                    regclass = VR128
                 else:
                     raise ValueError()
 
@@ -2359,6 +2414,8 @@ class X64TargetLowering(TargetLowering):
             return FR32
         elif ty.value_type == ValueType.F64:
             return FR64
+        elif ty.value_type == ValueType.V4F32:
+            return VR128
 
         raise NotImplementedError()
 
@@ -2414,6 +2471,19 @@ class X64TargetRegisterInfo(TargetRegisterInfo):
         reserved.extend([RSP, RBP])
 
         return reserved
+
+    @property
+    def allocatable_regs(self):
+        regs = set()
+        regs |= set(GR64.regs)
+        regs |= set(GR32.regs)
+        regs |= set(GR16.regs)
+        regs |= set(GR8.regs)
+        regs |= set(FR32.regs)
+        regs |= set(FR64.regs)
+        regs |= set(VR128.regs)
+
+        return regs
 
     def get_callee_saved_regs(self):
         callee_save_regs = [RBX, R12, R13, R14, R15, RDI, RSI, XMM6,
@@ -2533,8 +2603,9 @@ class X64Legalizer(Legalizer):
 
 
 class X64TargetInfo(TargetInfo):
-    def __init__(self, triple):
+    def __init__(self, triple, machine):
         super().__init__(triple)
+        self.machine = machine
 
     def get_inst_info(self) -> TargetInstInfo:
         return X64TargetInstInfo()
@@ -2568,17 +2639,18 @@ class X64TargetInfo(TargetInfo):
         raise ValueError("Invalid arch type")
 
 
-class X64TargetMachine:
-    def __init__(self, triple):
+class X64TargetMachine(TargetMachine):
+    def __init__(self, triple, options):
+        super().__init__(options)
         self.triple = triple
 
     def get_target_info(self, func: Function):
-        return X64TargetInfo(self.triple)
+        return X64TargetInfo(self.triple, self)
 
     def add_mc_emit_passes(self, pass_manager, mccontext, output, is_asm):
         from codegen.x64_asm_printer import X64AsmInfo, MCAsmStream, X64CodeEmitter, X64AsmBackend, X64AsmPrinter, X64IntelInstPrinter
         from codegen.coff import WinCOFFObjectWriter, WinCOFFObjectStream
-        from codegen.elf import ELFObjectStream, ELFObjectWriter
+        from codegen.elf import ELFObjectStream, ELFObjectWriter, X64ELFObjectWriter
 
         objformat = self.triple.objformat
 
@@ -2595,7 +2667,8 @@ class X64TargetMachine:
                 stream = WinCOFFObjectStream(
                     mccontext, backend, writer, emitter)
             elif objformat == ObjectFormatType.ELF:
-                writer = ELFObjectWriter(output)
+                target_writer = X64ELFObjectWriter()
+                writer = ELFObjectWriter(output, target_writer)
                 stream = ELFObjectStream(mccontext, backend, writer, emitter)
 
         pass_manager.passes.append(X64AsmPrinter(stream))

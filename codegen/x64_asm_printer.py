@@ -554,7 +554,44 @@ class X64AsmPrinter(AsmPrinter):
         pass
 
     def emit_instruction(self, inst):
+        from codegen.x64_def import RDI, RIP, NOREG
         mc_inst_lower = X64MCInstLower(self.ctx, inst.mbb.func, self)
+
+        if inst.opcode == X64MachineOps.TLSADDR64:
+            var_kind = MCVariantKind.TLSGD
+
+            operand = inst.operands[0]
+            gv = mc_inst_lower.get_symbol(operand)
+            gv_symbol_ref = MCSymbolRefExpr(gv, var_kind)
+
+            lea_inst = MCInst(X64MachineOps.LEA64r)
+            lea_inst.add_operand(MCOperandReg(MachineRegister(RDI)))
+            lea_inst.add_operand(MCOperandReg(MachineRegister(RIP)))
+            lea_inst.add_operand(MCOperandImm(1))
+            lea_inst.add_operand(MCOperandReg(MachineRegister(NOREG)))
+            lea_inst.add_operand(MCOperandExpr(gv_symbol_ref))
+            lea_inst.add_operand(MCOperandReg(MachineRegister(NOREG)))
+
+            self.emit_mc_inst(MCInst(X64MachineOps.DATA16_PREFIX))
+
+            self.emit_mc_inst(lea_inst)
+
+            tls_get_addr = self.ctx.get_or_create_symbol("__tls_get_addr")
+            tls_symbol_ref = MCSymbolRefExpr(tls_get_addr, MCVariantKind.PLT)
+
+            mc_inst = MCInst(X64MachineOps.CALL)
+            mc_inst.add_operand(MCOperandExpr(tls_symbol_ref))
+
+            self.emit_mc_inst(MCInst(X64MachineOps.DATA16_PREFIX))
+            self.emit_mc_inst(MCInst(X64MachineOps.DATA16_PREFIX))
+            self.emit_mc_inst(MCInst(X64MachineOps.REX64_PREFIX))
+
+            self.emit_mc_inst(mc_inst)
+
+            self.stream.assembler.register_symbol(gv)
+            self.stream.assembler.register_symbol(tls_get_addr)
+            return
+
         mc_inst = mc_inst_lower.lower(inst)
 
         for operand in mc_inst.operands:
@@ -938,6 +975,26 @@ class X64FixupKind(Enum):
     Reloc_RIPRel_4 = auto()
 
 
+class X64MCExprVarKind(Enum):
+    Non = auto()
+    SecRel = auto()
+
+
+class X64MCExpr(MCTargetExpr):
+    def __init__(self, kind, expr):
+        super().__init__()
+
+        self.kind = kind
+        self.expr = expr
+
+    def evaluate_expr_as_relocatable(self, layout, fixup):
+        if self.kind == X64MCExprVarKind.SecRel:
+            offset = layout.get_symbol_offset(fixup.value.expr.symbol)
+            return MCValue(offset, None, None)
+
+        raise ValueError("Invalid kind")
+
+
 class X64CodeEmitter(MCCodeEmitter):
     def __init__(self):
         super().__init__()
@@ -1093,6 +1150,7 @@ class X64CodeEmitter(MCCodeEmitter):
             if expr.ty == MCExprType.SymbolRef:
                 if expr.kind == MCVariantKind.SECREL:
                     fixup_kind = MCFixupKind.SecRel_4
+                    expr = X64MCExpr(X64MCExprVarKind.SecRel, expr)
 
         offset = output.tell()
         bys = output.getvalue()
@@ -1631,6 +1689,12 @@ class X64CodeEmitter(MCCodeEmitter):
             # flags
             imm_size = 4
             is_pcrel = True
+        elif inst.opcode in [X64MachineOps.DATA16_PREFIX]:
+            base_opcode = 0x66
+            form = X64InstForm.RawFrm
+        elif inst.opcode in [X64MachineOps.REX64_PREFIX]:
+            base_opcode = 0x48
+            form = X64InstForm.RawFrm
         else:
             raise NotImplementedError()
 

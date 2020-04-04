@@ -332,6 +332,15 @@ class MachineVirtualRegister:
     def __str__(self):
         return f"%{self.vid}"
 
+    def __eq__(self, other):
+        if not isinstance(other, MachineVirtualRegister):
+            return False
+
+        return self.vid == other.vid
+
+    def __hash__(self):
+        return hash(self.vid)
+
 
 class BasicBlockDagNode(DagNode):
     def __init__(self, bb: BasicBlock):

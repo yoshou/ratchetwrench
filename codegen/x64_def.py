@@ -176,27 +176,37 @@ for idx in range(32):
         globals()[f'YMM{idx}']], [sub_ymm], encoding=idx)
 
 
-GR8 = def_regclass("GR8", [ValueType.I8], 8, [
-    AL, CL, DL, AH, CH, DH, BL, BH])
+x64_regclasses = []
 
-GR16 = def_regclass("GR16", [ValueType.I16], 32, [
+
+def def_x64_regclass(*args, **kwargs):
+    regclass = def_regclass(*args, **kwargs)
+    x64_regclasses.append(regclass)
+    return regclass
+
+
+GR8 = def_x64_regclass("GR8", [ValueType.I8], 8, [
+    AL, CL, DL, BL, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
+
+GR16 = def_x64_regclass("GR16", [ValueType.I16], 32, [
     AX, CX, DX, SI, DI, BX, BP, SP, R8W, R9W, R10W, R11W, R14W, R15W, R12W, R13W])
 
-GR32 = def_regclass("GR32", [ValueType.I32], 32, [
+GR32 = def_x64_regclass("GR32", [ValueType.I32], 32, [
     EAX, ECX, EDX, ESI, EDI, EBX, EBP, ESP, R8D, R9D, R10D, R11D, R14D, R15D, R12D, R13D])
 
-GR64 = def_regclass("GR64", [ValueType.I64], 64, [
+GR64 = def_x64_regclass("GR64", [ValueType.I64], 64, [
     RAX, RCX, RDX, RSI, RDI, RBX, RBP, RSP, R8, R9, R10, R11, R14, R15, R12, R13])
 
-FR32 = def_regclass("FR32", [ValueType.F32], 32, [
-                    globals()[f"XMM{idx}"] for idx in range(16)])
-FR64 = def_regclass("FR64", [ValueType.F64], 64, [
-                    globals()[f"XMM{idx}"] for idx in range(16)])
+VR128 = def_x64_regclass("VR128", [ValueType.V4F32], 128, [
+    globals()[f"XMM{idx}"] for idx in range(16)])
 
-VR128 = def_regclass("VR128", [ValueType.V4F32], 128, [
-                     globals()[f"XMM{idx}"] for idx in range(16)])
+FR32 = def_x64_regclass("FR32", [ValueType.F32], 32, [
+    globals()[f"XMM{idx}"] for idx in range(16)])
 
-CCR = def_regclass("CCR", [ValueType.I32], 32, [EFLAGS])
+FR64 = def_x64_regclass("FR64", [ValueType.F64], 64, [
+    globals()[f"XMM{idx}"] for idx in range(16)])
+
+CCR = def_x64_regclass("CCR", [ValueType.I32], 32, [EFLAGS])
 
 X64 = MachineHWMode("x64")
 
@@ -205,6 +215,10 @@ reg_graph = compute_reg_graph()
 reg_groups = compute_reg_groups(reg_graph)
 compute_reg_subregs_all(reg_graph)
 compute_reg_superregs_all(reg_graph)
+
+# infer regclass
+for regclass in x64_regclasses:
+    infer_subregclass_and_subreg(regclass)
 
 I8Imm = ValueOperandDef(ValueType.I8)
 I16Imm = ValueOperandDef(ValueType.I16)
@@ -577,6 +591,39 @@ lea32addr = ComplexOperandMatcher(match_lea_addr)
 lea64addr = ComplexOperandMatcher(match_lea_addr)
 
 
+def match_tls_addr(node, operands, idx, dag):
+    from codegen.dag import VirtualDagOps, DagValue
+    from codegen.x64_gen import X64DagOps
+    from codegen.types import MachineValueType, ValueType
+    from codegen.mir import MachineRegister
+    from codegen.spec import NOREG
+    from codegen.x64_def import RIP
+
+    if idx >= len(operands):
+        return idx, None
+
+    operand = operands[idx]
+
+    noreg = MachineRegister(NOREG)
+    MVT = MachineValueType
+
+    if operand.node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS:
+        base = operand
+        disp = DagValue(dag.add_target_constant_node(MVT(ValueType.I32), 0), 0)
+        scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
+        index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
+        segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+
+        assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
+
+        return idx + 1, [base, scale, index, disp, segment]
+
+    return idx, None
+
+
+tlsaddr = ComplexOperandMatcher(match_tls_addr)
+
+
 class X64DagOp(DagOp):
     def __init__(self, name):
         super().__init__(name, "x64")
@@ -602,6 +649,8 @@ class X64DagOps(Enum):
 
     MEMBARRIER = X64DagOp("membarrier")
 
+    TLSADDR = X64DagOp("tlsaddr")
+
 
 x64brcond_ = NodePatternMatcherGen(X64DagOps.BRCOND)
 x64sub_ = NodePatternMatcherGen(X64DagOps.SUB)
@@ -609,6 +658,7 @@ x64cmp_ = NodePatternMatcherGen(X64DagOps.CMP)
 x64setcc_ = NodePatternMatcherGen(X64DagOps.SETCC)
 x64movss_ = NodePatternMatcherGen(X64DagOps.MOVSS)
 x64shufp_ = NodePatternMatcherGen(X64DagOps.SHUFP)
+x64tlsaddr_ = NodePatternMatcherGen(X64DagOps.TLSADDR)
 x64membarrier = NodePatternMatcherGen(X64DagOps.MEMBARRIER)()
 
 
@@ -1459,7 +1509,11 @@ class X64MachineOps:
     CALL = def_inst("call",
                     outs=[],
                     ins=[("dst", GR8)],
-                    is_call=True
+                    is_call=True,
+                    defs=[RAX, RCX, RDX, RDI, RSI, R8, R9, R10, R11,
+                          XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7],
+                    uses=[RAX, RCX, RDX, RDI, RSI, R8, R9, R10, R11,
+                          XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]
                     )
 
     RET = def_inst("ret",
@@ -1484,6 +1538,21 @@ class X64MachineOps:
                           ins=[],
                           patterns=[x64membarrier]
                           )
+
+    TLSADDR64 = def_inst("TLSADDR64",
+                         outs=[],
+                         ins=[("sym", I64Mem)],
+                         defs=[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+                               XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, EFLAGS],
+                         patterns=[x64tlsaddr_(("sym", tlsaddr))]
+                         )
+
+    DATA16_PREFIX = def_inst("DATA16_PREFIX",
+                             outs=[],
+                             ins=[])
+    REX64_PREFIX = def_inst("REX64_PREFIX",
+                            outs=[],
+                            ins=[])
 
 
 def loadf32_(addr): return f32_(load_(addr))
