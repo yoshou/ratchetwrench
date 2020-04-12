@@ -377,10 +377,12 @@ def match_addr(node, operands, idx, dag):
         sub_op2 = operand.node.operands[1]
 
         if sub_op1.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            base = sub_op1
+            base = DagValue(dag.add_frame_index_node(
+                sub_op1.ty, sub_op1.node.index, True), 0)
             disp = sub_op2
         elif sub_op2.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            base = sub_op2
+            base = DagValue(dag.add_frame_index_node(
+                sub_op2.ty, sub_op2.node.index, True), 0)
             disp = sub_op1
         elif sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
             if sub_op1.node.opcode == X64DagOps.WRAPPER_RIP and sub_op2.node.is_zero:
@@ -413,6 +415,11 @@ def match_addr(node, operands, idx, dag):
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
 
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
+
         return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.SUB:
         sub_op1 = operand.node.operands[0]
@@ -426,6 +433,28 @@ def match_addr(node, operands, idx, dag):
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
 
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
+
+        assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
+
+        return idx + 1, [base, scale, index, disp, segment]
+    elif operand.node.opcode == VirtualDagOps.FRAME_INDEX:
+        base = DagValue(dag.add_frame_index_node(
+            operand.ty, operand.node.index, True), 0)
+
+        scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
+        index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
+        disp = DagValue(dag.add_target_constant_node(MVT(ValueType.I32), 0), 0)
+        segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
+
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
         return idx + 1, [base, scale, index, disp, segment]
@@ -436,6 +465,11 @@ def match_addr(node, operands, idx, dag):
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         disp = operand.node.operands[0]
         segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
@@ -452,9 +486,25 @@ def match_addr(node, operands, idx, dag):
                 MVT(ValueType.I32), noreg), 0)
             segment = DagValue(dag.add_register_node(
                 MVT(ValueType.I16), noreg), 0)
+        elif disp.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
+            disp = DagValue(dag.add_target_constant_node(
+                disp.node.value_types[0], disp.node.value), 0)
+            base = DagValue(dag.add_register_node(
+                MVT(ValueType.I64), noreg), 0)
+            scale = DagValue(dag.add_target_constant_node(
+                MVT(ValueType.I8), 1), 0)
+            index = DagValue(dag.add_register_node(
+                MVT(ValueType.I32), noreg), 0)
+            segment = DagValue(dag.add_register_node(
+                MVT(ValueType.I16), noreg), 0)
         else:
             assert(disp.node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS)
             raise NotImplementedError()
+
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
 
         return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.CONSTANT:
@@ -478,13 +528,17 @@ def match_addr(node, operands, idx, dag):
 
         return idx + 1, [base, scale, index, disp, segment]
     else:
-        assert(operand.node.opcode in [
-               VirtualDagOps.COPY_FROM_REG, VirtualDagOps.FRAME_INDEX])
+        assert(operand.node.opcode in [VirtualDagOps.COPY_FROM_REG])
         base = operand
         scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         disp = DagValue(dag.add_target_constant_node(MVT(ValueType.I32), 0), 0)
         segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
 
         assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
@@ -517,14 +571,14 @@ def match_lea_addr(node, operands, idx, dag):
         sub_op2 = operand.node.operands[1]
 
         if sub_op1.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            base = sub_op1
+            base = DagValue(dag.add_frame_index_node(
+                sub_op1.ty, sub_op1.node.index, True), 0)
             disp = sub_op2
         else:
             return idx, None
 
-        if disp.node.opcode == VirtualDagOps.CONSTANT:
-            disp = DagValue(dag.add_target_constant_node(
-                disp.ty, disp.node.value), 0)
+        disp = DagValue(dag.add_target_constant_node(
+            disp.ty, disp.node.value), 0)
 
         scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
@@ -537,7 +591,8 @@ def match_lea_addr(node, operands, idx, dag):
         sub_op1 = operand.node.operands[0]
         sub_op2 = operand.node.operands[1]
         if sub_op1.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
-            base = sub_op1
+            base = DagValue(dag.add_frame_index_node(
+                sub_op1.ty, sub_op1.node.index, True), 0)
             disp = sub_op2
         else:
             return idx, None
@@ -574,7 +629,8 @@ def match_lea_addr(node, operands, idx, dag):
 
         return idx + 1, [base, scale, index, disp, segment]
     elif operand.node.opcode == VirtualDagOps.FRAME_INDEX:
-        base = operand
+        base = DagValue(dag.add_frame_index_node(
+            operand.ty, operand.node.index, True), 0)
         scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
         disp = DagValue(dag.add_target_constant_node(MVT(ValueType.I32), 0), 0)
@@ -1502,19 +1558,17 @@ class X64MachineOps:
     V_SET0 = def_inst("v_set0",
                       outs=[("dst", VR128)],
                       ins=[],
-                      #   patterns=[
-                      #       set_(("dst", VR128), v4f32_(imm_zero_vec))]
+                      patterns=[
+                          set_(("dst", VR128), v4f32_(imm_zero_vec))]
                       )
 
-    CALL = def_inst("call",
-                    outs=[],
-                    ins=[("dst", GR8)],
-                    is_call=True,
-                    defs=[RAX, RCX, RDX, RDI, RSI, R8, R9, R10, R11,
-                          XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7],
-                    uses=[RAX, RCX, RDX, RDI, RSI, R8, R9, R10, R11,
-                          XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]
-                    )
+    CALLpcrel32 = def_inst(
+        "call",
+        outs=[],
+        ins=[("dst", GR8)],
+        is_call=True,
+        defs=[RSP]
+    )
 
     RET = def_inst("ret",
                    outs=[],

@@ -5,7 +5,7 @@ from codegen.mir import *
 from codegen.passes import *
 
 
-class LiveIntervals(MachineFunctionPass):
+class MachineDomTree(MachineFunctionPass):
     def __init__(self, mfunc):
         super().__init__()
 

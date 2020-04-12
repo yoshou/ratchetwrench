@@ -1685,14 +1685,6 @@ class RISCVLegalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
-    def promote_integer_result_setcc(self, node, dag, legalized):
-        if dag.mfunc.target_info.triple.arch == ArchType.RISCV64:
-            setcc_ty = MachineValueType(ValueType.I64)
-        else:
-            setcc_ty = MachineValueType(ValueType.I32)
-
-        return dag.add_node(node.opcode, [setcc_ty], *node.operands)
-
     def get_legalized_op(self, operand, legalized):
         if operand.node not in legalized:
             return operand
@@ -1703,6 +1695,14 @@ class RISCVLegalizer(Legalizer):
             return [DagValue(n, operand.index) for n in legalized_node]
 
         return DagValue(legalized_node, operand.index)
+
+    def promote_integer_result_setcc(self, node, dag, legalized):
+        if dag.mfunc.target_info.triple.arch == ArchType.RISCV64:
+            setcc_ty = MachineValueType(ValueType.I64)
+        else:
+            setcc_ty = MachineValueType(ValueType.I32)
+
+        return dag.add_node(node.opcode, [setcc_ty], *node.operands)
 
     def promote_integer_result_bin(self, node, dag, legalized):
         lhs = self.get_legalized_op(node.operands[0], legalized)
@@ -1735,6 +1735,22 @@ class RISCVLegalizer(Legalizer):
             return dag.add_node(node.opcode, [MachineValueType(ValueType.I64)], *node.operands)
         elif node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
             return dag.add_constant_node(MachineValueType(ValueType.I64), node.value)
+
+        return None
+
+    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
+        for vt in node.value_types:
+            if vt.value_type == ValueType.I1:
+                return self.promote_integer_result(node, dag, legalized)
+
+            if vt.value_type == ValueType.I32:
+                if dag.mfunc.target_info.triple.arch == ArchType.RISCV32:
+                    return None
+
+                return self.promote_integer_result(node, dag, legalized)
+
+            if vt.value_type in [ValueType.V4F32]:
+                return self.split_vector_result(node, dag, legalized)
 
         return None
 
@@ -1815,22 +1831,6 @@ class RISCVLegalizer(Legalizer):
             return self.split_vector_result_load(node, dag, legalized)
         if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
             return self.split_vector_result_ins_vec_elt(node, dag, legalized)
-
-        return None
-
-    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
-        for vt in node.value_types:
-            if vt.value_type == ValueType.I1:
-                return self.promote_integer_result(node, dag, legalized)
-
-            if vt.value_type == ValueType.I32:
-                if dag.mfunc.target_info.triple.arch == ArchType.RISCV32:
-                    return None
-
-                return self.promote_integer_result(node, dag, legalized)
-
-            if vt.value_type in [ValueType.V4F32]:
-                return self.split_vector_result(node, dag, legalized)
 
         return None
 

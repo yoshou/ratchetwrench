@@ -169,7 +169,7 @@ class X64IntelInstPrinter(MCInstPrinter):
             X64MachineOps.JMP_1: "jmp",
             X64MachineOps.JMP_2: "jmp",
             X64MachineOps.JMP_4: "jmp",
-            X64MachineOps.CALL: "call",
+            X64MachineOps.CALLpcrel32: "call",
             X64MachineOps.RET: "ret",
         }
 
@@ -190,7 +190,7 @@ class X64IntelInstPrinter(MCInstPrinter):
         if inst.opcode == X64MachineOps.JMP_1:
             self.print_pc_rel_imm(inst, 0, output)
             return
-        if inst.opcode == X64MachineOps.CALL:
+        if inst.opcode == X64MachineOps.CALLpcrel32:
             self.print_pc_rel_imm(inst, 0, output)
             return
 
@@ -579,7 +579,7 @@ class X64AsmPrinter(AsmPrinter):
             tls_get_addr = self.ctx.get_or_create_symbol("__tls_get_addr")
             tls_symbol_ref = MCSymbolRefExpr(tls_get_addr, MCVariantKind.PLT)
 
-            mc_inst = MCInst(X64MachineOps.CALL)
+            mc_inst = MCInst(X64MachineOps.CALLpcrel32)
             mc_inst.add_operand(MCOperandExpr(tls_symbol_ref))
 
             self.emit_mc_inst(MCInst(X64MachineOps.DATA16_PREFIX))
@@ -1150,7 +1150,7 @@ class X64CodeEmitter(MCCodeEmitter):
             if expr.ty == MCExprType.SymbolRef:
                 if expr.kind == MCVariantKind.SECREL:
                     fixup_kind = MCFixupKind.SecRel_4
-                    expr = X64MCExpr(X64MCExprVarKind.SecRel, expr)
+                    # expr = X64MCExpr(X64MCExprVarKind.SecRel, expr)
 
         offset = output.tell()
         bys = output.getvalue()
@@ -1682,7 +1682,7 @@ class X64CodeEmitter(MCCodeEmitter):
         elif inst.opcode in [X64MachineOps.RET]:
             base_opcode = 0xC3
             form = X64InstForm.RawFrm
-        elif inst.opcode in [X64MachineOps.CALL]:
+        elif inst.opcode in [X64MachineOps.CALLpcrel32]:
             base_opcode = 0xE8
             form = X64InstForm.RawFrm
 

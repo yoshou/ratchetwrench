@@ -816,6 +816,59 @@ class TargetRegisterInfo:
 
         raise NotImplementedError()
 
+    def is_legal_for_regclass(self, regclass, value_type):
+        for ty in regclass.tys:
+            if ty == value_type:
+                return True
+
+        return False
+
+    def is_subclass(self, regclass, subclass):
+        return subclass in regclass.subclass_and_subregs.values()
+
+    def get_minimum_regclass_from_reg(self, reg, vt):
+        from codegen.spec import regclasses
+
+        rc = None
+        for regclass in regclasses:
+            if self.is_legal_for_regclass(regclass, vt) and reg in regclass.regs:
+                if not rc or self.is_subclass(rc, regclass):
+                    rc = regclass
+
+        if not rc:
+            raise ValueError("Could not find the register class.")
+
+        return rc
+
+    def get_regclass_from_reg(self, reg):
+        from codegen.spec import regclasses
+
+        rc = None
+        for regclass in regclasses:
+            if reg in regclass.regs:
+                if not rc or self.is_subclass(rc, regclass):
+                    rc = regclass
+
+        if rc:
+            return rc
+
+        raise ValueError("Could not find the register class.")
+
+    def get_subreg(self, reg, subreg_idx):
+
+        def find_subreg(reg2, subreg_idx):
+            for subreg in reg2.subregs:
+                if subreg.idx == subreg_idx:
+                    return subreg.reg
+            raise KeyError("subreg_idx")
+
+        subreg_idx = subregs[subreg_idx]
+        if isinstance(subreg_idx, ComposedSubRegDescription):
+            reg = find_subreg(reg, subreg_idx.subreg_a)
+            subreg_idx = subreg_idx.subreg_b
+
+        return find_subreg(reg, subreg_idx)
+
 
 class InstructionSelector:
     def __init__(self):

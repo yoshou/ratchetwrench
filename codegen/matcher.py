@@ -87,6 +87,10 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
         chain = dag.entry
 
     glue = None
+
+    if len(node.operands) > 0 and node.operands[-1].ty.value_type == ValueType.GLUE:
+        glue = node.operands[-1]
+
     for reg in inst.uses:
         assert(isinstance(reg, MachineRegisterDef))
         operand = dic[reg].value
@@ -97,13 +101,14 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
         reg_node = DagValue(dag.add_target_register_node(
             operand.ty, reg), 0)
 
+        copy_to_reg_ops = [chain, reg_node, operand]
+        if glue:
+            copy_to_reg_ops.append(glue)
+
         chain = DagValue(dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)],
-                                      chain, reg_node, operand), 0)
+                                      *copy_to_reg_ops), 0)
 
         glue = chain.get_value(1)
-
-    if len(node.operands) > 0 and node.operands[-1].ty.value_type == ValueType.GLUE:
-        glue = node.operands[-1]
 
     if chain:
         ops.append(chain)
@@ -244,9 +249,9 @@ def create_matcher(matcher_or_tuple):
 
 
 class NodePatternMatcherGen:
-    def __init__(self, opcode: str, **props):
+    def __init__(self, opcode: str, *props, mem_vt=None):
         self.opcode = opcode
-        self.props = dict(props)
+        self.props = dict({"mem_vt": mem_vt})
 
     def __call__(self, *operands):
         from codegen.spec import MachineRegisterDef
@@ -260,32 +265,69 @@ class NodePatternMatcherGen:
         return NodePatternMatcher(opcode_matcher, operand_matchers, [], self.props)
 
 
+from enum import Enum, auto
+
+
+class NodeProperty(Enum):
+    Commutative = auto()
+    Associative = auto()
+    HasChain = auto()
+    OutGlue = auto()
+    InGlue = auto()
+    MemOperand = auto()
+
+
 from codegen.dag import VirtualDagOps
 from codegen.types import ValueType
 
 
-add_ = NodePatternMatcherGen(VirtualDagOps.ADD)
-sub_ = NodePatternMatcherGen(VirtualDagOps.SUB)
-mul_ = NodePatternMatcherGen(VirtualDagOps.MUL)
-sdiv_ = NodePatternMatcherGen(VirtualDagOps.SDIV)
+add_ = NodePatternMatcherGen(
+    VirtualDagOps.ADD, NodeProperty.Commutative, NodeProperty.Associative)
 
-and_ = NodePatternMatcherGen(VirtualDagOps.AND)
-or_ = NodePatternMatcherGen(VirtualDagOps.OR)
-xor_ = NodePatternMatcherGen(VirtualDagOps.XOR)
+sub_ = NodePatternMatcherGen(
+    VirtualDagOps.SUB)
+
+mul_ = NodePatternMatcherGen(
+    VirtualDagOps.MUL, NodeProperty.Commutative, NodeProperty.Associative)
+
+sdiv_ = NodePatternMatcherGen(VirtualDagOps.SDIV)
+and_ = NodePatternMatcherGen(
+    VirtualDagOps.AND, NodeProperty.Commutative, NodeProperty.Associative)
+
+or_ = NodePatternMatcherGen(
+    VirtualDagOps.OR, NodeProperty.Commutative, NodeProperty.Associative)
+
+xor_ = NodePatternMatcherGen(
+    VirtualDagOps.XOR, NodeProperty.Commutative, NodeProperty.Associative)
+
 sra_ = NodePatternMatcherGen(VirtualDagOps.SRA)
 srl_ = NodePatternMatcherGen(VirtualDagOps.SRL)
 shl_ = NodePatternMatcherGen(VirtualDagOps.SHL)
 
-fadd_ = NodePatternMatcherGen(VirtualDagOps.FADD)
+fadd_ = NodePatternMatcherGen(
+    VirtualDagOps.FADD, NodeProperty.Commutative, NodeProperty.Associative)
+
 fsub_ = NodePatternMatcherGen(VirtualDagOps.FSUB)
-fmul_ = NodePatternMatcherGen(VirtualDagOps.FMUL)
+
+fmul_ = NodePatternMatcherGen(
+    VirtualDagOps.FMUL, NodeProperty.Commutative, NodeProperty.Associative)
+
 fdiv_ = NodePatternMatcherGen(VirtualDagOps.FDIV)
 
-load_ = NodePatternMatcherGen(VirtualDagOps.LOAD)
-extloadi32_ = NodePatternMatcherGen(VirtualDagOps.LOAD, mem_vt=ValueType.I32)
-store_ = NodePatternMatcherGen(VirtualDagOps.STORE)
-extstorei32_ = NodePatternMatcherGen(VirtualDagOps.STORE, mem_vt=ValueType.I32)
+load_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain)
+
+extloadi32_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+
+store_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain)
+
+extstorei32_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I32)
+
 br_ = NodePatternMatcherGen(VirtualDagOps.BR)
+
 brcond_ = NodePatternMatcherGen(VirtualDagOps.BRCOND)
 
 setcc_ = NodePatternMatcherGen(VirtualDagOps.SETCC)

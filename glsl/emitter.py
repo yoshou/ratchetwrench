@@ -572,9 +572,43 @@ def build_ir_expr_ident(node, block, ctx):
     return block, LoadInst(block, mem)
 
 
+def get_func_name(name):
+    from glsl.sema import FuncSignature
+
+    if isinstance(name, FuncSignature):
+        return name.name
+
+    return name
+
+
 def build_ir_expr_func_call(node, block, ctx):
     if node.ident.name == "memoryBarrier":
         return block, FenceInst(block, AtomicOrdering.AcquireRelease, SyncScope.SingleThread)
+
+    if ctx.funcs[node.ident.name].name == "vec3_1":
+        result_ty = ctx.get_ir_type(node.type)
+
+        block, elem = build_ir_expr(node.params[0], block, ctx)
+        vec = InsertElementInst(block, get_constant_null_value(
+            result_ty), elem, ConstantInt(0, i32))
+
+        for i in range(1, 3):
+            vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
+
+        return block, vec
+
+    if ctx.funcs[node.ident.name].name == "vec3_3":
+        result_ty = ctx.get_ir_type(node.type)
+
+        block, elem = build_ir_expr(node.params[0], block, ctx)
+        vec = InsertElementInst(block, get_constant_null_value(
+            result_ty), elem, ConstantInt(0, i32))
+
+        for i in range(1, 3):
+            block, elem = build_ir_expr(node.params[i], block, ctx)
+            vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
+
+        return block, vec
 
     params = []
 
@@ -1609,7 +1643,7 @@ def emit_ir(ast, abi, module):
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
 
-                thread_local = ThreadLocalMode.NotThreadLocal
+                # thread_local = ThreadLocalMode.NotThreadLocal
 
                 global_named_values[ident.val] = module.add_global_variable(
                     GlobalVariable(ty, linkage, ident.val.name, thread_local, init))

@@ -26,11 +26,11 @@ class InstructionSelection(MachineFunctionPass):
 
         self.init()
         self.combine()
-        self.legalize_type()
-        self.legalize()
         # for bb, dag in self.dags.items():
         #     mbb = self.mbb_map[bb]
         #     print_dag(id(mbb), dag, "./data/dag", self.func.name)
+        self.legalize_type()
+        self.legalize()
         self.select()
         self.schedule()
 
@@ -148,19 +148,6 @@ class InstructionSelection(MachineFunctionPass):
         return visited[node]
 
     def _bfs(self, node: DagNode, action, visited):
-        assert(isinstance(node, DagNode))
-
-        if node in visited:
-            return
-
-        visited.add(node)
-
-        for op in set(node.operands):
-            self._bfs(op.node, action, visited)
-
-        action(node)
-
-    def _bfs2(self, node: DagNode, action, visited):
         assert(isinstance(node, DagNode))
 
         if node in visited:
@@ -325,6 +312,18 @@ class InstructionSelection(MachineFunctionPass):
 
             return DagValue(node, 0)
 
+        if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
+            in_vec = node.operands[0]
+            in_val = node.operands[1]
+            idx = node.operands[2]
+
+            if in_vec.node.opcode == VirtualDagOps.BUILD_VECTOR and isinstance(idx.node, ConstantDagNode) and len(in_vec.node.uses) == 1:
+                ops = list(in_vec.node.operands)
+                assert(ops[idx.node.value.value].ty == in_val.ty)
+                ops[idx.node.value.value] = in_val
+
+                return DagValue(dag.add_node(VirtualDagOps.BUILD_VECTOR, in_vec.node.value_types, *ops), 0)
+
         return None
 
     def combine(self):
@@ -348,17 +347,19 @@ class InstructionSelection(MachineFunctionPass):
                 if value is None or value.node == node:
                     continue
 
-                for op in node.uses:
-                    value.node.uses.add(op)
+                for user in node.uses:
+                    value.node.uses.add(user)
 
                 if value.node not in nodes:
                     nodes.append(value.node)
 
                 for user in node.uses:
                     if user not in nodes:
-                        nodes.append(user)
+                        nodes.append(user.source)
 
-            dag.remove_unreachable_nodes()
+                    user.ref.node = value.node
+
+                dag.remove_unreachable_nodes()
 
     def select(self):
         def create_select_node(dag, results):
@@ -370,7 +371,7 @@ class InstructionSelection(MachineFunctionPass):
             dag = self.dags[bb]
 
             results = {}
-            self._bfs2(dag.root.node, create_select_node(dag, results), set())
+            self._bfs(dag.root.node, create_select_node(dag, results), set())
 
             operands = set()
 
@@ -379,10 +380,6 @@ class InstructionSelection(MachineFunctionPass):
                     operands.add(operand)
 
             self._bfs(dag.root.node, collect_operands, set())
-
-            # for node in results.values():
-            #     for operand in node.operands:
-            #         operands.add(operand)
 
             operands.add(dag.root)
 
@@ -402,32 +399,6 @@ class InstructionSelection(MachineFunctionPass):
             dag.remove_unreachable_nodes()
 
     def schedule(self):
-
-        def glued_node_iter(node):
-            glue_ty = MachineValueType(ValueType.GLUE)
-            yield node
-            while len(node.operands) > 0 and node.operands[-1].ty == glue_ty:
-                node = node.operands[-1].node
-                yield node
-
-        def bfs(node, action, visited):
-            if node in visited:
-                return
-
-            visited.add(node)
-
-            for succ in node.preds:
-                bfs(succ.node, action, visited)
-
-            action(node)
-
-        def topological_sort_schedule(nodes):
-            lst = []
-            visited = set()
-            for node in nodes:
-                bfs(node, lambda n: lst.append(n), visited)
-            return lst
-
         vr_map = {}
 
         mbb = self.mbb_map[self.func.bbs[0]]
@@ -438,55 +409,18 @@ class InstructionSelection(MachineFunctionPass):
 
             mbb.append_inst(minst)
 
+        scheduler = ListScheduler()
+
         for bb in self.func.bbs:
             dag = self.dags[bb]
             mbb = self.mbb_map[bb]
             sched_dag = ScheduleDag(self.mfunc, dag)
-            # sched_dag.build()
+            sched_dag.build()
 
             emitter = MachineInstrEmitter(mbb, vr_map)
 
-            sched_node_map = {}
+            # print_sunit_dag("sunit-" + str(id(mbb)), sched_dag,
+            #                 "./data/dag", self.func.name)
 
-            # Create nodes
-            work_list = [dag.root.node]
-            visited = set()
-
-            while len(work_list) > 0:
-                node = work_list.pop()
-
-                if node in visited:
-                    continue
-
-                for operand in node.operands:
-                    work_list.append(operand.node)
-
-                visited.add(node)
-
-                sched_node = sched_dag.create_sched_node(node)
-                sched_node_map[node] = sched_node
-
-                for glued_node in list(glued_node_iter(node))[1:]:
-                    sched_node_map[glued_node] = sched_node
-
-                    for operand in glued_node.operands:
-                        work_list.append(operand.node)
-                    visited.add(glued_node)
-
-            # Create edges
-            for sched_node in sched_node_map.values():
-                for glued_node in glued_node_iter(sched_node.node):
-                    for operand in glued_node.operands:
-                        op_sched_node = sched_node_map[operand.node]
-
-                        sched_edge = ScheduleEdge(op_sched_node)
-                        sched_node.add_pred(sched_edge)
-
-            # Run scheduler
-            def schedule_nodes(sched_nodes):
-                for sched_node in reversed(topological_sort_schedule(sched_nodes)):
-                    for glued_node in glued_node_iter(sched_node.node):
-                        yield glued_node
-
-            for node in reversed(list(schedule_nodes(sched_node_map.values()))):
+            for node in scheduler.schedule(sched_dag):
                 emitter.emit(node, dag)

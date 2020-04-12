@@ -74,3 +74,69 @@ def print_dag(i, dag: Dag, out_dir, funcname, font_size=14, font_name="Ricty Dim
 
     g.draw(os.path.join(
         out_dir, f'{funcname}_dag{i}.png'), prog='dot')
+
+
+from codegen.scheduler import ScheduleDag, ScheduleUnit, DependencyKind, glued_node_iter
+
+
+def print_sched_dag_node(idx, sunit, g, font_size, font_name):
+    rows = []
+
+    # if len(node.operands) > 0:
+    #     inputs = "|".join([f"<i{i}>{i}" for i in range(len(node.operands))])
+    #     rows.append(f"{{{inputs}}}")
+
+    rows.append(f"{{SU({sunit.id}):}}")
+
+    insts = []
+    for node in reversed(list(glued_node_iter(sunit.node))):
+        opcode = node.get_label().replace("<", "\<").replace(">", "\>")
+        insts.append(f'{opcode}')
+    insts = '\\n'.join(insts)
+    rows.append(f"{{{insts}}}")
+    rows.append(f"{{{hex(id(sunit))}}}")
+
+    # if len(node.value_types) > 0:
+    #     outputs = "|".join(
+    #         [f"<o{str(i)}>{str(ty)}" for i, ty in enumerate(node.value_types)])
+    #     rows.append(f"{{{outputs}}}")
+
+    label = f"{{{'|'.join(rows)}}}"
+
+    g.add_node(sunit, label=label, shape='record', style='rounded',
+               fontsize=font_size)
+
+
+def print_sunit_dag(i, sched_dag: ScheduleDag, out_dir, funcname, font_size=14, font_name="Ricty Diminished"):
+    g = pgv.AGraph(strict=False, directed=True, rankdir='BT')
+
+    visited = set()
+
+    def dfs(node: ScheduleUnit, depth=0):
+        if node is None:
+            return
+
+        if node in visited:
+            return
+
+        visited.add(node)
+
+        for i, succ in enumerate(node.succs):
+            dfs(succ.node, depth + 1)
+
+            if succ.kind == DependencyKind.Order:
+                g.add_edge(node, succ.node, key=f"ch",
+                           fontsize=font_size, fontname=font_name, style="dashed", color="blue")
+            else:
+                g.add_edge(node, succ.node, key=f"value",
+                           fontsize=font_size, fontname=font_name, style="solid", color="black")
+
+        idx = len(visited)
+
+        print_sched_dag_node(idx, node, g, font_size, font_name)
+
+    root = sched_dag.sched_node_map[sched_dag.dag.root.node]
+    dfs(root)
+
+    g.draw(os.path.join(
+        out_dir, f'{funcname}_dag{i}.png'), prog='dot')

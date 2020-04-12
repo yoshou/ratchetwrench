@@ -384,13 +384,14 @@ class COFFObjectFileInfo(MCObjectFileInfo):
 
 
 class MCSectionCOFF(MCSection):
-    def __init__(self, name, characteristics, comdat_sym=None, selection=0):
+    def __init__(self, name, characteristics, comdat_sym=None, selection=0, alignment=16):
         super().__init__()
 
         self.name = name
         self.characteristics = characteristics
         self.comdat_sym = comdat_sym
         self.selection = selection
+        self.alignment = alignment
 
     def __hash__(self):
         return hash((self.name, self.comdat_sym))

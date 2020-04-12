@@ -407,6 +407,23 @@ class BasicBlock(Value):
     def remove(self):
         idx = self.func.blocks.index(self)
         self.func.blocks.pop(idx)
+        self.func = None
+
+    @property
+    def predecessors(self):
+        for bb in self.func.blocks:
+            succs = list(bb.successors)
+            if self in bb.successors:
+                yield bb
+
+    @property
+    def successors(self):
+        for inst in reversed(self.insts):
+            if not inst.is_terminator:
+                break
+
+            for succ in inst.successors:
+                yield succ
 
 
 class User(Value):
@@ -462,6 +479,19 @@ class Instruction(User):
 
         self.block.insts.remove(self)
         self.block = None
+
+    def move_after(self, block_or_inst):
+        self.block.insts.remove(self)
+
+        if isinstance(block_or_inst, BasicBlock):
+            block_or_inst.insts.append(self)
+            self.block = block_or_inst
+        else:
+            assert(isinstance(block_or_inst, Instruction))
+            insert_index = block_or_inst.insts.index(block_or_inst)
+
+            self.block.insts.insert(insert_index, self)
+            self.block = block_or_inst.block
 
     @property
     def is_terminator(self):
@@ -712,9 +742,117 @@ class CastInst(UnaryInst):
         return False
 
 
+class TruncInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "truct", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class ZExtInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "zext", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class SExtInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "sext", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class FPTruncInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "fptruct", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class FPExtInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "fpext", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class FPToUIInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "fptoui", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class UIToFPInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "uitofp", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class FPToSIInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "fptosi", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class SIToFPInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "sitofp", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class PtrToIntInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "ptrtoint", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class IntToPtrInst(CastInst):
+    def __init__(self, block, op, rs, ty):
+        super().__init__(block, "inttoptr", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
 class BitCastInst(CastInst):
     def __init__(self, block, rs, ty):
         super().__init__(block, "bitcast", rs, ty)
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class AddrSpaceCastInst(CastInst):
+    def __init__(self, block, rs, ty):
+        super().__init__(block, "addrspacecast", rs, ty)
 
     @property
     def is_terminator(self):

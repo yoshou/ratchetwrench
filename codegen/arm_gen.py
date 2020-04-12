@@ -701,7 +701,8 @@ class ARMTargetInstInfo(TargetInstInfo):
 
         def has_reg_regclass(reg, regclass):
             if isinstance(reg, MachineVirtualRegister):
-                return reg.regclass == regclass
+                reg_info = inst.mbb.func.target_info.get_register_info()
+                return reg.regclass == regclass or reg_info.is_subclass(regclass, reg.regclass)
             else:
                 return reg.spec in regclass.regs
 
@@ -773,7 +774,8 @@ class ARMTargetInstInfo(TargetInstInfo):
 
         def has_reg_regclass(reg, regclass):
             if isinstance(reg, MachineVirtualRegister):
-                return reg.regclass == regclass
+                reg_info = inst.mbb.func.target_info.get_register_info()
+                return reg.regclass == regclass or reg_info.is_subclass(regclass, reg.regclass)
             else:
                 return reg.spec in regclass.regs
 
@@ -1274,15 +1276,16 @@ class ARMTargetLowering(TargetLowering):
             self.get_pointer_type(data_layout), node.value, True)
         return dag.add_node(ARMDagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
 
+    def _mm_set_ps1(self, vec_ty, val, dag):
+        vec = DagValue(dag.add_node(
+            VirtualDagOps.SCALAR_TO_VECTOR, [vec_ty], val), 0)
+        param = DagValue(dag.add_target_constant_node(MachineValueType(
+            ValueType.I8), self.shuffle_param(0, 0, 0, 0)), 0)
+
+        return DagValue(dag.add_node(ARMDagOps.VDUP, vec.node.value_types, vec, vec, param), 0)
+
     def lower_build_vector(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
-        operands = []
-        for operand in node.operands:
-            target_constant_fp = dag.add_target_constant_fp_node(
-                operand.node.value_types[0], operand.node.value)
-            operands.append(DagValue(target_constant_fp, 0))
-
-        assert(len(operands) > 0)
 
         is_one_val = True
         for idx in range(1, len(node.operands)):
@@ -1291,7 +1294,15 @@ class ARMTargetLowering(TargetLowering):
                 break
 
         if is_one_val:
-            return dag.add_node(ARMDagOps.VDUP, node.value_types, operands[0])
+            return dag.add_node(ARMDagOps.VDUP, node.value_types, node.operands[0])
+
+        operands = []
+        for operand in node.operands:
+            target_constant_fp = dag.add_target_constant_fp_node(
+                operand.node.value_types[0], operand.node.value)
+            operands.append(DagValue(target_constant_fp, 0))
+
+        assert(len(operands) > 0)
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
 
@@ -1718,6 +1729,9 @@ class ARMTargetLowering(TargetLowering):
         builder.root = DagValue(builder.g.add_node(VirtualDagOps.TOKEN_FACTOR, [
             MachineValueType(ValueType.OTHER)], *chains), 0)
 
+    def get_setcc_result_type_for_vt(self, vt):
+        return MachineValueType(ValueType.I32)
+
 
 class ARMTargetRegisterInfo(TargetRegisterInfo):
     def __init__(self, target_info):
@@ -1754,39 +1768,6 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
 
         return [reg for reg in regclass.regs if reg in free_regs]
 
-    def is_legal_for_regclass(self, regclass, value_type):
-        for ty in regclass.tys:
-            if ty == value_type:
-                return True
-
-        return False
-
-    def is_subclass(self, regclass, subclass):
-        return False
-
-    def get_minimum_regclass_from_reg(self, reg, vt):
-        from codegen.spec import regclasses
-
-        rc = None
-        for regclass in regclasses:
-            if self.is_legal_for_regclass(regclass, vt) and reg in regclass.regs:
-                if not rc or self.is_subclass(rc, regclass):
-                    rc = regclass
-
-        if not rc:
-            raise ValueError("Could not find the register class.")
-
-        return rc
-
-    def get_regclass_from_reg(self, reg):
-        from codegen.spec import regclasses
-
-        for regclass in regclasses:
-            if reg in regclass.regs:
-                return regclass
-
-        raise ValueError("Could not find the register class.")
-
     def get_regclass_for_vt(self, vt):
         hwmode = self.target_info.hwmode
         for regclass in arm_regclasses:
@@ -1795,20 +1776,6 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
                 return regclass
 
         raise ValueError("Could not find the register class.")
-
-    def get_subreg(self, reg, subreg_idx):
-
-        def find_subreg(reg2, subreg_idx):
-            for subreg in reg2.subregs:
-                if subreg.idx == subreg_idx:
-                    return subreg.reg
-            raise KeyError("subreg_idx")
-
-        subreg_idx = subregs[subreg_idx]
-        if isinstance(subreg_idx, ComposedSubRegDescription):
-            reg = find_subreg(reg, subreg_idx.subreg_a)
-            subreg_idx = subreg_idx.subreg_b
-        return find_subreg(reg, subreg_idx)
 
 
 class ARMFrameLowering(TargetFrameLowering):
@@ -1826,16 +1793,23 @@ class ARMLegalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
+    def get_legalized_op(self, operand, legalized):
+        if operand.node not in legalized:
+            return operand
+
+        legalized_node = legalized[operand.node]
+
+        if isinstance(legalized_node, (list, tuple)):
+            return [DagValue(n, operand.index) for n in legalized_node]
+
+        return DagValue(legalized_node, operand.index)
+
     def promote_integer_result_setcc(self, node, dag, legalized):
-        setcc_ty = MachineValueType(ValueType.I32)
+        target_lowering = dag.mfunc.target_info.get_lowering()
+        setcc_ty = target_lowering.get_setcc_result_type_for_vt(
+            node.value_types[0])
 
         return dag.add_node(node.opcode, [setcc_ty], *node.operands)
-
-    def get_legalized_op(self, operand, legalized):
-        if operand.node in legalized:
-            return DagValue(legalized[operand.node], operand.index)
-
-        return operand
 
     def promote_integer_result_bin(self, node, dag, legalized):
         lhs = self.get_legalized_op(node.operands[0], legalized)
@@ -1852,6 +1826,13 @@ class ARMLegalizer(Legalizer):
             return dag.add_node(node.opcode, [MachineValueType(ValueType.I32)], *node.operands)
         else:
             raise ValueError("No method to promote.")
+
+    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
+        for vt in node.value_types:
+            if vt.value_type == ValueType.I1:
+                return self.promote_integer_result(node, dag, legalized)
+
+        return node
 
     def split_vector_result_build_vec(self, node, dag, legalized):
         return tuple([operand.node for operand in node.operands])
@@ -1934,13 +1915,6 @@ class ARMLegalizer(Legalizer):
             return self.split_vector_result_load(node, dag, legalized)
         if node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
             return self.split_vector_result_ins_vec_elt(node, dag, legalized)
-
-        return node
-
-    def legalize_node_result(self, node: DagNode, dag: Dag, legalized):
-        for vt in node.value_types:
-            if vt.value_type == ValueType.I1:
-                return self.promote_integer_result(node, dag, legalized)
 
         return node
 

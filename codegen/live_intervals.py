@@ -77,6 +77,7 @@ class LiveIntervals(MachineFunctionPass):
         self.mfunc = mfunc
         self.target_lowering = mfunc.target_info.get_lowering()
         self.target_inst_info = mfunc.target_info.get_inst_info()
+        self.target_reg_info = mfunc.target_info.get_register_info()
 
         live_ins = {}
         live_outs = {}
@@ -108,11 +109,20 @@ class LiveIntervals(MachineFunctionPass):
                     if operand.is_reg:
                         if operand.is_use:
                             gens[inst].add(operand.reg)
+                        else:
+                            kills[inst].add(operand.reg)
 
                             if operand.is_phys:
                                 phys_regs.add(operand.reg)
-                        else:
-                            kills[inst].add(operand.reg)
+
+                if inst.is_call:
+                    non_csrs = self.target_reg_info.get_callee_clobbered_regs()
+
+                    for non_csr in non_csrs:
+                        reg = MachineRegister(non_csr)
+                        kills[inst].add(reg)
+                        gens[inst].add(reg)
+                        phys_regs.add(reg)
 
                 if inst != mbb.insts[-1]:
                     succ.append(inst.next_inst)

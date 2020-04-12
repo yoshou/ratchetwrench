@@ -7,9 +7,13 @@ from codegen.spec import Triple, ArchType, OS, Environment, ObjectFormatType
 
 # passes
 from opt.mem2reg import Mem2Reg
+from opt.unreachable_bb_elim import UnreachableBlockElim
+from opt.simplify_cfg import SimplifyCFG
+
 from codegen.isel import InstructionSelection
 from codegen.live_intervals import LiveIntervals
 from codegen.regalloc import FastRegisterAllocation
+from codegen.dead_machine_code_elim import DeadMachineCodeElim
 from codegen.linear_scan_regalloc import LinearScanRegisterAllocation
 from codegen.virtual_reg_rewriter import VirtualRegisterRewriter
 from codegen.prolog_epilog_insertion import PrologEpilogInsertion
@@ -17,6 +21,7 @@ from codegen.peephole_optimize import PeepholeOptimize
 from codegen.expand_pseudos_postra import ExpandPseudosPostRA
 from codegen.two_address_inst import TwoAddressInst
 from codegen.unreachable_bb_elim import UnreachableBBElim
+from codegen.machine_cp import MachineCopyProp
 from codegen.mir_printing import MIRPrinting
 
 # mc
@@ -145,15 +150,19 @@ class SimpleCompiler:
         regalloc = LinearScanRegisterAllocation()
 
         pass_manager.passes.extend([
+            UnreachableBlockElim(),
             Mem2Reg(),
+            SimplifyCFG(),
             InstructionSelection(),
             UnreachableBBElim(),
             PeepholeOptimize(),
             TwoAddressInst(),
+            DeadMachineCodeElim(),
             LiveIntervals(),
             regalloc,
             regalloc,
             VirtualRegisterRewriter(),
+            # MachineCopyProp(),
             ExpandPseudosPostRA(),
             PrologEpilogInsertion(),
         ])

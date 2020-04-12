@@ -183,11 +183,6 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
 
             for cur_range in list(unhandled):
                 if isinstance(cur_range.reg, MachineRegister):
-                    # phys_reg = self.get_phys_reg(cur_range)
-                    # reg_units = set(iter_reg_units(phys_reg.spec))
-                    # self.used_reg_units |= reg_units
-                    # assert(cur_range not in self.active_regs)
-                    # self.active_regs.append(cur_range)
                     continue
 
                 self.expire_old_intervals(cur_range)
@@ -278,5 +273,6 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
                     if not phys_reg:
                         continue
                     operand.reg = phys_reg
+                    operand.is_renamable = True
 
         self.mfunc.live_ranges = {}

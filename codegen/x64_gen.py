@@ -306,7 +306,8 @@ class X64InstructionSelector(InstructionSelector):
 
             return (base, scale, index, disp, segment)
         elif operand.node.opcode == VirtualDagOps.FRAME_INDEX:
-            base = operand
+            base = DagValue(dag.add_frame_index_node(
+                operand.ty, operand.node.index, True), 0)
             scale = DagValue(dag.add_target_constant_node(
                 MVT(ValueType.I8), 1), 0)
             index = DagValue(dag.add_register_node(
@@ -319,20 +320,20 @@ class X64InstructionSelector(InstructionSelector):
             assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
             return (base, scale, index, disp, segment)
-        else:
-            base = operand
-            scale = DagValue(dag.add_target_constant_node(
-                MVT(ValueType.I8), 1), 0)
-            index = DagValue(dag.add_register_node(
-                MVT(ValueType.I32), noreg), 0)
-            disp = DagValue(dag.add_target_constant_node(
-                MVT(ValueType.I32), 0), 0)
-            segment = DagValue(dag.add_register_node(
-                MVT(ValueType.I16), noreg), 0)
+        # else:
+        #     base = operand
+        #     scale = DagValue(dag.add_target_constant_node(
+        #         MVT(ValueType.I8), 1), 0)
+        #     index = DagValue(dag.add_register_node(
+        #         MVT(ValueType.I32), noreg), 0)
+        #     disp = DagValue(dag.add_target_constant_node(
+        #         MVT(ValueType.I32), 0), 0)
+        #     segment = DagValue(dag.add_register_node(
+        #         MVT(ValueType.I16), noreg), 0)
 
-            assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
+        #     assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
-            return (base, scale, index, disp, segment)
+        #     return (base, scale, index, disp, segment)
 
         raise ValueError()
 
@@ -341,6 +342,11 @@ class X64InstructionSelector(InstructionSelector):
         src = new_ops[1]
 
         base, scale, index, disp, segment = self.get_memory_operands(dag, src)
+
+        if node.mem_operand:
+            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
+                segment = DagValue(dag.add_register_node(
+                    MVT(ValueType.I16), MachineRegister(GS)), 0)
 
         ops = [base, scale, index, disp, segment, chain]
 
@@ -769,7 +775,7 @@ class X64InstructionSelector(InstructionSelector):
         if glue:
             ops.append(glue)
 
-        return dag.add_machine_dag_node(X64MachineOps.CALL, node.value_types, *ops)
+        return dag.add_machine_dag_node(X64MachineOps.CALLpcrel32, node.value_types, *ops)
 
     def select_return(self, node: DagNode, dag: Dag, new_ops):
         chain = new_ops[0]
@@ -1012,8 +1018,6 @@ class X64InstructionSelector(InstructionSelector):
 
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
-        # elif node.opcode == VirtualDagOps.FRAME_INDEX:
-        #     return node
         elif node.opcode == VirtualDagOps.UNDEF:
             return node
         elif node.opcode == VirtualDagOps.CONSTANT:
@@ -1246,7 +1250,10 @@ class X86CallingConv(CallingConv):
 
                 idx += reg_count
 
+        chain = g.root
+
         reg_vals = []
+        arg_vals = []
         for idx, arg_val in enumerate(ccstate.values):
             assert(isinstance(arg_val, CCArgReg))
             reg_val = DagValue(g.add_target_register_node(
@@ -1266,36 +1273,40 @@ class X86CallingConv(CallingConv):
 
                 chain = DagValue(g.add_store_node(
                     g.root, arg_mem_val, copy_val), 0)
-                builder.root = chain
+
                 copy_val = arg_mem_val
             else:
                 raise ValueError()
 
-            operands = [builder.root, reg_val, copy_val]
-            if idx != 0:
+            arg_vals.append(copy_val)
+            reg_vals.append(reg_val)
+
+        copy_to_reg_chain = None
+        for reg_val, copy_val in zip(reg_vals, arg_vals):
+            operands = [chain, reg_val, copy_val]
+            if copy_to_reg_chain:
                 operands.append(copy_to_reg_chain.get_value(1))
 
             copy_to_reg_chain = DagValue(builder.g.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(
                 ValueType.OTHER), MachineValueType(ValueType.GLUE)], *operands), 0)
 
-            builder.root = copy_to_reg_chain
-            reg_vals.append(reg_val)
-
         func_address = builder.get_or_create_global_address(inst.callee, True)
 
-        ops = [builder.root, func_address]
+        ops = [chain, func_address]
         if len(ccstate.values) > 0:
             ops.append(copy_to_reg_chain.get_value(1))
 
-        call_node = g.add_node(
-            X64DagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], *ops)
+        call_node = DagValue(g.add_node(
+            X64DagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], *ops), 0)
 
-        builder.root = DagValue(call_node, 0)
+        ops = [call_node.get_value(0), DagValue(in_bytes, 0), DagValue(
+            out_bytes, 0), call_node.get_value(1)]
 
-        callseq_end_node = g.add_node(VirtualDagOps.CALLSEQ_END, [
-            MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], builder.root, DagValue(in_bytes, 0), DagValue(out_bytes, 0), DagValue(call_node, 1))
+        callseq_end_node = DagValue(g.add_node(VirtualDagOps.CALLSEQ_END, [
+            MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], *ops), 0)
 
-        builder.root = DagValue(callseq_end_node, 0)
+        chain = callseq_end_node.get_value(0)
+        builder.root = chain
 
         # Handle returns
         return_offsets = []
@@ -1322,7 +1333,7 @@ class X86CallingConv(CallingConv):
         ccstate = CallingConvState(calling_conv, mfunc)
         ccstate.compute_returns_layout(returns)
 
-        glue_val = DagValue(callseq_end_node, 1)
+        glue_val = callseq_end_node.get_value(1)
 
         # Handle return values
         ret_vals = []
@@ -1333,7 +1344,7 @@ class X86CallingConv(CallingConv):
             reg_node = DagValue(
                 builder.g.add_register_node(ret_val.vt, reg), 0)
             ret_val_node = DagValue(builder.g.add_node(VirtualDagOps.COPY_FROM_REG, [
-                                    ret_val.vt, MachineValueType(ValueType.GLUE)], builder.root, reg_node, glue_val), 0)
+                                    ret_val.vt, MachineValueType(ValueType.GLUE)], chain, reg_node, glue_val), 0)
             glue_val = ret_val_node.get_value(1)
             ret_vals.append(ret_val_node)
 
@@ -1890,15 +1901,15 @@ class X64TargetLowering(TargetLowering):
         if is_fcmp:
             op = X64DagOps.CMP
             cmp_node = DagValue(dag.add_node(op,
-                                             [MachineValueType(ValueType.I32)], op1, op2), 0)
+                                             [MachineValueType(ValueType.I32), MachineValueType(ValueType.GLUE)], op1, op2), 0)
         else:
             op = X64DagOps.SUB
             cmp_node = DagValue(dag.add_node(op,
-                                             [op1.ty, MachineValueType(ValueType.I32)], op1, op2), 1)
+                                             [op1.ty, MachineValueType(ValueType.I32), MachineValueType(ValueType.GLUE)], op1, op2), 1)
 
         # operand 1 is eflags.
         setcc_node = dag.add_node(X64DagOps.SETCC, node.value_types,
-                                  DagValue(condcode, 0), cmp_node)
+                                  DagValue(condcode, 0), cmp_node, cmp_node.get_value(cmp_node.index + 1))
 
         return setcc_node
 
@@ -1966,7 +1977,7 @@ class X64TargetLowering(TargetLowering):
             tls_array = DagValue(dag.add_constant_node(ptr_ty, 0x58), 0)
 
             tls_array = DagValue(dag.add_node(
-                X64DagOps.WRAPPER_RIP, node.value_types, tls_array), 0)
+                X64DagOps.WRAPPER, node.value_types, tls_array), 0)
 
             thread_ptr = DagValue(dag.add_load_node(
                 ptr_ty, dag.entry, tls_array, False, ptr_info=MachinePointerInfo(ptr)), 0)
@@ -2041,13 +2052,33 @@ class X64TargetLowering(TargetLowering):
 
     def lower_build_vector(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
-        operands = []
-        for operand in node.operands:
-            target_constant_fp = dag.add_target_constant_fp_node(
-                operand.node.value_types[0], operand.node.value)
-            operands.append(DagValue(target_constant_fp, 0))
 
-        return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
+        elm = node.operands[0]
+        all_eq = True
+        all_constant_fp = True
+        for operand in node.operands:
+            if elm.node != operand.node or elm.index != operand.index:
+                all_eq = False
+
+            if not isinstance(elm.node, ConstantFPDagNode):
+                all_constant_fp = False
+
+            elm = operand
+
+        operands = []
+        if all_eq:
+            if all_constant_fp:
+                for operand in node.operands:
+                    target_constant_fp = dag.add_target_constant_fp_node(
+                        operand.node.value_types[0], operand.node.value)
+                    operands.append(DagValue(target_constant_fp, 0))
+
+                return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
+
+            result = self._mm_set_ps1(node.value_types[0], elm, dag)
+            return result.node
+        else:
+            raise NotImplementedError()
 
     def shuffle_param(self, fp3, fp2, fp1, fp0):
         return (fp3 << 6) | (fp2 << 4) | (fp1 << 2) | fp0
@@ -2056,12 +2087,13 @@ class X64TargetLowering(TargetLowering):
         mask_val = self.shuffle_param(mask[3], mask[2], mask[1], mask[0])
         return DagValue(dag.add_target_constant_node(MachineValueType(ValueType.I8), mask_val), 0)
 
-    def _mm_set_ps1(self, val):
+    def _mm_set_ps1(self, vec_ty, val, dag):
         vec = DagValue(dag.add_node(
-            VirtualDagOps.SCALAR_TO_VECTOR, [vec.ty], val), 0)
-        param = self.create_i8_constant(self.shuffle_param(0, 0, 0, 0))
+            VirtualDagOps.SCALAR_TO_VECTOR, [vec_ty], val), 0)
+        param = DagValue(dag.add_target_constant_node(MachineValueType(
+            ValueType.I8), self.shuffle_param(0, 0, 0, 0)), 0)
 
-        return DagValue(dag.add_node(X64DagOps.SHUFP, node.value_types, vec, vec, param), 0)
+        return DagValue(dag.add_node(X64DagOps.SHUFP, vec.node.value_types, vec, vec, param), 0)
 
     def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
@@ -2461,8 +2493,10 @@ class X64TargetLowering(TargetLowering):
 
 
 class X64TargetRegisterInfo(TargetRegisterInfo):
-    def __init__(self):
+    def __init__(self, triple):
         super().__init__()
+
+        self.triple = triple
 
     def get_reserved_regs(self):
         reserved = []
@@ -2486,10 +2520,25 @@ class X64TargetRegisterInfo(TargetRegisterInfo):
         return regs
 
     def get_callee_saved_regs(self):
-        callee_save_regs = [RBX, R12, R13, R14, R15, RDI, RSI, XMM6,
-                            XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]
+        if self.triple.arch == ArchType.X86_64:
+            if self.triple.os == OS.Windows:
+                return [RBX, RDI, RSI, R12, R13, R14, R15, XMM6,
+                        XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]
+            elif self.triple.os == OS.Linux:
+                return [RBX, R12, R13, R14, R15, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15]
 
-        return callee_save_regs
+        raise Exception("Unsupporting architecture.")
+
+    def get_callee_clobbered_regs(self):
+        if self.triple.arch == ArchType.X86_64:
+            if self.triple.os == OS.Windows:
+                return [RAX, RCX, RDX, R8, R9, R10, R11,
+                        XMM0, XMM1, XMM2, XMM3, XMM4, XMM5]
+            elif self.triple.os == OS.Linux:
+                return [RAX, RDI, RSI, RCX, RDX, R8, R9, R10, R11,
+                        XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]
+
+        raise Exception("Unsupporting architecture.")
 
     def get_ordered_regs(self, regclass):
         reserved_regs = self.get_reserved_regs()
@@ -2497,39 +2546,6 @@ class X64TargetRegisterInfo(TargetRegisterInfo):
         free_regs = set(regclass.regs) - set(reserved_regs)
 
         return [reg for reg in regclass.regs if reg in free_regs]
-
-    def is_legal_for_regclass(self, regclass, value_type):
-        for ty in regclass.tys:
-            if ty == value_type:
-                return True
-
-        return False
-
-    def is_subclass(self, regclass, subclass):
-        return False
-
-    def get_minimum_regclass_from_reg(self, reg, vt):
-        from codegen.spec import regclasses
-
-        rc = None
-        for regclass in regclasses:
-            if self.is_legal_for_regclass(regclass, vt) and reg in regclass.regs:
-                if not rc or self.is_subclass(rc, regclass):
-                    rc = regclass
-
-        if not rc:
-            raise ValueError("Could not find the register class.")
-
-        return rc
-
-    def get_regclass_from_reg(self, reg):
-        from codegen.spec import regclasses
-
-        for regclass in regclasses:
-            if reg in regclass.regs:
-                return regclass
-
-        raise ValueError("Could not find the register class.")
 
 
 class X64FrameLowering(TargetFrameLowering):
@@ -2617,7 +2633,7 @@ class X64TargetInfo(TargetInfo):
         return X64TargetLowering()
 
     def get_register_info(self) -> TargetRegisterInfo:
-        return X64TargetRegisterInfo()
+        return X64TargetRegisterInfo(self.triple)
 
     def get_calling_conv(self) -> CallingConv:
         return X86CallingConv()
