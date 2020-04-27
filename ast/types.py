@@ -19,10 +19,7 @@ class VoidType(Type):
         return hash(self.__class__)
 
     def __eq__(self, other):
-        return isinstance(other, self.__class__)
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
+        return isinstance(other, VoidType)
 
     @property
     def name(self):
@@ -36,24 +33,26 @@ class PointerType(Type):
     def __hash__(self):
         return hash(tuple([self.elem_ty]))
 
-
-class PrimitiveType(Type):
-    def __init__(self, name, scope):
-        super().__init__()
-        self.name = name
-        self.scope = scope
-
-    def __hash__(self):
-        return hash(tuple([self.name, self.scope]))
-
     def __eq__(self, other):
-        if not isinstance(other, self.__class__):
+        if not isinstance(other, PointerType):
             return False
 
-        return self.name == other.name and self.scope == other.scope
+        return self.elem_ty == other.elem_ty
 
-    def __ne__(self, other):
-        return not self.__eq__(other)
+
+class PrimitiveType(Type):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    def __hash__(self):
+        return hash(tuple([self.name]))
+
+    def __eq__(self, other):
+        if not isinstance(other, PrimitiveType):
+            return False
+
+        return self.name == other.name
 
 
 class VectorType(Type):
@@ -112,11 +111,10 @@ class ArrayType(Type):
 
 
 class CompositeType(Type):
-    def __init__(self, name, fields, scope):
+    def __init__(self, name, fields):
         super().__init__()
         self.name = name
         self.fields = fields
-        self.scope = scope
         self.fields_index = {name: i for i,
                              (ty, name, arr) in enumerate(self.fields)}
 
@@ -127,6 +125,11 @@ class CompositeType(Type):
         idx = self.fields_index[name]
         return self.fields[idx]
 
+    def get_field_type_by_name(self, name):
+        idx = self.fields_index[name]
+        ty, _, _ = self.fields[idx]
+        return ty
+
     def get_field_idx(self, name):
         return self.fields_index[name]
 
@@ -134,25 +137,33 @@ class CompositeType(Type):
         return name in self.fields_index
 
     def __hash__(self):
-        return hash(tuple([self.name, frozenset(self.fields), self.scope]))
+        return hash(tuple([self.name, frozenset(self.fields)]))
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
             return False
 
-        return self.name == other.name and self.fields == other.fields and self.scope == other.scope
+        return self.name == other.name and self.fields == other.fields
 
     def __ne__(self, other):
         return not self.__eq__(other)
 
 
-class FunctionType(Type):
-    def __init__(self, name, return_ty, params, scope):
-        super().__init__()
+class EnumType(Type):
+    def __init__(self, name, values):
         self.name = name
+        self.values = values
+
+        for val_name, value in values.items():
+            assert(isinstance(val_name, str))
+
+
+class FunctionType(Type):
+    def __init__(self, return_ty, params, is_variadic=False):
+        super().__init__()
         self.return_ty = return_ty
         self.params = params
-        self.scope = scope
+        self.is_variadic = is_variadic
 
 
 buildin_type_reg_size = {

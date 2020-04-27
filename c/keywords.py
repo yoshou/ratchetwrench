@@ -4,7 +4,7 @@
 import re
 import sys
 
-keywords_list = sorted([
+keywords_list = set(sorted([
     'auto',
     'break',
     'case',
@@ -51,4 +51,4 @@ keywords_list = sorted([
     '_Noreturn',
     '_Static_assert',
     '_Thread_local',
-])
+]))

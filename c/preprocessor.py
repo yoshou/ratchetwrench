@@ -54,7 +54,7 @@ class TokenType(Enum):
 header_name_pattern = re.compile(r'((?:<[^>]+>)|(?:"[^"]+"))')
 
 whitespace = re.compile(r"[ \t\v\f]")
-newline = re.compile(r'[\r\n]+')
+newline = re.compile(r'([\r\n]+)|$')
 non_whitespace = re.compile(r'[^ \r\n\t\v\f]+')
 
 
@@ -65,7 +65,7 @@ comment = re.compile(
 
 identifier = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*")
 
-string_literal = re.compile(r'"[^"]*?"')
+string_literal = re.compile(r'"(?:\\.|[^"\\]*)*"')
 
 
 def escape_str(s):
@@ -90,7 +90,7 @@ operators_list.sort(reverse=True)
 
 operators = re.compile("(" + "|".join(operators_list) + ")")
 
-pp_number = re.compile(r'([0-9]|[.][0-9])([0-9]|([eEpP][+-])|[.])*')
+pp_number = re.compile(r'[\.]?[0-9](([eEpP][\+\-])|[0-9_a-zA-Z]|[\.])*')
 
 
 class EvalMask:
@@ -164,6 +164,10 @@ def evalute_constant_expr(expr):
             return lhs >= rhs
         elif op == ">":
             return lhs > rhs
+        elif op == "<=":
+            return lhs <= rhs
+        elif op == "<":
+            return lhs < rhs
         elif op == "==":
             return lhs == rhs
         elif op == "!=":
@@ -175,6 +179,8 @@ def evalute_constant_expr(expr):
         if expr.op == "!":
             return not value
     elif isinstance(expr, IntegerConstantExpr):
+        return expr.val
+    elif isinstance(expr, FloatingConstantExpr):
         return expr.val
 
     raise ValueError()
@@ -191,6 +197,8 @@ class Preprocessor:
         self.groups.append(DefineReplacementDirective(
             "_MSVC_LANG", ["201402"]))
         self.groups.append(DefineReplacementDirective(
+            "_STL_LANG", ["201402"]))
+        self.groups.append(DefineReplacementDirective(
             "_CRT_DECLARE_NONSTDC_NAMES", ["0"]))
         self.groups.append(DefineReplacementDirective(
             "__STDC__", ["1"]))
@@ -198,6 +206,17 @@ class Preprocessor:
             "_USE_DECLSPECS_FOR_SAL", ["1"]))
         self.groups.append(DefineReplacementDirective(
             "_USE_ATTRIBUTES_FOR_SAL", ["1"]))
+        self.groups.append(DefineReplacementDirective(
+            "_M_IX86_FP", ["0"]))
+        self.groups.append(DefineReplacementDirective(
+            "__STDC_WANT_SECURE_LIB__", ["0"]))
+        self.groups.append(DefineReplacementDirective(
+            "_M_X64", ["100"]))
+        self.groups.append(DefineReplacementDirective(
+            "__STDC_WANT_SECURE_LIB__", ["1"]))
+        self.groups.append(DefineReplacementDirective(
+            "_NO_CRT_STDIO_INLINE", ["1"]))
+
         if not eval_masks:
             self.eval_masks = [EvalMask(True)]
         else:
@@ -255,15 +274,15 @@ class Preprocessor:
             self.pos = m.end()
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.StringLiteral)
 
-        m = operators.match(self.source, self.pos)
-        if m:
-            self.pos = m.end()
-            return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Punctuator)
-
         m = pp_number.match(self.source, self.pos)
         if m:
             self.pos = m.end()
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.PPNumber)
+
+        m = operators.match(self.source, self.pos)
+        if m:
+            self.pos = m.end()
+            return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Punctuator)
 
         m = non_whitespace.match(self.source, self.pos)
         if m:
@@ -560,7 +579,7 @@ class Preprocessor:
                     return True
             elif src.startswith("pragma"):
                 self.pos += len("pragma")
-                tokens = self.skip_whitespaces()
+                self.skip_whitespaces()
                 self.process_tokens()
                 self.skip_whitespaces()
                 m = newline.match(self.source, self.pos)
@@ -574,6 +593,7 @@ class Preprocessor:
     def process_text_line(self):
         src = self.source[self.pos:]
         tokens = self.process_tokens()
+
         self.skip_whitespaces()
         m = newline.match(self.source, self.pos)
         if m:
@@ -586,23 +606,47 @@ class Preprocessor:
 
     def process_group_part(self):
         self.skip_whitespaces()
-        src = self.source[self.pos:]
+
+        save_pos = []
+
+        save_pos.append(self.pos)
+
         result = self.process_control_line()
         if result:
-            return
+            return True
+
+        self.pos = save_pos.pop()
+
+        save_pos.append(self.pos)
 
         result = self.process_if_section()
         if result:
-            return
+            return True
 
-        self.process_text_line()
+        self.pos = save_pos.pop()
+
+        if self.source[self.pos:].startswith("#"):
+            self.pos += 1
+            self.skip_whitespaces()
+
+            if self.source[self.pos].startswith("error"):
+                print("")
+
+                raise Exception("")
+
+            if self.source[self.pos].startswith("war"):
+                print("")
+
+                raise Exception("")
+
+        return self.process_text_line()
 
     def process_group(self, in_if_section=False):
         parts = []
         length = len(self.source)
         while self.pos < length:
             if in_if_section:
-                pos = self.pos
+                save_pos = self.pos
                 self.skip_whitespaces()
                 if self.source[self.pos].startswith("#"):
                     self.pos += 1
@@ -610,9 +654,9 @@ class Preprocessor:
 
                     src = self.source[self.pos:]
                     if src.startswith("endif") or src.startswith("elif") or src.startswith("else"):
-                        self.pos = pos
+                        self.pos = save_pos
                         break
-                self.pos = pos
+                self.pos = save_pos
 
             part = self.process_group_part()
             parts.append(part)
@@ -633,7 +677,7 @@ class Preprocessor:
                 break
 
         if not fullpath:
-            raise FileNotFoundError(filename)
+            fullpath = os.path.abspath(filename)
 
         with open(fullpath, "r") as f:
             source = f.read()
@@ -641,7 +685,7 @@ class Preprocessor:
         cpp = Preprocessor(
             fullpath, source, self.include_dirs, self.eval_masks)
 
-        cpp.process()
+        cpp.process(self.replacements)
         return cpp
 
     def do_replacement(self, tokens, defines):
@@ -770,12 +814,14 @@ class Preprocessor:
             TokenIndexer(tokenize(expr_str)), 0, Context())
         return evalute_constant_expr(expr)
 
-    def process(self):
+    def process(self, defines=None):
+        if not defines:
+            defines = {}
+
         self.process_group()
-
-        self.replacements = {}
-
+        self.replacements = defines
         self.processed_tokens = processed_tokens = []
+
         pos = 0
         while pos < len(self.groups):
             group = self.groups[pos]
@@ -810,12 +856,16 @@ class Preprocessor:
 
                 pos += 1
             elif isinstance(group, ElIfDirective):
-                if self.eval_masks[-2].masked and not self.eval_masks[-1].evaluated:
+                if not self.eval_masks[-1].evaluated:
                     expr_str = " ".join([str(token) for token in self.process_replacement(
                         group.expr_tokens, self.replacements)])
-                    value = self.evalute_if_cond(expr_str)
+
+                    if self.eval_masks[-2].masked:
+                        value = self.evalute_if_cond(expr_str)
+
                     self.eval_masks[-1].masked = self.eval_masks[-2].masked and value
-                    self.eval_masks[-1].evaluated = True
+                    if self.eval_masks[-1].masked:
+                        self.eval_masks[-1].evaluated = True
 
                 pos += 1
             elif isinstance(group, EndIfDirective):
@@ -848,4 +898,4 @@ class Preprocessor:
             else:
                 pos += 1
 
-        return " ".join([str(group) for group in processed_tokens if isinstance(group, Token)])
+        return [group for group in processed_tokens if isinstance(group, Token)]

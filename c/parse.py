@@ -14,7 +14,7 @@ from c.parse_utils import *
 
 
 assignment_operator = [
-    "=", "*=", "/=", "%=", "+=", "-=", "<=", ">=", "&=", "^=", "|="
+    "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="
 ]
 
 
@@ -23,47 +23,70 @@ def parse_primary_expression(tokens, pos, ctx):
 
     # identifier
     if isinstance(tokens[pos], Identifier):
-        return (pos + 1, IdentExpr(str(tokens[pos])))
+        return (pos + 1, IdentExpr(tokens[pos].value))
 
     # constant
     if isinstance(tokens[pos], FloatingConstant):
-        t = Type('float', None)
-        val = float(str(tokens[pos]))
+        token = tokens[pos]
+
+        t = Type('double', None)
+        if "f" in token.suffix or "F" in token.suffix:
+            t = Type('float', None)
+        val = float(tokens[pos].value)
         return (pos + 1, FloatingConstantExpr(val, t))
 
     if isinstance(tokens[pos], IntegerConstant):
-        val = str(tokens[pos])
+        val = tokens[pos].value
+
+        base = 10
         if val.startswith('0x'):
-            val = val[2:]
+            base = 0
 
-            if len(val) <= 8:
-                val = struct.unpack('>i', bytes.fromhex(val))[0]
-                t = Type('int', None)
-            else:
-                raise NotImplementedError()
+        def in_bit_range_signed(value, bits):
+            return -(1 << (bits-1)) <= value < (1 << (bits-1))
 
-        else:
-            val = int(val)
+        def in_bit_range_unsigned(value, bits):
+            return 0 <= value < (1 << bits)
+
+        value = int(val, 0)
+        if (value & ((1 << 32) - 1)) == value:
             t = Type('int', None)
+        elif (value & ((1 << 64) - 1)) == value:
+            t = Type('long', None)
+        else:
+            raise ValueError("The constant isn't representive.")
+
+        return (pos + 1, IntegerConstantExpr(value, t))
+
+    if isinstance(tokens[pos], CharacterConstant):
+        val = tokens[pos].value
+        val = ord(val)
+        t = Type('char', None)
         return (pos + 1, IntegerConstantExpr(val, t))
+
+    from ast.types import PointerType, PrimitiveType, ArrayType
 
     # string-literal
     if isinstance(tokens[pos], StringLiteral):
-        raise NotImplementedError()
+        val = tokens[pos].value
+        val = val.replace("\\n", "\n")
+        val = val.replace("\\r", "\r")
+        t = ArrayType(PrimitiveType("char"), len(val) + 1)
+        return (pos + 1, StringLiteralExpr(val, t))
 
     # ( expression )
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, expr) = parse_expression(tokens, pos, ctx)
         if expr:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 return (pos + 1, expr)
     pos = save_pos.pop()
 
     # generic-selection
     save_pos.append(pos)
-    if str(tokens[pos]) == "_Generic":
+    if tokens[pos].value == "_Generic":
         raise NotImplementedError()
     pos = save_pos.pop()
 
@@ -81,25 +104,26 @@ def parse_postfix_expression_tail(tokens, pos, ctx, lhs):
 
     # [ expression ]
     save_pos.append(pos)
-    if str(tokens[pos]) == "[":
+    if tokens[pos].value == "[":
         pos += 1
 
         (pos, expr) = parse_expression(tokens, pos, ctx)
         if expr:
-            if str(tokens[pos]) == "]":
+            if tokens[pos].value == "]":
                 pos += 1
-                raise NotImplementedError()
+                return (pos, ArrayIndexerOp(lhs, expr))
     pos = save_pos.pop()
 
     # ( argument-expression-list_opt )
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, arg_expr_list) = parse_argument_expression_list(tokens, pos, ctx)
 
-        if str(tokens[pos]) == ")":
+        if tokens[pos].value == ")":
             pos += 1
-            return (pos, arg_expr_list)
+            params = arg_expr_list if arg_expr_list else []
+            return (pos, FunctionCall(lhs, params))
     pos = save_pos.pop()
 
     # postfix-expression . identifier
@@ -129,21 +153,21 @@ def parse_postfix_expression_head(tokens, pos, ctx):
     # ( type-name ) { initializer-list }
     # ( type-name ) { initializer-list , }
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, typename) = parse_type_name(tokens, pos, ctx)
         if typename:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 pos += 1
-                if str(tokens[pos]) == "{":
+                if tokens[pos].value == "{":
                     pos += 1
                     (pos, init_list) = parse_initializer_list(tokens, pos, ctx)
 
-                    if str(tokens[pos]) == ",":
+                    if tokens[pos].value == ",":
                         pos += 1
 
                     if init_list:
-                        if str(tokens[pos]) == "}":
+                        if tokens[pos].value == "}":
                             pos += 1
                             raise NotImplementedError()
     pos = save_pos.pop()
@@ -174,6 +198,7 @@ def parse_postfix_expression(tokens, pos, ctx):
                 break
 
             expr = tail
+
         return (pos, expr)
 
     return (pos, None)
@@ -241,10 +266,27 @@ def parse_unary_expression(tokens, pos, ctx):
             return (pos, UnaryOp(op, expr))
     pos = save_pos.pop()
 
-    if str(tokens[pos]) == "sizeof":
-        raise NotImplementedError()
+    if tokens[pos].value == "sizeof":
+        pos += 1
 
-    if str(tokens[pos]) == "_Alignof":
+        save_pos.append(pos)
+        if tokens[pos].value == "(":
+            pos += 1
+            (pos, typename) = parse_type_name(tokens, pos, ctx)
+            if typename:
+                if tokens[pos].value == ")":
+                    pos += 1
+                    return (pos, SizeOfExpr(None, typename))
+        pos = save_pos.pop()
+
+        (pos, expr) = parse_unary_expression(tokens, pos, ctx)
+        if expr:
+            return (pos, SizeOfExpr(expr, None))
+
+        src = tokens[pos:]
+        raise Exception()
+
+    if tokens[pos].value == "_Alignof":
         raise NotImplementedError()
 
     return (pos, None)
@@ -253,23 +295,23 @@ def parse_unary_expression(tokens, pos, ctx):
 def parse_cast_expression(tokens, pos, ctx):
     save_pos = []
 
-    # unary-expression
-    (pos, unary_expr) = parse_unary_expression(tokens, pos, ctx)
-    if unary_expr:
-        return (pos, unary_expr)
-
     # ( type-name ) cast-expression
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, typename) = parse_type_name(tokens, pos, ctx)
         if typename:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 pos += 1
                 (pos, expr) = parse_cast_expression(tokens, pos, ctx)
                 if expr:
                     return (pos, CastExpr(expr, typename))
     pos = save_pos.pop()
+
+    # unary-expression
+    (pos, unary_expr) = parse_unary_expression(tokens, pos, ctx)
+    if unary_expr:
+        return (pos, unary_expr)
 
     return (pos, None)
 
@@ -313,18 +355,24 @@ def parse_conditional_expression(tokens, pos, ctx):
     (pos, cond_expr) = parse_logical_or_expression(tokens, pos, ctx)
     if cond_expr:
         save_pos.append(pos)
-        if str(tokens[pos]) == "?":
+        if tokens[pos].value == "?":
+            src = tokens[pos:]
             pos += 1
 
             (pos, true_expr) = parse_expression(tokens, pos, ctx)
             if true_expr:
-                if str(tokens[pos]) == ":":
+                if tokens[pos].value == ":":
                     pos += 1
 
                     (pos, false_expr) = parse_conditional_expression(
                         tokens, pos, ctx)
                     if false_expr:
                         return (pos, ConditionalExpr(cond_expr, true_expr, false_expr))
+
+            pos = save_pos.pop()
+
+            src = tokens[pos:]
+            raise Exception("Error: expect expression.")
         pos = save_pos.pop()
 
         return (pos, cond_expr)
@@ -358,46 +406,57 @@ def parse_assignment_expression(tokens, pos, ctx):
 def parse_expression(tokens, pos, ctx):
     # assignment-expression
     # expression , assignment-expression
-    return parse_list(tokens, pos, ctx, parse_assignment_expression)
 
+    pos, exprs = parse_list(tokens, pos, ctx, parse_assignment_expression)
+
+    if exprs:
+        if len(exprs) >= 2:
+            return (pos, CommaOp(exprs))
+
+        return (pos, exprs[0])
+
+    return (pos, None)
 
 
 def parse_direct_abstract_declarator_head(tokens, pos, ctx):
     save_pos = []
-    
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, decl) = parse_abstract_declarator(tokens, pos, ctx)
         if decl:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 pos += 1
                 return (pos, decl)
     pos = save_pos.pop()
 
     return (pos, None)
 
+
 def parse_direct_abstract_declarator_tail(tokens, pos, ctx):
     save_pos = []
-        
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "[":
+    if tokens[pos].value == "[":
         raise NotImplementedError()
     pos = save_pos.pop()
-        
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
-        (pos, param_type_list) = parse_parameter_type_list(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == ")":
+        (pos, param_type_list, is_variadic) = parse_parameter_type_list(
+            tokens, pos, ctx)
+
+        if tokens[pos].value == ")":
             pos += 1
             return (pos, param_type_list)
     pos = save_pos.pop()
 
     return (pos, None)
 
-def parse_direct_abstract_declarator(tokens, pos, ctx):
+
+def parse_direct_abstract_declarator(tokens, pos, ctx, declarator):
     save_pos = []
 
     # ( abstract-declarator )
@@ -409,6 +468,8 @@ def parse_direct_abstract_declarator(tokens, pos, ctx):
 
     save_pos.append(pos)
     (pos, decl) = parse_direct_abstract_declarator_head(tokens, pos, ctx)
+    declarator.ident_or_decl = decl
+
     if decl:
         tails = []
         while True:
@@ -417,6 +478,7 @@ def parse_direct_abstract_declarator(tokens, pos, ctx):
             if not tail:
                 break
 
+            declarator.add_chunk(tail)
             tails.append(tail)
 
         return (pos, (decl, tails))
@@ -431,18 +493,32 @@ def parse_abstract_declarator(tokens, pos, ctx):
     # pointer
     # pointer_opt direct-abstract-declarator
     save_pos.append(pos)
+
+    if tokens[pos].value == "__cdecl":
+        pos += 1
+
     (pos, pointer) = parse_pointer(tokens, pos, ctx)
 
-    (pos, direct_decl) = parse_direct_abstract_declarator(tokens, pos, ctx)
+    if tokens[pos].value == "__cdecl":
+        pos += 1
+
+    declarator = Declarator()
+
+    (pos, direct_decl) = parse_direct_abstract_declarator(
+        tokens, pos, ctx, declarator)
     if direct_decl:
-        return (pos, (pointer, direct_decl))
+        if pointer:
+            direct_decl.pointer = pointer
+        return (pos, declarator)
 
     if pointer:
-        return (pos, pointer)
+        declarator.pointer = pointer
+        return (pos, declarator)
 
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 def parse_parameter_declaration(tokens, pos, ctx):
     # declaration-specifiers declarator
@@ -451,12 +527,12 @@ def parse_parameter_declaration(tokens, pos, ctx):
     (pos, specs) = parse_declaration_specifiers(tokens, pos, ctx)
     if specs:
         (pos, decl) = parse_declarator(tokens, pos, ctx)
+
         if decl:
             return (pos, (specs, decl))
 
         (pos, decl) = parse_abstract_declarator(tokens, pos, ctx)
         return (pos, (specs, decl))
-        
 
     return (pos, None)
 
@@ -483,9 +559,19 @@ class TypeQualifier(Enum):
     Atomic = "atomic"
 
 
+type_qualifier_values = {member.value: member for name,
+                         member in TypeQualifier.__members__.items()}
+
+
+def type_qualifier_from_name(name):
+    if name in type_qualifier_values:
+        return type_qualifier_values[name]
+    raise ValueError('{} is not a valid name'.format(name))
+
+
 def parse_type_qualifier(tokens, pos, ctx):
     if str(tokens[pos]) in ["const", "restrict", "volatile", "_Atomic"]:
-        value = enum_from_name(TypeQualifier, str(tokens[pos]))
+        value = type_qualifier_from_name(str(tokens[pos]))
         return (pos + 1, value)
 
     return (pos, None)
@@ -494,23 +580,24 @@ def parse_type_qualifier(tokens, pos, ctx):
 def parse_constant_expression(tokens, pos, ctx):
     return parse_conditional_expression(tokens, pos, ctx)
 
+
 def parse_designator(tokens, pos, ctx):
     save_pos = []
 
     # [ constant-expression ]
     save_pos.append(pos)
-    if str(tokens[pos]) == "[":
+    if tokens[pos].value == "[":
         pos += 1
         (pos, expr) = parse_constant_expression(tokens, pos, ctx)
         if expr:
-            if str(tokens[pos]) == "]":
+            if tokens[pos].value == "]":
                 pos += 1
                 return (pos, expr)
     pos = save_pos.pop()
 
     # . identifier
     save_pos.append(pos)
-    if str(tokens[pos]) == ".":
+    if tokens[pos].value == ".":
         pos += 1
         (pos, ident) = parse_identifier(tokens, pos, ctx)
         if ident:
@@ -518,6 +605,7 @@ def parse_designator(tokens, pos, ctx):
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 def parse_designator_list(tokens, pos, ctx):
     # designator
@@ -534,7 +622,8 @@ def parse_designator_list(tokens, pos, ctx):
         return (pos, designators)
 
     return (pos, None)
-    
+
+
 def parse_designation(tokens, pos, ctx):
     save_pos = []
 
@@ -542,29 +631,32 @@ def parse_designation(tokens, pos, ctx):
     save_pos.append(pos)
     (pos, designator_list) = parse_designator_list(tokens, pos, ctx)
     if designator_list:
-        if str(tokens[pos]) == "=":
+        if tokens[pos].value == "=":
             pos += 1
             return (pos, designator_list)
     pos = save_pos.pop()
 
     return (pos, None)
 
+
 def parse_designation_initializer(tokens, pos, ctx):
     (pos, designation) = parse_designation(tokens, pos, ctx)
 
+    src = tokens[pos:]
     (pos, init) = parse_initializer(tokens, pos, ctx)
     if init:
-        return (pos, (designation, init))
+        return (pos, [designation, init])
 
     return (pos, None)
+
 
 def parse_initializer_list(tokens, pos, ctx):
     # designation_opt initializer
     # initializer-list , designation_opt initializer
     (pos, lst) = parse_list(tokens, pos, ctx, parse_designation_initializer)
-    if len(lst) > 0:
+    if lst:
         return (pos, InitializerList(lst))
-        
+
     return (pos, None)
 
 
@@ -579,15 +671,15 @@ def parse_initializer(tokens, pos, ctx):
     # { initializer-list }
     # { initializer-list , }
     save_pos.append(pos)
-    if str(tokens[pos]) == "{":
+    if tokens[pos].value == "{":
         pos += 1
 
         (pos, expr) = parse_initializer_list(tokens, pos, ctx)
         if expr:
-            if str(tokens[pos]) == ",":
+            if tokens[pos].value == ",":
                 pos += 1
 
-            if str(tokens[pos]) == "}":
+            if tokens[pos].value == "}":
                 pos += 1
                 return (pos, expr)
     pos = save_pos.pop()
@@ -603,27 +695,30 @@ def parse_init_declarator(tokens, pos, ctx):
     (pos, decl) = parse_declarator(tokens, pos, ctx)
     if decl:
         save_pos.append(pos)
-        if str(tokens[pos]) == "=":
+        if tokens[pos].value == "=":
             pos += 1
             (pos, init) = parse_initializer(tokens, pos, ctx)
-            if init:
-                return (pos, (decl, init))
+
+            return (pos, [decl, init])
         pos = save_pos.pop()
 
         return (pos, (decl, None))
 
     return (pos, None)
 
+
 def parse_init_declarator_list(tokens, pos, ctx):
     # init-declarator
     # init-declarator-list , init-declarator
     return parse_list(tokens, pos, ctx, parse_init_declarator)
 
+
 def parse_struct_or_union(tokens, pos, ctx):
-    if str(tokens[pos]) in ["struct", "union"]:
-        return (pos + 1, str(tokens[pos]))
+    if tokens[pos].value in ["struct", "union"]:
+        return (pos + 1, tokens[pos].value)
 
     return (pos, None)
+
 
 def parse_struct_or_union_specifier(tokens, pos, ctx):
     save_pos = []
@@ -633,22 +728,21 @@ def parse_struct_or_union_specifier(tokens, pos, ctx):
     save_pos.append(pos)
     (pos, struct_or_union) = parse_struct_or_union(tokens, pos, ctx)
     if struct_or_union:
+        is_union = struct_or_union == "union"
         (pos, ident) = parse_identifier(tokens, pos, ctx)
-        if ident:
-            ctx.typenames.append(ident)
 
         save_pos.append(pos)
-        if str(tokens[pos]) == "{":
+        if tokens[pos].value == "{":
             pos += 1
             (pos, decls) = parse_struct_declaration_list(tokens, pos, ctx)
             if decls:
-                if str(tokens[pos]) == "}":
+                if tokens[pos].value == "}":
                     pos += 1
-                    return (pos, StructSpecifier(ident, decls))
+                    return (pos, StructSpecifier(ident, decls, is_union))
         pos = save_pos.pop()
 
         if ident:
-            return (pos, StructSpecifier(ident, None))
+            return (pos, StructSpecifier(ident, None, is_union))
 
     pos = save_pos.pop()
 
@@ -680,12 +774,12 @@ def parse_struct_declaration(tokens, pos, ctx):
     (pos, spec_quals) = parse_specifier_qualifier_list(tokens, pos, ctx)
     if spec_quals:
         (pos, decls) = parse_struct_declarator_list(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == ";":
+
+        if tokens[pos].value == ";":
             pos += 1
             return (pos, StructDeclaration(spec_quals, decls))
     pos = save_pos.pop()
-    
+
     # static_assert-declaration
     (pos, decl) = parse_static_assert_declaration(tokens, pos, ctx)
     if decl:
@@ -706,9 +800,9 @@ def parse_struct_declarator(tokens, pos, ctx):
     # declarator
     # declarator_opt : constant-expression
     (pos, decl) = parse_declarator(tokens, pos, ctx)
-    
+
     save_pos.append(pos)
-    if str(tokens[pos]) == ':':
+    if tokens[pos].value == ':':
         pos += 1
         (pos, const) = parse_constant_expression(tokens, pos, ctx)
         if const:
@@ -720,11 +814,33 @@ def parse_struct_declarator(tokens, pos, ctx):
 
     return (pos, None)
 
+
 def parse_static_assert_declaration(tokens, pos, ctx):
-    if str(tokens[pos]) == "_Static_assert":
+    if tokens[pos].value == "_Static_assert":
         raise NotImplementedError()
 
     return (pos, None)
+
+
+class Declaration(Node):
+    def __init__(self, qual_spec, decls):
+        self.qual_spec = qual_spec
+        self.decls = decls
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, idx):
+        if idx > 1:
+            raise IndexError("idx")
+
+        return self.decls
+
+    def __setitem__(self, idx, value):
+        if idx > 1:
+            raise IndexError("idx")
+
+        self.decls = value
 
 
 def parse_declaration(tokens, pos, ctx):
@@ -732,13 +848,13 @@ def parse_declaration(tokens, pos, ctx):
 
     # declaration-specifiers init-declarator-list_opt ;
     save_pos.append(pos)
-    (pos, specs) = parse_declaration_specifiers(tokens, pos, ctx)
-    if specs:
-        (pos, init) = parse_init_declarator_list(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == ";":
+    (pos, qual_spec) = parse_declaration_specifiers(tokens, pos, ctx)
+    if qual_spec:
+        (pos, decls) = parse_init_declarator_list(tokens, pos, ctx)
+
+        if tokens[pos].value == ";":
             pos += 1
-            return (pos, specs)
+            return (pos, Declaration(qual_spec, decls))
     pos = save_pos.pop()
 
     # static_assert-declaration
@@ -758,13 +874,13 @@ def parse_iteration_statement(tokens, pos, ctx):
 
     # while ( expression ) statement
     save_pos.append(pos)
-    if str(tokens[pos]) == "while":
+    if tokens[pos].value == "while":
         pos += 1
-        if str(tokens[pos]) == "(":
+        if tokens[pos].value == "(":
             pos += 1
             (pos, cond) = parse_expression(tokens, pos, ctx)
             if cond:
-                if str(tokens[pos]) == ")":
+                if tokens[pos].value == ")":
                     pos += 1
                     (pos, stmt) = parse_statement(tokens, pos, ctx)
                     if stmt:
@@ -773,56 +889,56 @@ def parse_iteration_statement(tokens, pos, ctx):
 
     # do statement while ( expression ) ;
     save_pos.append(pos)
-    if str(tokens[pos]) == "do":
+    if tokens[pos].value == "do":
         pos += 1
         (pos, stmt) = parse_statement(tokens, pos, ctx)
         if stmt:
-            if str(tokens[pos]) == "while":
+            if tokens[pos].value == "while":
                 pos += 1
-                if str(tokens[pos]) == "(":
+                if tokens[pos].value == "(":
                     pos += 1
                     (pos, cond) = parse_expression(tokens, pos, ctx)
                     if cond:
-                        if str(tokens[pos]) == ")":
+                        if tokens[pos].value == ")":
                             pos += 1
-                            if str(tokens[pos]) == ";":
+                            if tokens[pos].value == ";":
                                 pos += 1
                                 return (pos, DoWhileStmt(cond, stmt))
     pos = save_pos.pop()
 
-    # for ( expression_opt ; expression_opt ; expression_opt ) statement
-    save_pos.append(pos)
-    if str(tokens[pos]) == "for":
-        pos += 1
-        if str(tokens[pos]) == "(":
-            pos += 1
-            (pos, init_expr) = parse_expression(tokens, pos, ctx)
-            if str(tokens[pos]) == ";":
-                pos += 1
-                (pos, cond_expr) = parse_expression(tokens, pos, ctx)
-                if str(tokens[pos]) == ";":
-                    pos += 1
-                    (pos, cont_expr) = parse_expression(tokens, pos, ctx)
-                    if str(tokens[pos]) == ")":
-                        pos += 1
-                        (pos, stmt) = parse_statement(tokens, pos, ctx)
-                        if stmt:
-                            return (pos, ForStmt(init_expr, cond_expr, cont_expr, stmt))
-    pos = save_pos.pop()
-
     # for ( declaration expression_opt ; expression_opt ) statement
     save_pos.append(pos)
-    if str(tokens[pos]) == "for":
+    if tokens[pos].value == "for":
         pos += 1
-        if str(tokens[pos]) == "(":
+        if tokens[pos].value == "(":
             pos += 1
             (pos, init_decl) = parse_declaration(tokens, pos, ctx)
             if init_decl:
                 (pos, cond_expr) = parse_expression(tokens, pos, ctx)
-                if str(tokens[pos]) == ";":
+                if tokens[pos].value == ";":
                     pos += 1
                     (pos, cont_expr) = parse_expression(tokens, pos, ctx)
-                    if str(tokens[pos]) == ")":
+                    if tokens[pos].value == ")":
+                        pos += 1
+                        (pos, stmt) = parse_statement(tokens, pos, ctx)
+                        if stmt:
+                            return (pos, ForStmt(init_decl, cond_expr, cont_expr, stmt))
+    pos = save_pos.pop()
+
+    # for ( expression_opt ; expression_opt ; expression_opt ) statement
+    save_pos.append(pos)
+    if tokens[pos].value == "for":
+        pos += 1
+        if tokens[pos].value == "(":
+            pos += 1
+            (pos, init_expr) = parse_expression(tokens, pos, ctx)
+            if tokens[pos].value == ";":
+                pos += 1
+                (pos, cond_expr) = parse_expression(tokens, pos, ctx)
+                if tokens[pos].value == ";":
+                    pos += 1
+                    (pos, cont_expr) = parse_expression(tokens, pos, ctx)
+                    if tokens[pos].value == ")":
                         pos += 1
                         (pos, stmt) = parse_statement(tokens, pos, ctx)
                         if stmt:
@@ -837,44 +953,45 @@ def parse_jump_statement(tokens, pos, ctx):
 
     # goto identifier ;
     save_pos.append(pos)
-    if str(tokens[pos]) == "goto":
+    if tokens[pos].value == "goto":
         pos += 1
         (pos, ident) = parse_identifier(tokens, pos, ctx)
         if ident:
-            if str(tokens[pos]) == ";":
+            if tokens[pos].value == ";":
                 pos += 1
                 raise NotImplementedError()
     pos = save_pos.pop()
 
     # continue ;
     save_pos.append(pos)
-    if str(tokens[pos]) == "continue":
+    if tokens[pos].value == "continue":
         pos += 1
-        if str(tokens[pos]) == ";":
+        if tokens[pos].value == ";":
             return (pos + 1, ContinueStmt())
     pos = save_pos.pop()
 
     # break ;
     save_pos.append(pos)
-    if str(tokens[pos]) == "break":
+    if tokens[pos].value == "break":
         pos += 1
-        if str(tokens[pos]) == ";":
+        if tokens[pos].value == ";":
             return (pos + 1, BreakStmt())
     pos = save_pos.pop()
 
     # return expression_opt ;
     save_pos.append(pos)
-    if str(tokens[pos]) == "return":
+    if tokens[pos].value == "return":
         pos += 1
 
         (pos, expr) = parse_expression(tokens, pos, ctx)
 
-        if str(tokens[pos]) == ";":
+        if tokens[pos].value == ";":
             pos += 1
             return (pos, ReturnStmt(expr))
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 def parse_selection_statement(tokens, pos, ctx):
     save_pos = []
@@ -882,40 +999,40 @@ def parse_selection_statement(tokens, pos, ctx):
     # if ( expression ) statement
     # if ( expression ) statement else statement
     save_pos.append(pos)
-    if str(tokens[pos]) == "if":
+    if tokens[pos].value == "if":
         pos += 1
-        if str(tokens[pos]) == "(":
+        if tokens[pos].value == "(":
             pos += 1
             (pos, expr) = parse_expression(tokens, pos, ctx)
             if expr:
-                if str(tokens[pos]) == ")":
+                if tokens[pos].value == ")":
                     pos += 1
                     (pos, stmt) = parse_statement(tokens, pos, ctx)
                     if stmt:
                         save_pos.append(pos)
-                        if str(tokens[pos]) == "else":
+                        if tokens[pos].value == "else":
                             pos += 1
                             (pos, else_stmt) = parse_statement(tokens, pos, ctx)
                             if else_stmt:
                                 return (pos, IfStmt(expr, stmt, else_stmt))
                         pos = save_pos.pop()
 
-                        return (pos, IfStmt(expr, stmt))
+                        return (pos, IfStmt(expr, stmt, None))
     pos = save_pos.pop()
 
     # switch ( expression ) statement
     save_pos.append(pos)
-    if str(tokens[pos]) == "switch":
+    if tokens[pos].value == "switch":
         pos += 1
-        if str(tokens[pos]) == "(":
+        if tokens[pos].value == "(":
             pos += 1
             (pos, expr) = parse_expression(tokens, pos, ctx)
             if expr:
-                if str(tokens[pos]) == ")":
+                if tokens[pos].value == ")":
                     pos += 1
                     (pos, stmt) = parse_statement(tokens, pos, ctx)
                     if stmt:
-                        return (pos, IfStmt(expr, stmt))
+                        return (pos, SwitchStmt(expr, stmt))
     pos = save_pos.pop()
 
     return (pos, None)
@@ -938,13 +1055,9 @@ def parse_expression_statement(tokens, pos, ctx):
     # expression_opt ;
     save_pos.append(pos)
     (pos, expr) = parse_expression(tokens, pos, ctx)
-    if str(tokens[pos]) == ";":
+    if tokens[pos].value == ";":
         pos += 1
         return (pos, ExprStmt(expr))
-
-    # line, column = compute_next_source_pos(tokens[pos-1].span)
-
-    # print("; is need at line: {0}, column: {1}".format(line, column))
     pos = save_pos.pop()
 
     return (pos, None)
@@ -953,25 +1066,44 @@ def parse_expression_statement(tokens, pos, ctx):
 def parse_labeled_statement(tokens, pos, ctx):
     save_pos = []
 
+    # case constant-expression : statement
+    save_pos.append(pos)
+    if tokens[pos].value == "case":
+        pos += 1
+        (pos, expr) = parse_constant_expression(tokens, pos, ctx)
+        if expr:
+            if tokens[pos].value == ":":
+                pos += 1
+                (pos, stmt) = parse_statement(tokens, pos, ctx)
+
+                if stmt:
+                    return (pos, CaseLabelStmt(expr, stmt))
+
+        raise Exception("Error: expect expression.")
+    pos = save_pos.pop()
+
+    # default : statement
+    if tokens[pos].value == "default":
+        pos += 1
+        if tokens[pos].value == ":":
+            pos += 1
+            (pos, stmt) = parse_statement(tokens, pos, ctx)
+
+            if stmt:
+                return (pos, CaseLabelStmt(None, stmt))
+
     # identifier : statement
     save_pos.append(pos)
     (pos, ident) = parse_identifier(tokens, pos, ctx)
     if ident:
-        if str(tokens[pos]) == ":":
+        if tokens[pos].value == ":":
             pos += 1
             (pos, stmt) = parse_statement(tokens, pos, ctx)
             if stmt:
                 raise NotImplementedError()
     pos = save_pos.pop()
 
-    if str(tokens[pos]) == "case":
-        raise NotImplementedError()
-
-    if str(tokens[pos]) == "default":
-        raise NotImplementedError()
-
     return (pos, None)
-
 
 
 def parse_statement(tokens, pos, ctx):
@@ -1007,12 +1139,13 @@ def parse_statement(tokens, pos, ctx):
 
     return (pos, None)
 
+
 def parse_block_item(tokens, pos, ctx):
     # declaration
     (pos, decl) = parse_declaration(tokens, pos, ctx)
     if decl:
         return (pos, decl)
-        
+
     # statement
     (pos, stmt) = parse_statement(tokens, pos, ctx)
     if stmt:
@@ -1037,22 +1170,24 @@ def parse_block_item_list(tokens, pos, ctx):
 
     return (pos, None)
 
+
 def parse_compound_statement(tokens, pos, ctx):
     save_pos = []
 
     # { block-item-list_opt }
     save_pos.append(pos)
-    if str(tokens[pos]) == "{":
+    if tokens[pos].value == "{":
         pos += 1
 
         (pos, block_items) = parse_block_item_list(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == "}":
+
+        if tokens[pos].value == "}":
             pos += 1
             return (pos, CompoundStmt(block_items))
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 class StorageClass(Enum):
     Typedef = "typedef"
@@ -1062,23 +1197,24 @@ class StorageClass(Enum):
     Auto = "auto"
     Register = "register"
 
-def enum_from_name(clz, name):
-    for member in list(clz):
-        if member.value == name:
-            return member
+
+storage_class_values = {member.value: member for name,
+                        member in StorageClass.__members__.items()}
+
+
+def storage_class_from_name(name):
+    if name in storage_class_values:
+        return storage_class_values[name]
     raise ValueError('{} is not a valid name'.format(name))
 
 
 def parse_storage_class_specifier(tokens, pos, ctx):
-    if str(tokens[pos]) in ["typedef"]:
-        value = enum_from_name(StorageClass, str(tokens[pos]))
-        return (pos + 1, value)
-
-    if str(tokens[pos]) in ["typedef", "extern", "static", "_Thread_local", "auto", "register"]:
-        value = enum_from_name(StorageClass, str(tokens[pos]))
+    if tokens[pos].value in storage_class_values:
+        value = storage_class_from_name(tokens[pos].value)
         return (pos + 1, value)
 
     return (pos, None)
+
 
 def parse_specifier_qualifier(tokens, pos, ctx):
     (pos, specifier) = parse_type_specifier(tokens, pos, ctx)
@@ -1090,6 +1226,7 @@ def parse_specifier_qualifier(tokens, pos, ctx):
         return (pos, qualifier)
 
     return (pos, None)
+
 
 def parse_specifier_qualifier_list(tokens, pos, ctx):
     # type-specifier specifier-qualifier-list_opt
@@ -1108,27 +1245,40 @@ def parse_specifier_qualifier_list(tokens, pos, ctx):
     return (pos, None)
 
 
+class TypeSpecifierPtr:
+    def __init__(self):
+        self.qual_spec = None
+        self.pointer = []
+
+
 def parse_type_name(tokens, pos, ctx):
     # specifier-qualifier-list abstract-declarator_opt
     (pos, spec_qual_list) = parse_specifier_qualifier_list(tokens, pos, ctx)
     if spec_qual_list:
         (pos, abs_decl) = parse_abstract_declarator(tokens, pos, ctx)
-        return (pos, spec_qual_list)
+
+        qual_spec_ptr = TypeSpecifierPtr()
+        qual_spec_ptr.qual_spec = spec_qual_list
+
+        if abs_decl:
+            qual_spec_ptr.pointer = abs_decl.pointer
+        return (pos, qual_spec_ptr)
 
     return (pos, None)
+
 
 def parse_atomic_type_specifier(tokens, pos, ctx):
     save_pos = []
 
     # _Atomic ( type-name )
     save_pos.append(pos)
-    if str(tokens[pos]) == "_Atomic":
+    if tokens[pos].value == "_Atomic":
         pos += 1
-        if str(tokens[pos]) == "(":
+        if tokens[pos].value == "(":
             pos += 1
             (pos, typename) = parse_type_name(tokens, pos, ctx)
             if typename:
-                if str(tokens[pos]) == ")":
+                if tokens[pos].value == ")":
                     pos += 1
 
                     raise NotImplementedError()
@@ -1136,16 +1286,24 @@ def parse_atomic_type_specifier(tokens, pos, ctx):
 
     return (pos, None)
 
+
+class TypedefName:
+    def __init__(self, ident):
+        self.ident = ident
+
+
 def parse_typedef_name(tokens, pos, ctx):
     # identifier
-    if str(tokens[pos]) in ctx.typenames:
-        return (pos + 1, str(tokens[pos]))
+    if tokens[pos].value in ctx.typedefs:
+        return (pos + 1, Ident(tokens[pos].value))
 
     return (pos, None)
+
 
 def parse_enumeration_constant(tokens, pos, ctx):
     # identifier
     return parse_identifier(tokens, pos, ctx)
+
 
 def parse_enumerator(tokens, pos, ctx):
     save_pos = []
@@ -1155,22 +1313,24 @@ def parse_enumerator(tokens, pos, ctx):
     (pos, enum_const) = parse_enumeration_constant(tokens, pos, ctx)
     if enum_const:
         save_pos.append(pos)
-        if str(tokens[pos]) == "=":
+        if tokens[pos].value == "=":
             pos += 1
             (pos, const) = parse_constant_expression(tokens, pos, ctx)
             if const:
                 return (pos, EnumConstantDecl(enum_const, const))
         pos = save_pos.pop()
-        
+
         return (pos, EnumConstantDecl(enum_const, None))
     pos = save_pos.pop()
 
     return (pos, None)
 
+
 def parse_enumerator_list(tokens, pos, ctx):
     # enumerator
     # enumerator-list , enumerator
     return parse_list(tokens, pos, ctx, parse_enumerator)
+
 
 def parse_enum_specifier(tokens, pos, ctx):
     save_pos = []
@@ -1179,20 +1339,20 @@ def parse_enum_specifier(tokens, pos, ctx):
     # enum identifieropt { enumerator-list , }
     # enum identifier
     save_pos.append(pos)
-    if str(tokens[pos]) == "enum":
+    if tokens[pos].value == "enum":
         pos += 1
         (pos, ident) = parse_identifier(tokens, pos, ctx)
 
         save_pos.append(pos)
-        if str(tokens[pos]) == "{":
+        if tokens[pos].value == "{":
             pos += 1
             (pos, enumerators) = parse_enumerator_list(tokens, pos, ctx)
-            
-            if str(tokens[pos]) == ",":
+
+            if tokens[pos].value == ",":
                 pos += 1
 
             if enumerators:
-                if str(tokens[pos]) == "}":
+                if tokens[pos].value == "}":
                     pos += 1
                     return (pos, EnumDecl(ident, enumerators))
         pos = save_pos.pop()
@@ -1203,6 +1363,7 @@ def parse_enum_specifier(tokens, pos, ctx):
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 class TypeSpecifierType(Enum):
     Void = "void"
@@ -1221,13 +1382,24 @@ class TypeSpecifierType(Enum):
     Enum = "enum"
 
 
+type_specifier_type_values = {member.value: member for name,
+                              member in TypeSpecifierType.__members__.items()}
+
+
+def type_specifier_type_from_name(name):
+    if name in type_specifier_type_values:
+        return type_specifier_type_values[name]
+    raise ValueError('{} is not a valid name'.format(name))
 
 
 def parse_type_specifier(tokens, pos, ctx):
-    if str(tokens[pos]) in [
+    if tokens[pos].value in set([
         "void", "char", "short", "int", "long", "float",
-        "double", "signed", "unsigned", "_Bool", "_Complex"]:
-        value = enum_from_name(TypeSpecifierType, str(tokens[pos]))
+            "double", "signed", "unsigned", "_Bool", "_Complex", "__int64"]):
+        typename = tokens[pos].value
+        if tokens[pos].value == "__int64":
+            typename = "long"
+        value = type_specifier_type_from_name(typename)
         pos += 1
         return (pos, value)
 
@@ -1255,19 +1427,78 @@ def parse_type_specifier(tokens, pos, ctx):
 
 
 def parse_function_specifier(tokens, pos, ctx):
-    if str(tokens[pos]) in ["inline", "_Noreturn"]:
-        return (pos + 1, str(tokens[pos]))
+    if tokens[pos].value in ["inline", "_Noreturn", "__inline"]:
+        return (pos + 1, tokens[pos].value)
 
     return (pos, None)
 
 
 def parse_alignment_specifier(tokens, pos, ctx):
-    if str(tokens[pos]) == "_Alignas":
+    if tokens[pos].value == "_Alignas":
         raise NotImplementedError()
 
     return (pos, None)
 
+
 def parse_declaration_specifier(tokens, pos, ctx):
+    if tokens[pos].value == "__declspec":
+        pos += 1
+        if tokens[pos].value == "(":
+            pos += 1
+            if tokens[pos].value in ["noreturn", "noinline", "restrict"]:
+                pos += 1
+                if tokens[pos].value == ")":
+                    pos += 1
+                    return (pos, "__declspec")
+
+            src = tokens[pos:]
+            if tokens[pos].value == "deprecated":
+                pos += 1
+                if tokens[pos].value == "(":
+                    pos += 1
+
+                    # message
+                    while isinstance(tokens[pos], StringLiteral):
+                        pos += 1
+
+                    assert(tokens[pos].value == ")")
+                    pos += 1
+
+                if tokens[pos].value == ")":
+                    pos += 1
+                    return (pos, "__declspec")
+
+            raise ValueError(f"Invalid __declspec: {str(tokens[pos])}")
+
+    if tokens[pos].value == "__pragma":
+        pos += 1
+        if tokens[pos].value == "(":
+            pos += 1
+            if tokens[pos].value == "pack":
+                pos += 1
+                if tokens[pos].value == "(":
+                    pos += 1
+
+                    # push
+                    pos += 1
+
+                    if tokens[pos].value == ",":
+                        pos += 1
+
+                        # n
+                        pos += 1
+
+                    if tokens[pos].value == ")":
+                        pos += 1
+                        if tokens[pos].value == ")":
+                            pos += 1
+                            return (pos, "__pragma")
+
+            if tokens[pos].value == "warning":
+                print("")
+
+            raise ValueError("Invalid __pragma")
+
     # storage-class-specifier declaration-specifiers_opt
     (pos, spec) = parse_storage_class_specifier(tokens, pos, ctx)
     if spec:
@@ -1295,6 +1526,7 @@ def parse_declaration_specifier(tokens, pos, ctx):
 
     return (pos, None)
 
+
 class TypeSpecifierWidth(Enum):
     Unspecified = auto()
     Short = auto()
@@ -1314,48 +1546,65 @@ class TypeSpecifierInfo:
         self.width = width
         self.ty = ty
 
+    def __eq__(self, other):
+        if not isinstance(other, TypeSpecifierInfo):
+            return False
+
+        return self.sign == other.sign and self.witdh == other.width and self.ty == other.ty
+
+
+patterns = [
+    ("void",),
+    ("char",),
+    ("signed", "char"),
+    ("unsigned", "char"),
+    ("short",), ("signed", "short"), ("short",
+                                      "int"), ("signed", "short", "int"),
+    ("unsigned", "short"), ("unsigned", "short", "int"),
+    ("int",), ("signed",), ("signed", "int"),
+    ("unsigned",), ("unsigned", "int"),
+    ("long",), ("signed", "long"), ("long", "int"), ("signed", "long", "int"),
+    ("unsigned", "long"), ("unsigned", "long", "int"),
+    # §6.7.2 Language 111
+    # ISO/IEC 9899:201x Committee Draft - April 12, 2011 N1570
+    ("long", "long"), ("signed", "long", "long"), ("long",
+                                                   "long", "int"), ("signed", "long", "long", "int"),
+    ("unsigned", "long", "long"), ("unsigned", "long", "long", "int"),
+    ("float",),
+    ("double",),
+    ("long", "double"),
+    ("_Bool",),
+    ("float", "_Complex"),
+    ("double", "_Complex"),
+    ("long", "double", "_Complex"),
+
+    ("struct",), ("enum",)
+]
+
+import collections
+
+pattern_counts = [collections.Counter(pattern) for pattern in patterns]
+
 
 def get_type_spec_type(specs):
     names = []
+
+    struct_spec = None
+    enum_spec = None
     for spec in specs:
         if isinstance(spec, TypeSpecifierType):
             names.append(spec.value)
         elif isinstance(spec, StructSpecifier):
             names.append("struct")
+            struct_spec = spec
         elif isinstance(spec, EnumDecl):
             names.append("enum")
+            enum_spec = spec
 
-    import collections
-    compare = lambda x, y: collections.Counter(x) == collections.Counter(y)
+    names_count = collections.Counter(names)
 
-    patterns = [
-        ("void",),
-        ("char",),
-        ("signed", "char"),
-        ("unsigned", "char"),
-        ("short",), ("signed", "short"), ("short", "int"), ("signed", "short", "int"),
-        ("unsigned", "short"), ("unsigned", "short", "int"),
-        ("int",), ("signed",), ("signed", "int"),
-        ("unsigned",), ("unsigned", "int"),
-        ("long",), ("signed", "long"), ("long", "int"), ("signed", "long", "int"),
-        ("unsigned", "long"), ("unsigned", "long", "int"),
-        # §6.7.2 Language 111
-        # ISO/IEC 9899:201x Committee Draft - April 12, 2011 N1570
-        ("long", "long"), ("signed", "long", "long"), ("long", "long", "int"), ("signed", "long", "long", "int"),
-        ("unsigned", "long", "long"), ("unsigned", "long", "long", "int"),
-        ("float",),
-        ("double",),
-        ("long", "double"),
-        ("_Bool",),
-        ("float", "_Complex"),
-        ("double", "_Complex"),
-        ("long", "double", "_Complex"),
-
-        ("struct",), ("enum",)
-    ]
-
-    for pattern in patterns:
-        if compare(pattern, names):
+    for pattern, pattern_count in zip(patterns, pattern_counts):
+        if pattern_count == names_count:
             spec_width = TypeSpecifierWidth.Unspecified
             if collections.Counter(pattern)["short"] >= 1:
                 spec_width = TypeSpecifierWidth.Short
@@ -1372,7 +1621,7 @@ def get_type_spec_type(specs):
 
             spec_ty = None
             for member in list(TypeSpecifierType):
-                if member.value in pattern:
+                if member.value == pattern[-1]:
                     spec_ty = member
                     break
 
@@ -1381,17 +1630,30 @@ def get_type_spec_type(specs):
             elif pattern[0] == "enum":
                 spec_ty = TypeSpecifierType.Enum
 
-            assert(spec_ty is not None)
+            assert(spec_ty)
 
-            return TypeSpecifierInfo(spec_sign, spec_width, spec_ty)
+            spec = TypeSpecifierInfo(spec_sign, spec_width, spec_ty)
+            spec.struct_spec = struct_spec
+            spec.enum_spec = enum_spec
+            return spec
 
     return None
 
 
 class TypeSpecifier:
-    def __init__(self, spec, quals):
+    def __init__(self, spec, quals, ident, decls, func_spec=None):
         self.spec = spec
         self.quals = quals
+        self.ident = ident
+        self.decls = decls
+
+        if not func_spec:
+            func_spec = []
+        self.func_spec = func_spec
+
+    @property
+    def name(self):
+        return self.spec.ty.value
 
 
 def parse_declaration_specifiers(tokens, pos, ctx):
@@ -1401,32 +1663,47 @@ def parse_declaration_specifiers(tokens, pos, ctx):
     # function-specifier declaration-specifiers_opt
     # alignment-specifier declaration-specifiers_opt
     specs = []
+
     while True:
         (pos, spec) = parse_declaration_specifier(tokens, pos, ctx)
         if not spec:
             break
-        
+
         specs.append(spec)
 
     if len(specs) > 0:
         type_quals = []
         type_specs = []
+        func_spec = []
+        ident = None
+        decls = None
+
         for spec in specs:
             if isinstance(spec, TypeSpecifierType):
                 type_specs.append(spec)
             elif isinstance(spec, StructSpecifier):
                 type_specs.append(spec)
+                if spec.ident:
+                    ident = spec.ident
+                decls = spec.decls
             elif isinstance(spec, EnumDecl):
                 type_specs.append(spec)
+            elif isinstance(spec, Ident):
+                ident = spec
+            elif spec in ["inline", "__inline"]:
+                func_spec.append("inline")
             else:
                 type_quals.append(spec)
 
         type_spec_type = get_type_spec_type(type_specs)
-        if not type_spec_type:
-            raise ValueError()
 
-        return (pos, TypeSpecifier(type_spec_type, type_quals))
-        
+        if not type_spec_type:
+            type_spec_type = ctx.typedefs[ident.val]
+            if not type_spec_type:
+                raise ValueError()
+
+        return (pos, TypeSpecifier(type_spec_type, type_quals, ident, decls, func_spec))
+
     return (pos, None)
 
 
@@ -1451,7 +1728,7 @@ def parse_pointer(tokens, pos, ctx):
 
     pointer = []
     while True:
-        if str(tokens[pos]) != "*":
+        if tokens[pos].value != "*":
             break
 
         pos += 1
@@ -1463,59 +1740,65 @@ def parse_pointer(tokens, pos, ctx):
 
     return (pos, None)
 
+
 def parse_identifier(tokens, pos, ctx):
     if isinstance(tokens[pos], Identifier):
-        return (pos + 1, tokens[pos])
+        return (pos + 1, Ident(tokens[pos].value))
 
     return (pos, None)
+
 
 def parse_parameter_list(tokens, pos, ctx):
     # parameter-declaration
     # parameter-list , parameter-declaration
     return parse_list(tokens, pos, ctx, parse_parameter_declaration)
 
+
 def parse_parameter_type_list(tokens, pos, ctx):
     save_pos = []
-        
+
     # parameter-list
     # parameter-list , ...
     (pos, param_list) = parse_parameter_list(tokens, pos, ctx)
     if param_list:
         save_pos.append(pos)
-        if str(tokens[pos]) == ",":
+        if tokens[pos].value == ",":
             pos += 1
-            if str(tokens[pos]) == "...":
+            if tokens[pos].value == "...":
                 pos += 1
-                return (pos, param_list)
+                return (pos, param_list, True)
         pos = save_pos.pop()
 
-        return (pos, param_list)
+        return (pos, param_list, False)
 
     return (pos, None)
 
 
 def parse_direct_declarator_head(tokens, pos, ctx):
     save_pos = []
-    
+
     (pos, ident) = parse_identifier(tokens, pos, ctx)
     if ident:
         return (pos, ident)
-        
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, decl) = parse_declarator(tokens, pos, ctx)
         if decl:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 pos += 1
                 return (pos, decl)
     pos = save_pos.pop()
 
     return (pos, None)
 
+
 class FunctionDeclaratorChunk:
-    def __init__(self, params):
+    def __init__(self, params, is_variadic=False):
         self.params = params
+        self.is_variadic = is_variadic
+
 
 class ArrayDeclaratorChunk:
     def __init__(self, quals, num_elems, is_static, is_star):
@@ -1524,97 +1807,118 @@ class ArrayDeclaratorChunk:
         self.is_static = is_static
         self.is_star = is_star
 
+
 def parse_direct_declarator_tail(tokens, pos, ctx):
     save_pos = []
-        
+
     # direct-declarator [ type-qualifier-list_opt assignment-expression_opt ]
     # direct-declarator [ static type-qualifier-list_opt assignment-expression ]
     # direct-declarator [ type-qualifier-list static assignment-expression ]
     # direct-declarator [ type-qualifier-list_opt * ]
     save_pos.append(pos)
-    if str(tokens[pos]) == "[":
+    if tokens[pos].value == "[":
         pos += 1
 
         save_pos.append(pos)
-        if str(tokens[pos]) == "static":
+        if tokens[pos].value == "static":
             pos += 1
 
             (pos, quals) = parse_type_qualifier_list(tokens, pos, ctx)
 
             (pos, expr) = parse_assignment_expression(tokens, pos, ctx)
             if expr:
-                if str(tokens[pos]) == "]":
+                if tokens[pos].value == "]":
                     pos += 1
                     return (pos, ArrayDeclaratorChunk(quals, expr, True, False))
         pos = save_pos.pop()
 
         (pos, quals) = parse_type_qualifier_list(tokens, pos, ctx)
-        
+
         save_pos.append(pos)
         if quals:
-            if str(tokens[pos]) == "static":
+            if tokens[pos].value == "static":
                 pos += 1
 
                 (pos, expr) = parse_assignment_expression(tokens, pos, ctx)
                 if expr:
-                    if str(tokens[pos]) == "]":
+                    if tokens[pos].value == "]":
                         pos += 1
                         return (pos, ArrayDeclaratorChunk(quals, expr, True, False))
         pos = save_pos.pop()
 
-        if str(tokens[pos]) == "*":
+        if tokens[pos].value == "*":
             pos += 1
-            if str(tokens[pos]) == "]":
+            if tokens[pos].value == "]":
                 pos += 1
                 return (pos, ArrayDeclaratorChunk(quals, None, False, True))
 
         (pos, expr) = parse_assignment_expression(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == "]":
+
+        if tokens[pos].value == "]":
             pos += 1
             return (pos, ArrayDeclaratorChunk(quals, expr, False, False))
     pos = save_pos.pop()
-        
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
-        (pos, param_type_list) = parse_parameter_type_list(tokens, pos, ctx)
+        (pos, param_type_list, is_variadic) = parse_parameter_type_list(
+            tokens, pos, ctx)
         if param_type_list:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 pos += 1
-                return (pos, FunctionDeclaratorChunk(param_type_list))
+                return (pos, FunctionDeclaratorChunk(param_type_list, is_variadic))
     pos = save_pos.pop()
-        
+
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, ident_list) = parse_identifier_list(tokens, pos, ctx)
-        
-        if str(tokens[pos]) == ")":
+
+        if tokens[pos].value == ")":
             pos += 1
             return (pos, FunctionDeclaratorChunk(ident_list))
     pos = save_pos.pop()
 
     return (pos, None)
 
+
 class Declarator:
     def __init__(self):
         self.pointer = []
-        self.ident_or_decl = None
+        self._ident_or_decl = None
         self.chunks = []
 
     def add_chunk(self, chunk):
         self.chunks.append(chunk)
 
     @property
-    def is_function_decl(self):
-        if not isinstance(self.ident_or_decl, Identifier):
-            return False
+    def ident_or_decl(self):
+        return self._ident_or_decl
 
+    @ident_or_decl.setter
+    def ident_or_decl(self, value):
+        # assert(not value or isinstance(value, Ident))
+        self._ident_or_decl = value
+
+    @property
+    def is_function_decl(self):
         if len(self.chunks) != 1 or not isinstance(self.chunks[0], FunctionDeclaratorChunk):
             return False
 
         return True
+
+    @property
+    def function_is_variadic(self):
+        assert(self.is_function_decl)
+
+        return self.chunks[0].is_variadic
+
+    @property
+    def function_params(self):
+        assert(self.is_function_decl)
+
+        return self.chunks[0].params
 
     @property
     def is_pointer_decl(self):
@@ -1623,11 +1927,15 @@ class Declarator:
 
         return True
 
+    @property
+    def is_array_decl(self):
+        if len(self.chunks) != 1 or not isinstance(self.chunks[0], ArrayDeclaratorChunk):
+            return False
+
+        return True
 
 
 def parse_direct_declarator(tokens, pos, ctx, declarator):
-    save_pos = []
-
     # identifier
     # ( declarator )
     # direct-declarator [ type-qualifier-list_opt assignment-expression_opt ]
@@ -1637,9 +1945,9 @@ def parse_direct_declarator(tokens, pos, ctx, declarator):
     # direct-declarator ( parameter-type-list )
     # direct-declarator ( identifier-list_opt )
 
-    save_pos.append(pos)
     (pos, ident) = parse_direct_declarator_head(tokens, pos, ctx)
     declarator.ident_or_decl = ident
+
     if ident:
         tails = []
         while True:
@@ -1651,7 +1959,6 @@ def parse_direct_declarator(tokens, pos, ctx, declarator):
             tails.append(tail)
 
         return (pos, declarator)
-    pos = save_pos.pop()
 
     return (pos, None)
 
@@ -1661,9 +1968,13 @@ def parse_declarator(tokens, pos, ctx):
 
     # pointer_opt direct-declarator
     save_pos.append(pos)
+
+    if tokens[pos].value == "__cdecl":
+        pos += 1
+
     (pos, pointer) = parse_pointer(tokens, pos, ctx)
 
-    if str(tokens[pos]) == "__cdecl":
+    if tokens[pos].value == "__cdecl":
         pos += 1
 
     declarator = Declarator()
@@ -1675,6 +1986,7 @@ def parse_declarator(tokens, pos, ctx):
     pos = save_pos.pop()
 
     return (pos, None)
+
 
 def parse_declaration_list(tokens, pos, ctx):
     # declaration
@@ -1692,12 +2004,29 @@ def parse_declaration_list(tokens, pos, ctx):
 
     return (pos, None)
 
-class FunctionDecl:
+
+class FunctionDecl(Node):
     def __init__(self, qual_spec, declarator, decl_list, stmt):
         self.qual_spec = qual_spec
         self.declarator = declarator
         self.decl_list = decl_list
         self.stmt = stmt
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, idx):
+        if idx > 1:
+            raise IndexError("idx")
+
+        return self.stmt
+
+    def __setitem__(self, idx, value):
+        if idx > 1:
+            raise IndexError("idx")
+
+        self.stmt = value
+
 
 def parse_function_definition(tokens, pos, ctx):
     save_pos = []
@@ -1707,7 +2036,7 @@ def parse_function_definition(tokens, pos, ctx):
     (pos, spec) = parse_declaration_specifiers(tokens, pos, ctx)
     if spec:
         (pos, declarator) = parse_declarator(tokens, pos, ctx)
-        if declarator:
+        if declarator and declarator.is_function_decl:
             (pos, decl_list) = parse_declaration_list(tokens, pos, ctx)
 
             (pos, stmt) = parse_compound_statement(tokens, pos, ctx)
@@ -1744,6 +2073,22 @@ def parse_translation_unit(tokens, pos, ctx):
         if not decl:
             break
 
+        is_typedef = StorageClass.Typedef in decl.qual_spec.quals
+        if is_typedef:
+            if not decl.decls:
+                name = decl.qual_spec.ident.val
+                declor = Declarator()
+                declor.ident_or_decl = decl.qual_spec.ident
+
+                decl.decls = [(declor, None)]
+            else:
+                ident_or_decl = decl.decls[0][0].ident_or_decl
+                while isinstance(ident_or_decl, Declarator):
+                    ident_or_decl = ident_or_decl.ident_or_decl
+                name = ident_or_decl.val
+
+                ctx.typedefs[name] = decl.qual_spec.spec
+
         decls.append(decl)
 
     if len(decls) > 0:
@@ -1755,6 +2100,7 @@ def parse_translation_unit(tokens, pos, ctx):
 class Context:
     def __init__(self):
         self.typenames = []
+        self.typedefs = {}
 
     def is_typename(self, value):
         return value in self.typenames
@@ -1762,10 +2108,18 @@ class Context:
 
 def parse(tokens):
     ctx = Context()
-    ctx.typenames.extend([
-        "__int8", "__int16", "__int32", "__int64"
-    ])
+    ctx.typedefs["__int64"] = TypeSpecifierInfo(
+        TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Long)
+    ctx.typedefs["__int32"] = TypeSpecifierInfo(
+        TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Int)
+    ctx.typedefs["__int16"] = TypeSpecifierInfo(
+        TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Short)
+    ctx.typedefs["__int8"] = TypeSpecifierInfo(
+        TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Char)
+    # ctx.typedefs["__time64_t"] = TypeSpecifierInfo(
+    #     TypeSpecifierSign.Unsigned, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Long)
     pos = 0
     (pos, node) = parse_translation_unit(tokens, pos, ctx)
+    src = tokens[pos:]
     assert(pos == len(tokens))
     return node

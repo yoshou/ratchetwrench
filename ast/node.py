@@ -35,7 +35,12 @@ def define_node(name, fields, extends_opt=None):
 
     def init_(self, *args):
         self.vals = list(args)
-        self.fields = fields
+        self.fields = list(fields)
+
+        assert(len(self.vals) == len(self.fields))
+
+    def dict_(self):
+        return {field: val for field, val in zip(fields, self.vals)}
 
     def getattr_(self, name):
         if name in fields:
@@ -85,7 +90,8 @@ Ident = define_node('Ident', ('val',))
 Type = define_node('Type', ('specifier', 'array_specifier'))
 FullType = define_node(
     'FullType', ('qualifiers', 'specifier', 'array_specifier'))
-StructSpecifier = define_node('StructSpecifier', ('ident', 'decls'))
+StructSpecifier = define_node(
+    'StructSpecifier', ('ident', 'decls', 'is_union'))
 StructDeclaration = define_node('StructDeclaration', ('type', 'declarators'))
 StructDeclarator = define_node('StructDeclarator', ('ident', 'arrspec'))
 
@@ -117,6 +123,9 @@ FloatingConstantExpr = define_node('FloatingConstantExpr', ('val', 'type'))
 CastExpr = define_node('CastExpr', ('expr', 'type'))
 ConditionalExpr = define_node(
     'ConditionalExpr', ('cond_expr', 'true_expr', 'false_expr'))
+CommaOp = define_node('CommaOp', ('exprs',))
+SizeOfExpr = define_node('SizeOfExpr', ('expr', 'type'))
+StringLiteralExpr = define_node('StringLiteralExpr', ('val', 'type'))
 
 # statements
 CompoundStmt = define_node('CompoundStmt', ('stmts',))
@@ -131,6 +140,7 @@ BreakStmt = define_node('BreakStmt', ())
 
 SwitchStmt = define_node('SwitchStmt', ('cond', 'stmts'))
 CaseLabel = define_node('CaseLabel', ('expr',))
+CaseLabelStmt = define_node('CaseLabelStmt', ('expr', 'stmt'))
 
 # for semantic analysis
 TypedBinaryOp = define_node('TypedBinaryOp', ('op', 'lhs', 'rhs', 'type'))
@@ -144,14 +154,20 @@ TypedArrayIndexerOp = define_node(
     'TypedArrayIndexerOp', ('arr', 'idx', 'type'))
 TypedFunctionCall = define_node(
     'TypedFunctionCall', ('ident', 'params', 'type'))
+TypedCommaOp = define_node('TypedCommaOp', ('exprs', 'type'))
+TypedSizeOfExpr = define_node(
+    'TypedSizeOfExpr', ('expr', 'sized_type', 'type'))
+
+TypedInitializerList = define_node('TypedInitializerList', ('exprs', 'type'))
 
 
 TypedFunctionParam = define_node('TypedFunctionParam', ('type', 'ident'))
 TypedFunctionProto = define_node(
-    'TypedFunctionProto', ('type', 'ident', 'params'))
+    'TypedFunctionProto', ('type', 'ident', 'params', 'specs'))
 TypedFunction = define_node('TypedFunction', ('proto', 'params', 'stmts'))
 
-TypedVariable = define_node('TypedVariable', ('type', 'idents'))
+TypedVariable = define_node(
+    'TypedVariable', ('type', 'idents', 'storage_class'))
 
 
 def ident_func(node, *data):
