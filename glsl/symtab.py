@@ -31,12 +31,12 @@ class SymbolScope:
         return symbol
 
     def register_composite_type(self, name, fields):
-        symbol = CompositeType(name, fields, self)
+        symbol = CompositeType(name, fields)
         self.types[name] = symbol
         return symbol
 
     def register_primitive_type(self, name):
-        symbol = PrimitiveType(name, self)
+        symbol = PrimitiveType(name)
         self.types[name] = symbol
         return symbol
 
@@ -44,7 +44,7 @@ class SymbolScope:
 class FunctionSymbol:
     def __init__(self, name, ty, params, scope):
         self.name = name
-        self.ty = FunctionType(name, ty, params, scope)
+        self.ty = FunctionType(ty, params)
 
 
 class Symbol:

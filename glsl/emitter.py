@@ -140,7 +140,7 @@ class Context:
             params_ty.extend([self.get_ir_type(ast_param_ty)
                               for (ast_param_ty, _, _) in ast_ty.params])
 
-            return FunctionType(ast_ty.name, return_ty, params_ty)
+            return FunctionType(None, return_ty, params_ty)
 
         if isinstance(ast_ty, ast.types.VectorType):
             elem_ty = self.get_ir_type(ast_ty.elem_ty)
