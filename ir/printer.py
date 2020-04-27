@@ -68,6 +68,15 @@ def get_type_name(ty):
         return ty.name
     if isinstance(ty, VoidType):
         return ty.name
+    if isinstance(ty, FunctionType):
+        param_ty_list = ", ".join(
+            [f"{get_type_name(param)}" for param in ty.params if param and not isinstance(param, VoidType)])
+        return_ty_name = get_type_name(ty.return_ty)
+
+        if ty.is_variadic:
+            param_ty_list += ", ..."
+
+        return f"{return_ty_name} ({param_ty_list})"
 
     raise ValueError("Invalid type.")
 
@@ -88,6 +97,8 @@ def double_to_hex(f):
 
 
 def get_value_name(value):
+    from ir.types import i8
+
     if value is None:
         return ""
 
@@ -105,6 +116,10 @@ def get_value_name(value):
             [f"{elem_ty_name} {get_value_name(value)}" for value in value.values])
         return f"<{lst}>"
     elif isinstance(value, ConstantArray):
+        if value.ty.elem_ty == i8:
+            elems = ["\\{:02X}".format(elem.value) for elem in value.values]
+            return f'c"{"".join(elems)}"'
+
         elem_ty_name = get_type_name(value.ty.elem_ty)
         lst = ', '.join(
             [f"{elem_ty_name} {get_value_name(value)}" for value in value.values])
@@ -147,6 +162,11 @@ def print_inst(inst, slot_id_map):
             elif value.ty == f64:
                 return double_to_hex(value.value)
             raise NotImplementedError()
+        elif isinstance(value, ConstantArray):
+            elem_ty_name = get_type_name(value.ty.elem_ty)
+            lst = ', '.join(
+                [f"{elem_ty_name} {str(value)}" for value in value.values])
+            return f"[{lst}]"
         elif isinstance(value, ConstantVector):
             elem_ty_name = get_type_name(value.ty.elem_ty)
             lst = ', '.join(
@@ -158,6 +178,7 @@ def print_inst(inst, slot_id_map):
             # if value.has_name:
             #     return f"{value.value_name}"
             # else:
+            t = type(value)
             return slot_id_map[value]
 
     if isinstance(inst, ReturnInst):
@@ -196,6 +217,12 @@ def print_inst(inst, slot_id_map):
         inbounds = "inbounds " if inst.inbounds else ""
         return f"{get_value_name(inst)} = getelementptr {inbounds}{get_type_name(inst.pointee_ty.elem_ty)}, {get_value_type(inst.rs)} {get_value_name(inst.rs)}, {idx_list}"
 
+    if isinstance(inst, ExtractValueInst):
+        idx_list = ", ".join(
+            [f"{idx}" for idx in inst.idx])
+
+        return f"{get_value_name(inst)} = extractvalue {get_value_type(inst.value)} {get_value_name(inst.value)}, {idx_list}"
+
     if isinstance(inst, BitCastInst):
         return f"{get_value_name(inst)} = bitcast {get_value_type(inst.rs)} {get_value_name(inst.rs)} to {get_value_type(inst)}"
 
@@ -212,11 +239,14 @@ def print_inst(inst, slot_id_map):
         arg_list = ", ".join(
             [f"{get_value_type(arg)} {get_value_name(arg)}" for arg in inst.args])
         return_ty_name = get_value_type(inst)
+        func_ty_name = get_type_name(inst.callee.func_ty)
+
+        ty_or_fnty = func_ty_name if inst.callee.is_variadic else return_ty_name
 
         if isinstance(inst.ty, VoidType):
-            return f"call {return_ty_name} {get_value_name(inst.callee)}({arg_list})"
+            return f"call {ty_or_fnty} {get_value_name(inst.callee)}({arg_list})"
         else:
-            return f"{get_value_name(inst)} = call {return_ty_name} {get_value_name(inst.callee)}({arg_list})"
+            return f"{get_value_name(inst)} = call {ty_or_fnty} {get_value_name(inst.callee)}({arg_list})"
 
     if isinstance(inst, AllocaInst):
         size_part = ""
@@ -224,14 +254,14 @@ def print_inst(inst, slot_id_map):
             size_part = f", {get_value_type(inst.count)} {get_value_name(inst.count)}"
         return f"{get_value_name(inst)} = alloca {get_type_name(inst.alloca_ty)}{size_part}, align {inst.align}"
 
-    if isinstance(inst, BitCastInst):
-        return f"{get_value_name(inst)} = bitcast {get_value_type(inst.rs)} {get_value_name(inst.rs)} to {get_value_type(inst)}"
+    if isinstance(inst, CastInst):
+        return f"{get_value_name(inst)} = {inst.op} {get_value_type(inst.rs)} {get_value_name(inst.rs)} to {get_value_type(inst)}"
 
     if isinstance(inst, InsertElementInst):
         return f"{get_value_name(inst)} = insertelement {get_value_type(inst.vec)} {get_value_name(inst.vec)}, {get_value_type(inst.elem)} {get_value_name(inst.elem)}, {get_value_type(inst.idx)} {get_value_name(inst.idx)}"
 
     if isinstance(inst, ExtractElementInst):
-        return f"{get_value_name(inst)} = insertelement {get_value_type(inst)} {get_value_name(inst.vec)}, {get_value_type(inst.idx)} {get_value_name(inst.idx)}"
+        return f"{get_value_name(inst)} = extractelement {get_value_type(inst)} {get_value_name(inst.vec)}, {get_value_type(inst.idx)} {get_value_name(inst.idx)}"
 
     if isinstance(inst, PHINode):
         values = [
@@ -263,12 +293,23 @@ def print_function(func, indent=0):
 
     arg_list = ", ".join(
         [get_arg_string(arg) for arg in func.args])
+    if func.is_variadic:
+        arg_list = arg_list + ",..."
+
+    if func.comdat:
+        if func.comdat.name == func.name:
+            comdat = "comdat"
+        else:
+            comdat = f"comdat(${func.comdat.name})"
+    else:
+        comdat = ""
+
     if func.is_declaration:
         lines.append(
             f"declare {get_type_name(func.return_ty)} {func.value_name}({arg_list});")
     else:
         lines.append(
-            f"define {get_type_name(func.return_ty)} {func.value_name}({arg_list}) {{")
+            f"define {get_type_name(func.return_ty)} {func.value_name}({arg_list}) {comdat} {{")
         lines.extend([print_block(block, slot_id_map) +
                       "\n" for block in func.blocks])
         lines.append("}")
@@ -295,8 +336,29 @@ def get_thread_local(value):
     return ""
 
 
+def get_linkage(value):
+    from ir.values import GlobalLinkage
+
+    if value.linkage == GlobalLinkage.External:
+        return "external"
+    elif value.linkage == GlobalLinkage.Internal:
+        return "internal"
+
+    return ""
+
+
+def get_comdat_kind(value):
+    if value.kind == ComdatKind.Any:
+        return "any"
+
+    return ""
+
+
 def print_module(module):
     lines = []
+    for comdat_name, comdat in module.comdats.items():
+        lines.append(f"${comdat_name} = comdat {get_comdat_kind(comdat)}")
+
     for struct_name, struct_ty in module.structs.items():
         field_ty_list = ", ".join(
             [get_type_name(ty) for ty in struct_ty.fields])
@@ -312,8 +374,16 @@ def print_module(module):
         if thread_local != "":
             decorations += thread_local + " "
 
+        linkage = get_linkage(global_var)
+        if global_var.linkage == GlobalLinkage.External:
+            init = ""
+
+        obj = "global"
+        if global_var.is_constant:
+            obj = "constant"
+
         lines.append(
-            f"@{global_var.name} = {decorations} global {get_type_name(global_var.ty.elem_ty)} {init}, align 4")
+            f"@{global_var.name} = {linkage} {decorations} {obj} {get_type_name(global_var.ty.elem_ty)} {init}, align 4")
 
     lines.extend([print_function(func) for func in module.funcs])
 

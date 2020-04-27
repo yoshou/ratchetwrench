@@ -112,6 +112,8 @@ class DataLayout:
 
     def get_type_alloc_size(self, ty):
         size, align = self.get_type_size_in_bits(ty)
+        align = max(1, align)
+
         return int(int((size + align - 1) / align) * align / 8)
 
     def get_elem_offset_in_bits(self, ty, idx):

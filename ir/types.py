@@ -158,11 +158,20 @@ class VectorType(SequentialType):
 
 
 class FunctionType(Type):
-    def __init__(self, name, return_ty, params):
+    def __init__(self, name, return_ty, params, is_variadic=False):
         super().__init__()
-        self.name = name
         self.return_ty = return_ty
         self.params = params
+        self.is_variadic = is_variadic
+
+        param_ty_list = ", ".join(
+            [f"{param_ty.name}" for param_ty in params if param_ty])
+        return_ty_name = return_ty.name
+
+        if is_variadic:
+            param_ty_list += ", ..."
+
+        self.name = f"{return_ty_name} ({param_ty_list})"
 
 
 # Instances

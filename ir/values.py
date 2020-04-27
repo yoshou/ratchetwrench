@@ -27,28 +27,52 @@ def encode_intrinsic_func_name(name, tys):
 def get_return_ty(name):
     if name == "llvm.memcpy":
         return VoidType()
+    if name == "llvm.va_start":
+        return VoidType()
+    if name == "llvm.va_end":
+        return VoidType()
 
     raise Exception("Unreachable")
 
 
 class Module:
     def __init__(self):
-        self.funcs = []
+        self._funcs = {}
         self.global_variables = []
         self.structs = {}
         self.declares = {}
         self.data_layout = DataLayout()
+        self.comdats = {}
+        self._objs = {}
+
+    @property
+    def funcs(self):
+        return tuple(self._funcs.values())
 
     def add_func(self, func):
-        self.funcs.append(func)
-        return func
+        if func.name not in self._funcs or not func.is_declaration:
+            self._funcs[func.name] = func
+        return self._funcs[func.name]
 
     def add_global_variable(self, variable):
         self.global_variables.append(variable)
         return variable
 
+    @property
+    def objs(self):
+        return tuple(self._objs.values())
+
+    def add_obj(self, name, obj):
+        self._objs[name] = obj
+        return obj
+
     def add_struct_type(self, name, ty):
         self.structs[name] = ty
+
+    def add_comdat(self, name, kind):
+        comdat = Comdat(name, kind)
+        self.comdats[name] = comdat
+        return comdat
 
     def contains_struct_type(self, name):
         return name in self.structs
@@ -56,6 +80,8 @@ class Module:
     def get_or_declare_intrinsic_func(self, name, arg_tys):
         if name == "llvm.memcpy":
             enc_name = encode_intrinsic_func_name(name, arg_tys[:3])
+        elif name in ["llvm.va_start", "llvm.va_end"]:
+            enc_name = encode_intrinsic_func_name(name, [])
         else:
             raise ValueError("The intrinsic function name is not supported.")
 
@@ -68,8 +94,9 @@ class Module:
             for arg_ty in arg_tys:
                 func.add_arg(Argument(arg_ty))
 
-            self.funcs.append(func)
+            self._funcs[func.name] = func
             self.declares[enc_name] = func
+
             return func
 
 
@@ -148,6 +175,8 @@ class GlobalLinkage(Enum):
     Local = auto()
     Global = auto()
     Weak = auto()
+    External = auto()
+    Internal = auto()
 
 
 class GlobalVisibility(Enum):
@@ -179,9 +208,17 @@ class GlobalValue(Constant):
         return self.thread_local != ThreadLocalMode.NotThreadLocal
 
 
-class GlobalVariable(GlobalValue):
-    def __init__(self, ty, linkage, name, thread_local=ThreadLocalMode.NotThreadLocal, initializer=None):
+class GlobalObject(GlobalValue):
+    def __init__(self, ty, linkage, name, thread_local=ThreadLocalMode.NotThreadLocal):
         super().__init__(ty, linkage, name, thread_local)
+        self.comdat = None
+
+
+class GlobalVariable(GlobalObject):
+    def __init__(self, ty, is_constant, linkage, name, thread_local=ThreadLocalMode.NotThreadLocal, initializer=None):
+        assert(isinstance(linkage, GlobalLinkage))
+        super().__init__(ty, linkage, name, thread_local)
+        self.is_constant = is_constant
         self.initializer = initializer
 
 
@@ -197,6 +234,7 @@ class Attribute:
 
 class Argument(Value):
     def __init__(self, ty, name=""):
+        assert(ty)
         super().__init__(ty, name)
 
         self.attrs = []
@@ -338,13 +376,22 @@ class ConstantPointerNull(Constant):
         return hash((self.ty,))
 
 
-class Function(GlobalValue):
+class Function(GlobalObject):
     def __init__(self, module, ty, name):
+        assert(isinstance(ty, FunctionType))
         super().__init__(ty, GlobalLinkage.Global, name)
         self.module = module
         self.return_ty = ty.return_ty
         self.bbs = []
         self.args = []
+
+    @property
+    def func_ty(self):
+        return self.ty.elem_ty
+
+    @property
+    def is_variadic(self):
+        return self.ty.elem_ty.is_variadic
 
     @property
     def is_declaration(self):
@@ -398,6 +445,8 @@ class BasicBlock(Value):
         return [inst for inst in self.insts if isinstance(inst, PHINode)]
 
     def add_inst(self, inst, inst_before):
+        assert(isinstance(inst, Instruction))
+
         if inst_before:
             idx = self.insts.index(inst_before)
             self.insts.insert(idx + 1, inst)
@@ -552,6 +601,8 @@ class CmpInst(Instruction):
 class FCmpInst(Instruction):
     def __init__(self, block, op, rs, rt):
         assert(rs.ty == rt.ty)
+        assert(rs.ty.name.startswith("f"))
+        assert(rt.ty.name.startswith("f"))
         super().__init__(block, PrimitiveType("i1"), [rs, rt], 2)
         self.op = op
 
@@ -630,11 +681,11 @@ def check_inbounds(ty, idx_list):
 
 class GetElementPtrInst(Instruction):
     def __init__(self, block, rs, ty, *idx):
-        assert(isinstance(rs.ty, PointerType))
+        assert(isinstance(rs.ty, (ArrayType, PointerType)))
         elem_type = get_indexed_type(rs.ty, list(idx))
 
         super().__init__(block, PointerType(
-            elem_type, rs.ty.addr_space), [rs, *idx], 1 + len(idx))
+            elem_type, 0), [rs, *idx], 1 + len(idx))
         self.pointee_ty = ty
         self.inbounds = check_inbounds(ty, list(idx))
 
@@ -662,7 +713,8 @@ class GetElementPtrInst(Instruction):
 
 
 class AllocaInst(UnaryInst):
-    def __init__(self, block, count, ty, addr_space, align=4, name=""):
+    def __init__(self, block, count, ty, addr_space, align=8, name=""):
+        assert(not isinstance(ty, VoidType))
         super().__init__(block, PointerType(ty, addr_space), count, name)
         self.alloca_ty = ty
         self.align = align
@@ -743,8 +795,8 @@ class CastInst(UnaryInst):
 
 
 class TruncInst(CastInst):
-    def __init__(self, block, op, rs, ty):
-        super().__init__(block, "truct", rs, ty)
+    def __init__(self, block, rs, ty):
+        super().__init__(block, "trunc", rs, ty)
 
     @property
     def is_terminator(self):
@@ -752,7 +804,7 @@ class TruncInst(CastInst):
 
 
 class ZExtInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "zext", rs, ty)
 
     @property
@@ -761,7 +813,7 @@ class ZExtInst(CastInst):
 
 
 class SExtInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "sext", rs, ty)
 
     @property
@@ -770,8 +822,8 @@ class SExtInst(CastInst):
 
 
 class FPTruncInst(CastInst):
-    def __init__(self, block, op, rs, ty):
-        super().__init__(block, "fptruct", rs, ty)
+    def __init__(self, block, rs, ty):
+        super().__init__(block, "fptrunc", rs, ty)
 
     @property
     def is_terminator(self):
@@ -779,7 +831,7 @@ class FPTruncInst(CastInst):
 
 
 class FPExtInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "fpext", rs, ty)
 
     @property
@@ -788,7 +840,7 @@ class FPExtInst(CastInst):
 
 
 class FPToUIInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "fptoui", rs, ty)
 
     @property
@@ -797,7 +849,7 @@ class FPToUIInst(CastInst):
 
 
 class UIToFPInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "uitofp", rs, ty)
 
     @property
@@ -806,7 +858,7 @@ class UIToFPInst(CastInst):
 
 
 class FPToSIInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "fptosi", rs, ty)
 
     @property
@@ -815,7 +867,7 @@ class FPToSIInst(CastInst):
 
 
 class SIToFPInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "sitofp", rs, ty)
 
     @property
@@ -824,7 +876,7 @@ class SIToFPInst(CastInst):
 
 
 class PtrToIntInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "ptrtoint", rs, ty)
 
     @property
@@ -833,7 +885,7 @@ class PtrToIntInst(CastInst):
 
 
 class IntToPtrInst(CastInst):
-    def __init__(self, block, op, rs, ty):
+    def __init__(self, block, rs, ty):
         super().__init__(block, "inttoptr", rs, ty)
 
     @property
@@ -954,6 +1006,7 @@ class SwitchInst(Instruction):
 
 class BranchInst(Instruction):
     def __init__(self, block, cond, then_target, else_target):
+        assert(cond.ty.name == "i1")
         super().__init__(block, VoidType(), [
             cond, then_target, else_target], 3)
 
@@ -1046,6 +1099,44 @@ class ExtractElementInst(Instruction):
     @property
     def is_terminator(self):
         return False
+
+
+class ExtractValueInst(Instruction):
+    def __init__(self, block, value, *idx):
+        assert(isinstance(value.ty, ArrayType))
+        elem_ty = get_indexed_type(value.ty, list(idx))
+        super().__init__(block, elem_ty, [value], 1)
+
+    @property
+    def value(self):
+        return self.get_operand(0)
+
+    @property
+    def idx(self):
+        return self.operands[1:]
+
+    @property
+    def is_terminator(self):
+        return False
+
+
+class ComdatKind(Enum):
+    # The linker may choose any COMDAT.
+    Any = auto()
+    # The data referenced by the COMDAT must be the same.
+    ExactMatch = auto()
+    # The linker will choose the largest COMDAT.
+    Largest = auto()
+    # No other Module may specify this COMDAT.
+    NoDuplicates = auto()
+    # The data referenced by the COMDAT must be the same size.
+    SameSize = auto()
+
+
+class Comdat:
+    def __init__(self, name, kind):
+        self.name = name
+        self.kind = kind
 
 
 # scheduling
