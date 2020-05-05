@@ -335,6 +335,19 @@ bitconvert_ = NodePatternMatcherGen(VirtualDagOps.BITCAST)
 scalar_to_vector_ = NodePatternMatcherGen(VirtualDagOps.SCALAR_TO_VECTOR)
 build_vector_ = NodePatternMatcherGen(VirtualDagOps.BUILD_VECTOR)
 
+fp_to_sint_ = NodePatternMatcherGen(VirtualDagOps.FP_TO_SINT)
+fp_to_uint_ = NodePatternMatcherGen(VirtualDagOps.FP_TO_UINT)
+uint_to_fp_ = NodePatternMatcherGen(VirtualDagOps.UINT_TO_FP)
+sint_to_fp_ = NodePatternMatcherGen(VirtualDagOps.SINT_TO_FP)
+
+fp_extend_ = NodePatternMatcherGen(VirtualDagOps.FP_EXTEND)
+fp_round_ = NodePatternMatcherGen(VirtualDagOps.FP_ROUND)
+
+sext_ = NodePatternMatcherGen(VirtualDagOps.SIGN_EXTEND)
+zext_ = NodePatternMatcherGen(VirtualDagOps.ZERO_EXTEND)
+anyext_ = NodePatternMatcherGen(VirtualDagOps.ANY_EXTEND)
+trunc_ = NodePatternMatcherGen(VirtualDagOps.TRUNCATE)
+
 
 class NodeValuePatternMatcher(PatternMatcher):
     def __init__(self, name):

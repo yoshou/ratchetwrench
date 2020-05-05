@@ -43,6 +43,18 @@ class ValueType(Enum):
     V512I32 = "v512i32"
     V1024I32 = "v1024i32"
 
+    V1I64 = "v1I64"
+    V2I64 = "v2I64"
+    V4I64 = "v4I64"
+    V8I64 = "v8I64"
+    V16I64 = "v16I64"
+    V32I64 = "v32I64"
+    V64I64 = "v64I64"
+    V128I64 = "v128I64"
+    V256I64 = "v256I64"
+    V512I64 = "v512I64"
+    V1024I64 = "v1024I64"
+
     V1F32 = "v1f32"
     V2F32 = "v2f32"
     V4F32 = "v4f32"
@@ -124,6 +136,9 @@ class MachineValueType:
             return MachineValueType(ValueType.F32)
 
         raise ValueError("This is not a vector type.")
+
+    def get_vector_elem_size_in_bits(self):
+        return self.get_vector_elem_type().get_size_in_bits()
 
     def get_ir_type(self):
         if self.value_type == ValueType.I1:

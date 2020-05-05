@@ -12,6 +12,7 @@ class AllocaInfo:
         for use in inst.uses:
             if isinstance(use, StoreInst):
                 self.defining_blocks.append(use.block)
+                self.only_store = use
             elif isinstance(use, LoadInst):
                 self.using_blocks.append(use.block)
 
@@ -41,25 +42,24 @@ class Mem2Reg(FunctionPass):
         print("removed store", self.removed_store_count)
 
     def rewrite_single_store_alloca(self, inst: AllocaInst, info):
-        store_inst = None
-
-        for use in inst.uses:
-            if isinstance(use, StoreInst):
-                store_inst = use
-                break
+        store_inst = info.only_store
 
         assert(store_inst)
 
+        def replace_all_uses_with(used, value):
+            for use in used.uses:
+                for i, operand in enumerate(use.operands):
+                    if operand is used:
+                        assert(use.operands[i].ty == value.ty)
+                        use.set_operand(i, value)
+
         for use in inst.uses:
-            if isinstance(use, StoreInst):
+            if use == store_inst:
                 continue
 
-            assert(isinstance(use, (LoadInst, BitCastInst)))
+            assert(isinstance(use, (LoadInst,)))
 
-            for load_use in use.uses:
-                for i, operand in enumerate(load_use.operands):
-                    if operand is use:
-                        load_use.set_operand(i, store_inst.rs)
+            replace_all_uses_with(use, store_inst.rs)
 
         for use in inst.uses:
             if isinstance(use, LoadInst):
@@ -71,13 +71,15 @@ class Mem2Reg(FunctionPass):
         inst.remove()
 
     def promote_mem_to_reg(self, alloca_insts):
-        for inst in alloca_insts:
-            if len(inst.uses) == 0:
-                inst.remove()
-                continue
+        for i, inst in enumerate(alloca_insts):
+            assert(self.is_promotable(inst))
 
             info = AllocaInfo()
             info.analyze(inst)
+
+            if len(inst.uses) == 0:
+                inst.remove()
+                continue
 
             if len(info.defining_blocks) == 1:
                 self.rewrite_single_store_alloca(inst, info)
@@ -86,13 +88,20 @@ class Mem2Reg(FunctionPass):
     def is_promotable(self, inst):
         for use in inst.uses:
             if isinstance(use, LoadInst):
-                pass
+                if use.rs != inst:
+                    return False
+
+                for load_use in use.uses:
+                    if isinstance(load_use, PHINode):
+                        return False
             elif isinstance(use, StoreInst):
-                pass
+                if use.rd != inst:
+                    return False
             elif isinstance(use, BitCastInst):
-                pass
                 return False
+                pass
             elif isinstance(use, GetElementPtrInst):
+                return False
                 if not use.has_all_zero_indices:
                     return False
             else:

@@ -36,6 +36,9 @@ class InstructionSelection(MachineFunctionPass):
 
     def need_export_for_successors(self, inst: Instruction):
         for user in inst.uses:
+            if isinstance(user, PHINode):
+                continue
+
             if user.block != inst.block:
                 return True
 
@@ -46,6 +49,8 @@ class InstructionSelection(MachineFunctionPass):
         self.mbbs = []
         self.mbb_map = {}
         self.dag_builders = {}
+        self.func_info = FunctionLoweringInfo(
+            self.mfunc.func_info.func, self.mfunc.target_info.get_calling_conv())
 
         if len(self.func.bbs) == 0:
             return
@@ -57,7 +62,7 @@ class InstructionSelection(MachineFunctionPass):
             self.mbb_map[bb] = mbb
 
             dag_builder = DagBuilder(
-                self.mfunc, self.mbb_map, self.data_layout)
+                self.mfunc, self.mbb_map, self.data_layout, self.func_info)
 
             self.dag_builders[bb] = dag_builder
 
@@ -71,6 +76,10 @@ class InstructionSelection(MachineFunctionPass):
                 if isinstance(inst, AllocaInst) and inst.is_static_alloca():
                     if len(inst.uses) == 0:
                         continue
+
+                    if inst in self.func_info.frame_map:
+                        continue
+
                     self.create_frame_idx(inst, False)
 
                 elif self.need_export_for_successors(inst):
@@ -78,9 +87,6 @@ class InstructionSelection(MachineFunctionPass):
 
                     value_types = compute_value_types(
                         inst.ty, self.data_layout)
-
-                    if len(value_types) > 1:
-                        raise NotImplementedError()
 
                     reg_info = self.reg_info
 
@@ -95,7 +101,8 @@ class InstructionSelection(MachineFunctionPass):
                             regs.append(
                                 self.mfunc.reg_info.create_virtual_register(vreg))
 
-                    self.func_info.reg_value_map[inst] = regs
+                    if inst not in self.func_info.reg_value_map:
+                        self.func_info.reg_value_map[inst] = regs
 
         for bb in self.func.bbs:
             dag_builder = self.dag_builders[bb]
@@ -112,13 +119,14 @@ class InstructionSelection(MachineFunctionPass):
     def compute_alloca_size(self, value):
         size, align = self.data_layout.get_type_size_in_bits(value.alloca_ty)
 
+        size = int(int((size + align - 1) / align) * align)
+
         return int(size / 8), int(align / 8)
 
     def create_frame_idx(self, value, is_fixed, offset=0):
-        if value in self.func_info.frame_map:
-            return
-
         size, align = self.compute_alloca_size(value)
+
+        align = max(align, value.align)
 
         if is_fixed:
             frame_idx = self.mfunc.frame.create_fixed_stack_object(
@@ -409,7 +417,7 @@ class InstructionSelection(MachineFunctionPass):
 
             mbb.append_inst(minst)
 
-        scheduler = ListScheduler()
+        scheduler = TopologicalSortScheduler()
 
         for bb in self.func.bbs:
             dag = self.dags[bb]
@@ -422,5 +430,6 @@ class InstructionSelection(MachineFunctionPass):
             # print_sunit_dag("sunit-" + str(id(mbb)), sched_dag,
             #                 "./data/dag", self.func.name)
 
+            nodes = list(scheduler.schedule(sched_dag))
             for node in scheduler.schedule(sched_dag):
                 emitter.emit(node, dag)

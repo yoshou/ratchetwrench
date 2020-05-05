@@ -9,6 +9,22 @@ from codegen.spec import *
 from codegen.mir_emitter import compute_value_types
 
 
+class FunctionLoweringInfo:
+    def __init__(self, func, calling_conv):
+        self.func = func
+        self.calling_conv = calling_conv
+
+        self.can_lower_return = calling_conv.can_lower_return(func)
+        self.frame_map = {}
+        self.reg_value_map = {}
+
+    def get_frame_idx(self, ir_value):
+        if ir_value in self.frame_map:
+            return self.frame_map[ir_value]
+
+        return None
+
+
 def align_offset(offset, align):
     return int(int((offset + align - 1) / align) * align)
 
@@ -67,8 +83,17 @@ def get_copy_to_parts(value, parts, part_vt, chain, dag):
     if len(parts) > 1:
         raise NotImplementedError()
 
+    part = parts[0]
+    if part.ty != value.ty:
+        if part.ty.get_size_in_bits() > value.ty.get_size_in_bits():
+            value = DagValue(dag.add_node(
+                VirtualDagOps.ZERO_EXTEND, [part.ty], value), 0)
+        else:
+            value = DagValue(dag.add_node(
+                VirtualDagOps.TRUNCATE, [part.ty], value), 0)
+
     chain = DagValue(
-        dag.add_copy_to_reg_node(parts[0], value), 0)
+        dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER)], chain, parts[0], value), 0)
     return chain
 
 
@@ -108,9 +133,8 @@ def get_parts_to_copy(value, num_parts, part_vt, dag):
 
 
 class DagBuilder:
-    def __init__(self, mfunc, mbb_map, data_layout: DataLayout):
+    def __init__(self, mfunc, mbb_map, data_layout: DataLayout, func_info):
         self.data_layout = data_layout
-        self.func_info = mfunc.func_info
         self.inst_map = {}
         self.mbb_map = mbb_map
         self.g = Dag(mfunc)
@@ -118,6 +142,7 @@ class DagBuilder:
         self.mfunc = mfunc
         self.target_lowering = mfunc.target_info.get_lowering()
         self.reg_info = mfunc.target_info.get_register_info()
+        self.func_info = func_info
 
     def set_inst_value(self, inst, value):
         assert(isinstance(value, DagValue))
@@ -205,22 +230,24 @@ class DagBuilder:
             vregs = self.func_info.reg_value_map[ir_value]
 
             vts = compute_value_types(ir_value.ty, self.data_layout)
-            if len(vts) > 1:
-                raise NotImplementedError()
 
             values = []
 
-            for val_idx, vt in enumerate(vts):
+            vreg_idx = 0
+            for vt in vts:
                 regs = []
 
                 reg_vt = self.target_lowering.get_register_type(vt)
                 reg_count = self.target_lowering.get_register_count(vt)
 
-                for reg_idx in range(reg_count):
-                    vreg = vregs[len(regs)]
+                for _ in range(reg_count):
+                    vreg = vregs[vreg_idx]
                     reg = DagValue(self.g.add_register_node(reg_vt, vreg), 0)
-                    regs.append(
-                        DagValue(self.g.add_copy_from_reg_node(reg.ty, reg), 0))
+                    reg = DagValue(
+                        self.g.add_copy_from_reg_node(reg.ty, reg), 0)
+                    regs.append(reg)
+
+                    vreg_idx += 1
 
                 values.append(get_copy_from_parts(
                     regs, reg_vt, vt, self.g))
@@ -245,29 +272,6 @@ class DagBuilder:
             return self.get_or_create_frame_idx(ir_value)
 
         raise NotImplementedError()
-
-        value_types = compute_value_types(ir_value.ty, self.data_layout)
-
-        if len(value_types) > 1:
-            raise NotImplementedError()
-
-        regs = []
-        for ty in value_types:
-            vreg = self.target_lowering.get_machine_vreg(ty)
-            regs.append(vreg)
-
-        if ir_value in self.func_info.reg_value_map:
-            reg = self.func_info.reg_value_map[ir_value]
-        else:
-            reg = self.func_info.reg_value_map[ir_value] = MachineVirtualRegister(
-                regs[0], len(self.func_info.reg_value_map))
-
-        node = RegisterDagNode(value_types, reg)
-
-        node = self.g.add_copy_from_reg_node(DagValue(node, 0))
-        self.inst_map[ir_value] = DagValue(node, 0)
-
-        return self.inst_map[ir_value]
 
     def get_basic_block(self, ir_bb: BasicBlock):
         mbb = self.mbb_map[ir_bb]
@@ -386,9 +390,9 @@ class DagBuilder:
     def visit_get_element_ptr(self, inst: GetElementPtrInst):
         ptr = self.get_value(inst.rs)
         ptr_ty = self.target_lowering.get_pointer_type(
-            self.data_layout, inst.pointee_ty.addr_space)
+            self.data_layout, inst.ty.addr_space)
 
-        ty = inst.pointee_ty
+        ty = inst.rs.ty
         for idx in inst.idx:
             if isinstance(idx, ConstantInt):
                 offset, field_size = self.data_layout.get_elem_offset_in_bits(
@@ -404,13 +408,43 @@ class DagBuilder:
                 elif isinstance(ty, ArrayType):
                     ty = ty.elem_ty
                 else:
-                    raise ValueError("The type isn't composite type.")
+                    raise ValueError("Can't compute the offset.")
 
             else:
-                raise NotImplementedError
+                offset = -1
+                if isinstance(ty, (ArrayType, PointerType)):
+                    elem_size = self.data_layout.get_type_alloc_size(
+                        ty.elem_ty)
+                    elem_size_value = self.get_value(
+                        ConstantInt(elem_size, ptr_ty.get_ir_type()))
+
+                    idx_value = self.get_value(idx)
+
+                    if idx_value.ty != ptr_ty:
+                        if ptr_ty.get_size_in_bits() > idx_value.ty.get_size_in_bits():
+                            idx_value = DagValue(self.g.add_node(
+                                VirtualDagOps.ZERO_EXTEND, [ptr_ty], idx_value), 0)
+                        else:
+                            idx_value = DagValue(self.g.add_node(
+                                VirtualDagOps.TRUNCATE, [ptr_ty], idx_value), 0)
+
+                    offset_value = DagValue(self.g.add_node(
+                        VirtualDagOps.MUL, [ptr_ty], elem_size_value, idx_value), 0)
+
+                    ty = ty.elem_ty
+                else:
+                    raise ValueError("Can't compute the offset.")
 
             if offset == 0:
                 continue
+
+            if offset_value.ty != ptr.ty:
+                if ptr.ty.get_size_in_bits() > offset_value.ty.get_size_in_bits():
+                    offset_value = DagValue(self.g.add_node(
+                        VirtualDagOps.ZERO_EXTEND, [ptr_ty], offset_value), 0)
+                else:
+                    offset_value = DagValue(self.g.add_node(
+                        VirtualDagOps.TRUNCATE, [ptr_ty], offset_value), 0)
 
             ptr = DagValue(self.g.add_node(
                 VirtualDagOps.ADD, [ptr_ty], ptr, offset_value), 0)
@@ -504,6 +538,8 @@ class DagBuilder:
         TABLE = {
             "eq": CondCode.SETEQ,
             "ne": CondCode.SETNE,
+            "oeq": CondCode.SETEQ,
+            "one": CondCode.SETNE,
             "ogt": CondCode.SETOGT,
             "oge": CondCode.SETOGE,
             "olt": CondCode.SETOLT,
@@ -530,7 +566,7 @@ class DagBuilder:
 
         self.set_inst_value(inst, DagValue(node, 0))
 
-    def visit_fcmp(self, inst: CmpInst):
+    def visit_fcmp(self, inst: FCmpInst):
         rs_value = self.get_value(inst.rs)
         rt_value = self.get_value(inst.rt)
 
@@ -540,6 +576,111 @@ class DagBuilder:
             MachineValueType(ValueType.I1)], rs_value, rt_value, cond)
 
         self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_trunc(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.TRUNCATE, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_zext(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.ZERO_EXTEND, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_sext(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.SIGN_EXTEND, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_fptrunc(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.FP_ROUND, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_fpext(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.FP_EXTEND, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_fptoui(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.FP_TO_UINT, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_fptosi(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.FP_TO_SINT, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_uitofp(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.UINT_TO_FP, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_sitofp(self, inst: TruncInst):
+        rs_value = self.get_value(inst.rs)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        node = self.g.add_node(
+            VirtualDagOps.SINT_TO_FP, to_ty, rs_value)
+
+        self.set_inst_value(inst, DagValue(node, 0))
+
+    def visit_ptrtoint(self, inst: TruncInst):
+        from_ty = compute_value_types(inst.rs.ty, self.data_layout)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        assert(from_ty[0] == 1)
+        assert(to_ty[0] == 1)
+
+        if from_ty[0].get_size_in_bits() <= to_ty[0].get_size_in_bits():
+            self.visit_zext(inst)
+        else:
+            self.visit_trunc(inst)
+
+    def visit_inttoptr(self, inst: TruncInst):
+        from_ty = compute_value_types(inst.rs.ty, self.data_layout)
+        to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        assert(from_ty[0] == 1)
+        assert(to_ty[0] == 1)
+
+        if from_ty[0].get_size_in_bits() <= to_ty[0].get_size_in_bits():
+            self.visit_zext(inst)
+        else:
+            self.visit_trunc(inst)
 
     def visit_bit_cast(self, inst: BitCastInst):
         rs_value = self.get_value(inst.rs)
@@ -559,22 +700,21 @@ class DagBuilder:
 
         self.set_inst_value(inst, DagValue(node, 0))
 
+    def visit_address_space_cast(self, inst: BitCastInst):
+        raise NotImplementedError()
+
     def visit_branch(self, inst: BranchInst):
         cond_value = self.get_value(inst.cond)
 
-        minus1 = self.get_or_create_constant(ConstantInt(-1, inst.cond.ty))
-        not_cond_value = DagValue(self.g.add_node(
-            VirtualDagOps.XOR, [MachineValueType(ValueType.I1)], cond_value, minus1), 0)
+        value = DagValue(self.g.add_node(VirtualDagOps.BRCOND, [MachineValueType(ValueType.OTHER)], self.control_root, cond_value,
+                                         self.get_basic_block(inst.then_target)), 0)
 
-        value = self.g.add_node(VirtualDagOps.BRCOND, [MachineValueType(ValueType.OTHER)], self.control_root, cond_value,
-                                self.get_basic_block(inst.then_target))
+        self.root = value
 
-        self.root = DagValue(value, 0)
+        value = DagValue(self.g.add_node(
+            VirtualDagOps.BR, [MachineValueType(ValueType.OTHER)], self.control_root, self.get_basic_block(inst.else_target)), 0)
 
-        value = self.g.add_node(
-            VirtualDagOps.BR, [MachineValueType(ValueType.OTHER)], self.control_root, self.get_basic_block(inst.else_target))
-
-        self.root = DagValue(value, 0)
+        self.root = value
 
         mbb = self.mbb_map[inst.block]
         true_mbb = self.mbb_map[inst.then_target]
@@ -582,6 +722,26 @@ class DagBuilder:
 
         mbb.add_successor(true_mbb)
         mbb.add_successor(false_mbb)
+
+    def visit_switch(self, inst: SwitchInst):
+        value = self.get_value(inst.value)
+
+        for cast_val, cast_target in inst.cases:
+            cond = self.get_cond_code(CondCode.SETEQ)
+            cond_value = DagValue(self.g.add_node(VirtualDagOps.SETCC, [
+                MachineValueType(ValueType.I1)], value, self.get_value(cast_val), cond), 0)
+
+            self.root = DagValue(self.g.add_node(VirtualDagOps.BRCOND, [MachineValueType(ValueType.OTHER)], self.control_root, cond_value,
+                                                 self.get_basic_block(cast_target)), 0)
+
+        self.root = DagValue(self.g.add_node(
+            VirtualDagOps.BR, [MachineValueType(ValueType.OTHER)], self.control_root, self.get_basic_block(inst.default)), 0)
+
+        mbb = self.mbb_map[inst.block]
+
+        for case_target in inst.case_dests:
+            mbb.add_successor(self.mbb_map[case_target])
+        mbb.add_successor(self.mbb_map[inst.default])
 
     def visit_jump(self, inst: JumpInst):
         value = self.g.add_node(VirtualDagOps.BR, [MachineValueType(ValueType.OTHER)], self.control_root,
@@ -630,45 +790,59 @@ class DagBuilder:
             self.set_inst_value(inst, value)
 
     def visit_return(self, inst: ReturnInst):
-        # if self.func_info.can_lower_return:
         value = self.mfunc.target_info.get_calling_conv().lower_return(self, inst, self.g)
-        # else:
-        #     raise NotImplementedError()
 
         self.root = DagValue(value, 0)
 
     def create_regs(self, ty):
         vts = compute_value_types(ty, self.data_layout)
 
-        if len(vts) > 1:
-            raise NotImplementedError()
-
         regs = []
         for ty in vts:
             vreg = self.target_lowering.get_machine_vreg(ty)
             regs.append(vreg)
 
-        return regs[0]
+        return regs
 
     def handle_phi_node_in_succs(self, inst):
+        def get_incomming_value_for_bb(phi: PHINode, bb):
+            return phi.values[bb]
+
         block = inst.block
         for succ in inst.successors:
             for phi in succ.phis:
-
-                phi_value = phi.values[block]
+                incomming_value = get_incomming_value_for_bb(phi, inst.block)
+                phi_value = self.get_value(incomming_value)
 
                 if phi in self.func_info.reg_value_map:
-                    vreg = self.func_info.reg_value_map[phi]
+                    vregs = self.func_info.reg_value_map[phi]
                 else:
-                    vreg = [self.mfunc.reg_info.create_virtual_register(self.create_regs(phi.ty))]
+                    vregs = [self.mfunc.reg_info.create_virtual_register(
+                        reg) for reg in self.create_regs(phi.ty)]
 
-                    self.func_info.reg_value_map[phi] = vreg
+                    self.func_info.reg_value_map[phi] = vregs
 
                 vts = compute_value_types(phi.ty, self.data_layout)
-                src = self.get_value(phi_value)
-                dst = DagValue(self.g.add_register_node(vts[0], vreg[0]), 0)
 
-                node = self.g.add_copy_to_reg_node(dst, src)
+                reg_info = self.mfunc.reg_info
+
+                vreg_idx = 0
+                for val_idx, vt in enumerate(vts):
+                    regs = []
+
+                    reg_vt = self.target_lowering.get_register_type(vt)
+                    reg_count = self.target_lowering.get_register_count(vt)
+
+                    for reg_idx in range(reg_count):
+                        vreg = vregs[vreg_idx]
+                        reg = DagValue(
+                            self.g.add_register_node(reg_vt, vreg), 0)
+                        regs.append(reg)
+
+                        vreg_idx += 1
+
+                    self.g.root = get_copy_to_parts(phi_value.get_value(val_idx),
+                                                    regs, reg_vt, self.g.root, self.g)
 
     def visit(self, inst):
         if inst.is_terminator:
@@ -690,8 +864,32 @@ class DagBuilder:
             self.visit_insert_element(inst)
         elif isinstance(inst, ExtractElementInst):
             self.visit_extract_element(inst)
+        elif isinstance(inst, TruncInst):
+            self.visit_trunc(inst)
+        elif isinstance(inst, ZExtInst):
+            self.visit_zext(inst)
+        elif isinstance(inst, SExtInst):
+            self.visit_sext(inst)
+        elif isinstance(inst, FPTruncInst):
+            self.visit_fptrunc(inst)
+        elif isinstance(inst, FPExtInst):
+            self.visit_fpext(inst)
+        elif isinstance(inst, FPToUIInst):
+            self.visit_fptoui(inst)
+        elif isinstance(inst, UIToFPInst):
+            self.visit_uitofp(inst)
+        elif isinstance(inst, FPToSIInst):
+            self.visit_fptosi(inst)
+        elif isinstance(inst, SIToFPInst):
+            self.visit_sitofp(inst)
+        elif isinstance(inst, PtrToIntInst):
+            self.visit_ptrtoint(inst)
+        elif isinstance(inst, IntToPtrInst):
+            self.visit_inttoptr(inst)
         elif isinstance(inst, BitCastInst):
             self.visit_bit_cast(inst)
+        elif isinstance(inst, AddrSpaceCastInst):
+            self.visit_address_space_cast(inst)
         elif isinstance(inst, CmpInst):
             self.visit_cmp(inst)
         elif isinstance(inst, FCmpInst):
@@ -700,6 +898,8 @@ class DagBuilder:
             self.visit_jump(inst)
         elif isinstance(inst, BranchInst):
             self.visit_branch(inst)
+        elif isinstance(inst, SwitchInst):
+            self.visit_switch(inst)
         elif isinstance(inst, CallInst):
             self.visit_call(inst)
         elif isinstance(inst, ReturnInst):
@@ -713,21 +913,22 @@ class DagBuilder:
         # Export virtual registers acrossing basic blocks.
         if inst in self.func_info.reg_value_map:
             value_types = compute_value_types(inst.ty, self.data_layout)
-            if len(value_types) > 1:
-                raise NotImplementedError()
 
             vregs = self.func_info.reg_value_map[inst]
 
+            reg_idx = 0
             for idx, vt in enumerate(value_types):
                 regs = []
 
                 reg_vt = self.target_lowering.get_register_type(vt)
                 reg_count = self.target_lowering.get_register_count(vt)
 
-                for reg_idx in range(reg_count):
-                    vreg = vregs[len(regs)]
+                for _ in range(reg_count):
+                    vreg = vregs[reg_idx]
                     regs.append(
                         DagValue(self.g.add_register_node(reg_vt, vreg), 0))
+
+                    reg_idx += 1
 
                 src = self.get_value(inst).get_value(idx)
 

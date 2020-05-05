@@ -90,8 +90,16 @@ class VirtualDagOps(Enum):
     FSHR = VirtualDagOp("fshr")
 
     BITCAST = VirtualDagOp("bitcast")
+    TRUNCATE = VirtualDagOp("truncate")
     SIGN_EXTEND = VirtualDagOp("sign_extend")
     ZERO_EXTEND = VirtualDagOp("zero_extend")
+    ANY_EXTEND = VirtualDagOp("any_extend")
+    FP_ROUND = VirtualDagOp("fp_round")
+    FP_EXTEND = VirtualDagOp("fp_extend")
+    FP_TO_UINT = VirtualDagOp("fp_to_uint")
+    FP_TO_SINT = VirtualDagOp("fp_to_sint")
+    UINT_TO_FP = VirtualDagOp("uint_to_fp")
+    SINT_TO_FP = VirtualDagOp("sint_to_fp")
 
     LOAD = VirtualDagOp("load")
     STORE = VirtualDagOp("store")
@@ -129,6 +137,7 @@ class DagNode:
 
         self._freeze()
         self._compute_hash()
+        self.mem_operand = None
 
     def _freeze(self):
         self._vts = tuple(self._vts)

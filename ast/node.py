@@ -72,6 +72,9 @@ def define_node(name, fields, extends_opt=None):
     def hash_(self):
         return hash(tuple(flatten(self.vals)))
 
+    def bool_(self):
+        return True
+
     return type(name, extends,
                 {
                     "__getattr__": getattr_,
@@ -83,6 +86,7 @@ def define_node(name, fields, extends_opt=None):
                     "__repr__": str_,
                     "__eq__": eq_,
                     "__hash__": hash_,
+                    "__bool__": bool_,
                 })
 
 
@@ -141,6 +145,7 @@ BreakStmt = define_node('BreakStmt', ())
 SwitchStmt = define_node('SwitchStmt', ('cond', 'stmts'))
 CaseLabel = define_node('CaseLabel', ('expr',))
 CaseLabelStmt = define_node('CaseLabelStmt', ('expr', 'stmt'))
+AsmStmt = define_node('AsmStmt', ('template', "operands"))
 
 # for semantic analysis
 TypedBinaryOp = define_node('TypedBinaryOp', ('op', 'lhs', 'rhs', 'type'))

@@ -342,6 +342,58 @@ class COFFObjectFileInfo(MCObjectFileInfo):
 
         raise ValueError("Not supporting")
 
+    def select_section_for_global(self, section_kind: SectionKind, value, ctx):
+        def get_coff_section_name_for_unique_global(section_kind):
+            if section_kind == SectionKind.Text:
+                return ".text"
+
+            raise ValueError()
+
+        if value.has_comdat:
+            selection = self.get_section_for_global(section_kind, value)
+            name = get_coff_section_name_for_unique_global(section_kind)
+
+            if section_kind == SectionKind.Text:
+                characteristics = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_CNT_CODE
+
+            characteristics |= IMAGE_SCN_LNK_COMDAT
+
+            symbol = ctx.get_or_create_symbol(value.name)
+            comdat_sym_name = symbol.name
+
+            comdat_section = MCSectionCOFF(name, characteristics, comdat_sym=ctx.get_or_create_symbol(
+                comdat_sym_name), selection=selection)
+            return comdat_section
+
+        if section_kind == SectionKind.Text:
+            return self.text_section
+
+        raise NotImplementedError()
+
+    def get_section_for_global(self, section_kind: SectionKind, value):
+        comdat = value.comdat
+
+        from ir.values import ComdatKind
+
+        if comdat:
+            comdat_key = value.module.get_named_value(comdat.name)
+
+            if comdat_key == value:
+                if comdat.kind == ComdatKind.Any:
+                    return IMAGE_COMDAT_SELECT_ANY
+                elif comdat.kind == ComdatKind.ExactMatch:
+                    return IMAGE_COMDAT_SELECT_EXACT_MATCH
+                elif comdat.kind == ComdatKind.Largest:
+                    return IMAGE_COMDAT_SELECT_LARGEST
+                elif comdat.kind == ComdatKind.NoDuplicates:
+                    return IMAGE_COMDAT_SELECT_NODUPLICATES
+                elif comdat.kind == ComdatKind.SameSize:
+                    return IMAGE_COMDAT_SELECT_SAME_SIZE
+            else:
+                return IMAGE_COMDAT_SELECT_ASSOCIATIVE
+
+        return 0
+
     def get_section_for_const(self, section_kind: SectionKind, value, align):
         characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_LNK_COMDAT
 

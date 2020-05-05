@@ -16,6 +16,7 @@ class TargetDagOps(Enum):
     INSERT_SUBREG = TargetDagOp("INSERT_SUBREG")
     COPY = TargetDagOp("COPY")
     COPY_TO_REGCLASS = TargetDagOp("COPY_TO_REGCLASS")
+    SUBREG_TO_REG = TargetDagOp("SUBREG_TO_REG")
 
 
 class MachineConstantPoolValue:
@@ -91,6 +92,8 @@ class MachineFrame:
             self.max_alignment = align
 
     def create_stack_object(self, size, align):
+        assert(size > 0)
+        assert(align > 0)
         idx = len(self.stack_object) - self.fixed_count
 
         self.stack_object.append(StackObject(size, align))
@@ -287,23 +290,13 @@ class MachineRegisterInfo:
 
 class FunctionInfo:
     def __init__(self, func, calling_conv):
-
         self.func = func
-        self.can_lower_return = calling_conv.can_lower_return(func)
-        self.frame_map = {}
-        self.reg_value_map = {}
         self.pic_label_id = 0
 
     def create_pic_label_id(self):
         label_id = self.pic_label_id
         self.pic_label_id += 1
         return label_id
-
-    def get_frame_idx(self, ir_value):
-        if ir_value in self.frame_map:
-            return self.frame_map[ir_value]
-
-        return None
 
 
 class MachineFunction:
@@ -373,6 +366,16 @@ class MachineFunction:
         if isinstance(inst.opcode, TargetDagOps):
             if inst.opcode == TargetDagOps.COPY:
                 f.write('copy')
+            elif inst.opcode == TargetDagOps.COPY_TO_REGCLASS:
+                f.write('copy_to_subreg')
+            elif inst.opcode == TargetDagOps.EXTRACT_SUBREG:
+                f.write('extract_subreg')
+            elif inst.opcode == TargetDagOps.INSERT_SUBREG:
+                f.write('insert_subreg')
+            elif inst.opcode == TargetDagOps.SUBREG_TO_REG:
+                f.write('subreg_to_reg')
+            else:
+                raise NotImplementedError()
         else:
             f.write('{}'.format(inst.opcode.mnemonic))
 
@@ -574,15 +577,15 @@ class RegState(IntFlag):
 
 
 class MOReg(MachineOperand):
-    def __init__(self, reg, flags):
+    def __init__(self, reg, flags, subreg=None):
         super().__init__()
         assert(reg is not None)
         assert(isinstance(reg, (MachineRegister, MachineVirtualRegister)))
         self._reg = reg
         self.flags = flags
+        self.subreg = subreg
         self.prev = None
         self.next = None
-        self.subreg = None
 
     @property
     def reg(self):
@@ -682,13 +685,20 @@ class MOReg(MachineOperand):
 
         if self.is_def and not self.is_implicit:
             slot_id_map[self.reg] = len(slot_id_map)
+
         if isinstance(self.reg, MachineRegister):
             f.write('${}'.format(self.reg.spec.name))
-            if self.subreg:
+            if self.subreg is not None:
                 subreg = subregs[self.subreg]
                 f.write(f'.{subreg.name}')
         else:
             f.write('%{}'.format(self.reg.vid))
+            if self.subreg is not None:
+                subreg = subregs[self.subreg]
+                f.write(f'.{subreg.name}')
+
+        if self.is_def and isinstance(self.reg, MachineVirtualRegister):
+            f.write(f':{self.reg.regclass.name}')
 
 
 class MOImm(MachineOperand):

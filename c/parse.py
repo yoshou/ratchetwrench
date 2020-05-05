@@ -445,7 +445,7 @@ def parse_direct_abstract_declarator_tail(tokens, pos, ctx):
     save_pos.append(pos)
     if tokens[pos].value == "(":
         pos += 1
-        (pos, param_type_list, is_variadic) = parse_parameter_type_list(
+        (pos, (param_type_list, is_variadic)) = parse_parameter_type_list(
             tokens, pos, ctx)
 
         if tokens[pos].value == ")":
@@ -1106,6 +1106,75 @@ def parse_labeled_statement(tokens, pos, ctx):
     return (pos, None)
 
 
+def parse_asm_output_operand(tokens, pos, ctx):
+    assert(isinstance(tokens[pos], StringLiteral))
+    constraint = tokens[pos]
+    pos += 1
+
+    if tokens[pos].value == "(":
+        pos += 1
+
+        assert(isinstance(tokens[pos], Identifier))
+        cvariablename = tokens[pos]
+        pos += 1
+
+        assert(tokens[pos].value == ")")
+        pos += 1
+
+        return (pos, (constraint, cvariablename))
+
+    return (pos, (constraint, None))
+
+
+def parse_asm_statement(tokens, pos, ctx):
+    save_pos = []
+
+    # asm ( character-string-literal );
+
+    # asm asm-qualifiers ( AssemblerTemplate
+    #              : OutputOperands
+    #              [ : InputOperands
+    #              [ : Clobbers ] ])
+
+    save_pos.append(pos)
+    if tokens[pos].value == "asm":
+        pos += 1
+
+        if tokens[pos].value == "volatile":
+            pos += 1
+
+        if tokens[pos].value == "(":
+            pos += 1
+
+            if isinstance(tokens[pos], StringLiteral):
+                asm_template = tokens[pos].value
+                pos += 1
+
+                operands_list = []
+
+                for _ in range(3):
+                    if tokens[pos].value == ":":
+                        pos += 1
+
+                        (pos, operands) = parse_list(
+                            tokens, pos, ctx, parse_asm_output_operand)
+
+                        operands_list.append(operands)
+                    else:
+                        break
+
+                if tokens[pos].value == ")":
+                    pos += 1
+                    if tokens[pos].value == ";":
+                        pos += 1
+                        return (pos, AsmStmt(asm_template, operands_list))
+
+        raise Exception("Error: expect expression.")
+    pos = save_pos.pop()
+
+    return (pos, None)
+
+
 def parse_statement(tokens, pos, ctx):
     # labeled-statement
     (pos, stmt) = parse_labeled_statement(tokens, pos, ctx)
@@ -1134,6 +1203,12 @@ def parse_statement(tokens, pos, ctx):
 
     # jump-statement
     (pos, stmt) = parse_jump_statement(tokens, pos, ctx)
+    if stmt:
+        return (pos, stmt)
+
+    # NOTE: This is not standard of C.
+    # asm-statement
+    (pos, stmt) = parse_asm_statement(tokens, pos, ctx)
     if stmt:
         return (pos, stmt)
 
@@ -1766,12 +1841,12 @@ def parse_parameter_type_list(tokens, pos, ctx):
             pos += 1
             if tokens[pos].value == "...":
                 pos += 1
-                return (pos, param_list, True)
+                return (pos, (param_list, True))
         pos = save_pos.pop()
 
-        return (pos, param_list, False)
+        return (pos, (param_list, False))
 
-    return (pos, None)
+    return (pos, (None, None))
 
 
 def parse_direct_declarator_head(tokens, pos, ctx):
@@ -1862,7 +1937,7 @@ def parse_direct_declarator_tail(tokens, pos, ctx):
     save_pos.append(pos)
     if tokens[pos].value == "(":
         pos += 1
-        (pos, param_type_list, is_variadic) = parse_parameter_type_list(
+        (pos, (param_type_list, is_variadic)) = parse_parameter_type_list(
             tokens, pos, ctx)
         if param_type_list:
             if tokens[pos].value == ")":

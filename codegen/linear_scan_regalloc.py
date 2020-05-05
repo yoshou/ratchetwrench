@@ -142,13 +142,25 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
             if not phys_reg:
                 continue
 
-            if phys_reg.spec in live_range.reg.regclass.regs:
-                spill_reg = active_reg
-                break
+            for reg in live_range.reg.regclass.regs:
+                for super_reg in iter_super_regs(reg):
+                    if phys_reg.spec == super_reg:
+                        spill_reg = active_reg
+                        break
+
+                if spill_reg:
+                    break
 
         assert(spill_reg)
 
-        self.set_phys_reg(live_range, self.get_phys_reg(spill_reg))
+        phys_reg = self.get_phys_reg(spill_reg)
+
+        for subreg, _ in iter_sub_regs(phys_reg.spec):
+            if subreg in live_range.reg.regclass.regs:
+                phys_reg = MachineRegister(subreg)
+                break
+
+        self.set_phys_reg(live_range, phys_reg)
 
         regclass = spill_reg.reg.regclass
         align = int(regclass.align / 8)

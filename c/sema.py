@@ -160,6 +160,9 @@ def get_decl_name_and_type(ty, decl, sym_table):
             assert(not decl.is_array_decl)
             decl_params = decl.function_params
 
+            if not decl_params:
+                decl_params = []
+
             params = []
             for param_ty, param_decl in decl_params:
                 param_quals = param_ty.quals
@@ -231,8 +234,6 @@ def register_variable(node, sym_table):
 
 
 def enter_node(node, depth, sym_table: SymbolTable):
-    from ast.types import ArrayType
-
     if isinstance(node, Function):
         proto = register_function_proto(node.proto, sym_table)
 
@@ -254,13 +255,14 @@ def enter_node(node, depth, sym_table: SymbolTable):
 
         node = TypedFunction(proto, params, node.stmts)
 
-    from ast.types import PointerType
-
     if isinstance(node, Declaration):
         if node.decls:
             for decl, init in node.decls:
                 if decl.is_function_decl:
                     decl_params = decl.function_params
+
+                    if not decl_params:
+                        decl_params = []
 
                     params = []
                     for param_ty, param_decl in decl_params:
@@ -443,32 +445,48 @@ integer_types = [
 ]
 
 
-integer_vec_types = [
-    # TODO: Not implemented.
-]
-
-
 def is_binary_arith_op(op):
     return op in ['+', '-', '*', '/']
 
 
-def compute_binary_arith_op_type(op, lhs_type, rhs_type, sym_table):
-    from ast.types import PrimitiveType, VectorType
+def promote_default_type(ty):
+    from ast.types import PrimitiveType
 
-    # Arithematic operators
+    if ty.name in ["_Bool", "char", "unsigned char", "short", "unsigned short"]:
+        return PrimitiveType("int")
+
+    return ty
+
+
+def promote_by_rank(lhs_ty, rhs_ty):
     able_conv_lhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == lhs_type.name] + [lhs_type.name]
+                     from_type in implicit_convertable if from_type == lhs_ty.name] + [lhs_ty.name]
 
-    if rhs_type.name in able_conv_lhs:
-        return rhs_type
+    if rhs_ty.name in able_conv_lhs:
+        return rhs_ty, rhs_ty
 
     able_conv_rhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == rhs_type.name] + [rhs_type.name]
+                     from_type in implicit_convertable if from_type == rhs_ty.name] + [rhs_ty.name]
 
-    if lhs_type.name in able_conv_rhs:
-        return lhs_type
+    if lhs_ty.name in able_conv_rhs:
+        return lhs_ty, lhs_ty
 
-    raise Exception("Unsupporting operation.")
+    raise Exception("Unsupporting cast.")
+
+
+def compute_binary_arith_op_type(op, lhs, rhs, sym_table):
+    lhs_type = lhs.type
+    rhs_type = rhs.type
+
+    lhs_type = promote_default_type(lhs_type)
+    rhs_type = promote_default_type(rhs_type)
+
+    if lhs_type == rhs_type:
+        return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
+
+    lhs_type, rhs_type = promote_by_rank(lhs_type, rhs_type)
+
+    return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
 
 def is_bitwise_op(op):
@@ -476,8 +494,6 @@ def is_bitwise_op(op):
 
 
 def compute_binary_bitwise_op_type(op, lhs_type, rhs_type, sym_table):
-    from ast.types import PrimitiveType, VectorType
-
     # Bitwise operators
     able_conv_lhs = [to_type for to_type,
                      from_type in implicit_convertable if from_type == lhs_type.name] + [lhs_type.name]
@@ -498,29 +514,27 @@ def is_compare_op(op):
     return op in ['==', '!=', '<', '>', '<=', '>=']
 
 
-def compute_binary_compare_op_type(op, lhs, rhs, sym_table):
-    from ast.types import PrimitiveType, VectorType
+def cast_if_need(node, ty):
+    if node.type != ty.name:
+        return CastExpr(node, ty)
 
+    return node
+
+
+def compute_binary_compare_op_type(op, lhs, rhs, sym_table):
     lhs_type = lhs.type
     rhs_type = rhs.type
 
-    result_ty = sym_table.find_type('_Bool')
+    lhs_type = promote_default_type(lhs_type)
+    rhs_type = promote_default_type(rhs_type)
+
+    result_ty = sym_table.find_type('int')
     if lhs_type == rhs_type:
-        return result_ty, lhs, rhs
+        return result_ty, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
-    able_conv_lhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == lhs_type.name] + [lhs_type.name]
+    lhs_type, rhs_type = promote_by_rank(lhs_type, rhs_type)
 
-    if rhs_type.name in able_conv_lhs:
-        return result_ty, CastExpr(lhs, rhs.type), rhs
-
-    able_conv_rhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == rhs_type.name] + [rhs_type.name]
-
-    if lhs_type.name in able_conv_rhs:
-        return result_ty, lhs, CastExpr(rhs, lhs.type)
-
-    raise Exception("Unsupporting operation.")
+    return result_ty, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
 
 def is_shift_op(op):
@@ -528,12 +542,7 @@ def is_shift_op(op):
 
 
 def compute_binary_shift_op_type(op, lhs_type, rhs_type, sym_table):
-    from ast.types import PrimitiveType, VectorType
-
     if lhs_type.name in integer_types and rhs_type.name in integer_types:
-        return lhs_type
-
-    if lhs_type.name in integer_vec_types and rhs_type.name in integer_vec_types:
         return lhs_type
 
     raise Exception("Unsupporting operation.")
@@ -544,10 +553,8 @@ def is_logical_op(op):
 
 
 def compute_binary_logical_op_type(op, lhs_type, rhs_type, sym_table):
-    from ast.types import PrimitiveType, VectorType
-
     # Logical operators
-    if lhs_type.name == '_Bool' and rhs_type.name == '_Bool':
+    if lhs_type.name == 'int' and rhs_type.name == 'int':
         return lhs_type
 
     raise Exception("Unsupporting operation.")
@@ -558,8 +565,6 @@ def is_assignment_op(op):
 
 
 def compute_binary_assignment_op_type(op, lhs_type, rhs_type, sym_table):
-    from ast.types import PrimitiveType, VectorType
-
     if lhs_type == rhs_type:
         return lhs_type
 
@@ -572,13 +577,11 @@ def compute_binary_assignment_op_type(op, lhs_type, rhs_type, sym_table):
 
 
 def compute_binary_op_type(op, lhs, rhs, sym_table):
-    from ast.types import PrimitiveType, VectorType
-
     lhs_type = lhs.type
     rhs_type = rhs.type
 
     if is_binary_arith_op(op):
-        return compute_binary_arith_op_type(op, lhs_type, rhs_type, sym_table), lhs, rhs
+        return compute_binary_arith_op_type(op, lhs, rhs, sym_table)
 
     if is_bitwise_op(op):
         return compute_binary_bitwise_op_type(op, lhs_type, rhs_type, sym_table), lhs, rhs
@@ -623,14 +626,12 @@ def is_typed_expr(node):
         TypedFunctionCall))
 
 
-def is_constructor(name):
-    return name in [
-        "float", "vec2", "vec3", "vec4"
-    ]
-
-
 def mangle_func_name(name):
     return name
+
+
+def is_float_type(ty):
+    return ty.name in ["float", "double"]
 
 
 def exit_node(node, depth, sym_table):
@@ -647,13 +648,12 @@ def exit_node(node, depth, sym_table):
 
     if isinstance(node, IntegerConstantExpr):
         ty = sym_table.find_type(node.type.specifier)
-        assert(ty.name in ["_Bool", "char", "unsigned char", "shoft",
-                           "unsigned short", "int", "unsigned int"])
+        assert(is_integer_type(ty))
         node = IntegerConstantExpr(node.val, ty)
 
     if isinstance(node, FloatingConstantExpr):
         ty = sym_table.find_type(node.type.specifier)
-        assert(ty.name in ["float", "double"])
+        assert(is_float_type(ty))
         node = FloatingConstantExpr(node.val, ty)
 
     if isinstance(node, Variable):
@@ -674,12 +674,6 @@ def exit_node(node, depth, sym_table):
 
     from ast.types import PointerType, CompositeType, PrimitiveType
     from ast.node import Ident
-
-    def get_value_or_list(nullable):
-        if not nullable:
-            return []
-
-        return nullable
 
     def get_type_initializer(init, ty, idx=0):
         if isinstance(ty, CompositeType) and ty.is_union:
@@ -878,15 +872,13 @@ def exit_node(node, depth, sym_table):
                 type_spec = TypeSpecifier(spec_type, [], None, [])
 
             ty = get_type(sym_table, type_spec)
-            for ptr in node.type.pointer:
+            for _ in node.type.pointer:
                 ty = PointerType(ty)
         else:
             ty = node.type
         node = TypedSizeOfExpr(node.expr, ty, return_type)
 
     if isinstance(node, BinaryOp):
-        from ast.types import PrimitiveType, VectorType
-
         assert(is_typed_expr(node.lhs))
         assert(is_typed_expr(node.rhs))
 
@@ -901,16 +893,10 @@ def exit_node(node, depth, sym_table):
 
         if return_type is None:
             raise RuntimeError(
-                f"Error: Undefined operation between types \"{lhs_typename}\" and \"{rhs_typename}\" with op \"{node.op}\"")
+                f"Error: Undefined operation between types \"{lhs_type.name}\" and \"{rhs_type.name}\" with op \"{node.op}\"")
 
         assert(isinstance(return_type, Type))
         ty = return_type
-
-        # if lhs_typename != return_type:
-        #     lhs = CastExpr(node.lhs, ty)
-
-        # if rhs_typename != return_type:
-        #     rhs = CastExpr(node.rhs, ty)
 
         node = TypedBinaryOp(node.op, lhs, rhs, ty)
 
@@ -933,12 +919,10 @@ def exit_node(node, depth, sym_table):
             result_type = true_expr.type
 
         assert(result_type)
-        assert(cond_expr.type.name == "_Bool")
 
         ty = result_type
 
-        node = TypedConditionalExpr(
-            node.cond_expr, node.true_expr, node.false_expr, ty)
+        node = TypedConditionalExpr(cond_expr, true_expr, false_expr, ty)
 
     if isinstance(node, UnaryOp):
         assert(is_typed_expr(node.expr))
@@ -990,23 +974,6 @@ def exit_node(node, depth, sym_table):
 
         node = TypedArrayIndexerOp(node.arr, node.idx, arr_type.elem_ty)
 
-    def get_type_and_field(self, ty, field):
-        if isinstance(ty, VectorType):
-            return (ty.elem_ty, None)
-
-        assert(isinstance(ty, CompositeType))
-
-        if ty.contains_field(field):
-            return ty.get_field_by_name(field)
-
-        for field_ty, field_name, _ in ty.fields:
-            if not field_name:
-                result = self.get_type_and_field(field_ty, field)
-                if result:
-                    return result
-
-        return None
-
     if isinstance(node, AccessorOp):
         assert(is_typed_expr(node.obj))
 
@@ -1033,10 +1000,6 @@ def exit_node(node, depth, sym_table):
             raise NotImplementedError()
 
         func_name = mangle_func_name(func_name)
-        arg_tys = [arg.type for arg in node.params]
-
-        if is_constructor(func_name):
-            func_name = FuncSignature(func_name, arg_tys)
 
         func_def = sym_table.find_func(func_name)
 
@@ -1062,6 +1025,22 @@ def exit_node(node, depth, sym_table):
 
         node = TypedFunctionCall(func_def, node.params, func_type)
 
+    if isinstance(node, AsmStmt):
+        operands_list = []
+        for operands in node.operands:
+            new_operands = []
+            for constraint, name in operands:
+                if name:
+                    new_operands.append(
+                        (constraint, sym_table.find_var(name.value)))
+                else:
+                    new_operands.append(
+                        (constraint, None))
+
+            operands_list.append(new_operands)
+
+        node = AsmStmt(node.template, operands_list)
+
     return node
 
 
@@ -1086,13 +1065,7 @@ class FuncSignature:
         return self.name + "_" + str(len(self.param_types))
 
 
-def setup_buildin_decls(sym_table):
-    return []
-
-
 def semantic_analysis(ast):
     sym_table = SymbolTable()
-    buildin_decls = list(setup_buildin_decls(sym_table))
-    analyzed = buildin_decls + \
-        traverse_depth_update(ast, enter_node, exit_node, sym_table)
+    analyzed = traverse_depth_update(ast, enter_node, exit_node, sym_table)
     return (analyzed, sym_table)

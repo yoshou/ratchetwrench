@@ -255,10 +255,12 @@ class MachineInstrEmitter:
 
     def emit_subreg_node(self, inst: DagNode, dag):
         if inst.opcode == TargetDagOps.EXTRACT_SUBREG:
+            src = inst.operands[0]
+            subreg_idx = inst.operands[1]
+
             minst = self.create_instruction(TargetDagOps.COPY)
 
-            src_reg_op = self.get_virtual_register(
-                inst.operands[0].node, inst.operands[0].index)
+            src_reg_op = self.get_virtual_register(src.node, src.index)
 
             src_reg = src_reg_op.reg
 
@@ -268,24 +270,37 @@ class MachineInstrEmitter:
                 raise NotImplementedError()
 
             defs = []
+            reg_info = self.bb.func.target_info.get_register_info()
+
+            def get_subclass_with_subreg(regclass, subreg):
+                if isinstance(subreg, ComposedSubRegDescription):
+                    regclass = get_subclass_with_subreg(
+                        regclass, subreg.subreg_a)
+                    subreg = subreg.subreg_b
+
+                return regclass.subclass_and_subregs[subreg]
+
+            assert(isinstance(subreg_idx.node, ConstantDagNode))
+            dst_regclass = reg_info.get_regclass_for_vt(inst.value_types[0])
+            # dst_regclass = get_subclass_with_subreg(
+            #     dst_regclass, subregs[subreg_idx.node.value.value])
 
             # Add dest operand
-            vreg = self.create_virtual_register(reg)
+            vreg = self.create_virtual_register(dst_regclass)
             vreg_op = minst.add_reg(vreg, RegState.Define)
             defs.append(vreg_op)
 
             # Add src operand
-            minst.add_operand(src_reg_op)
+            minst.add_operand(
+                MOReg(src_reg, RegState.Non, subreg_idx.node.value.value))
 
             self.set_vreg_map(inst, defs)
 
             self.bb.append_inst(minst)
-
-        elif inst.opcode == TargetDagOps.INSERT_SUBREG:
+        elif inst.opcode in [TargetDagOps.INSERT_SUBREG, TargetDagOps.SUBREG_TO_REG]:
             src = inst.operands[0]
             elem = inst.operands[1]
-            idx = inst.operands[2]
-            subreg_idx = inst.operands[3]
+            subreg_idx = inst.operands[2]
 
             minst = self.create_instruction(inst.opcode)
 
@@ -311,7 +326,6 @@ class MachineInstrEmitter:
 
             self.add_operand(minst, src)
             self.add_operand(minst, elem)
-            self.add_operand(minst, idx)
             self.add_operand(minst, subreg_idx)
 
             # Tie operands
@@ -321,7 +335,6 @@ class MachineInstrEmitter:
             self.set_vreg_map(inst, defs)
 
             self.bb.append_inst(minst)
-            return
 
     def emit_copy_to_regclass(self, inst: DagNode, dag):
         src = inst.operands[0]
@@ -472,4 +485,8 @@ class MachineInstrEmitter:
 
         if inst.opcode == TargetDagOps.COPY_TO_REGCLASS:
             self.emit_copy_to_regclass(inst, dag)
+            return
+
+        if inst.opcode == TargetDagOps.SUBREG_TO_REG:
+            self.emit_subreg_node(inst, dag)
             return

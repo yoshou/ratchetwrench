@@ -216,6 +216,8 @@ class Preprocessor:
             "__STDC_WANT_SECURE_LIB__", ["1"]))
         self.groups.append(DefineReplacementDirective(
             "_NO_CRT_STDIO_INLINE", ["1"]))
+        self.groups.append(DefineReplacementDirective(
+            "_WIN64", ["1"]))
 
         if not eval_masks:
             self.eval_masks = [EvalMask(True)]
@@ -678,6 +680,10 @@ class Preprocessor:
 
         if not fullpath:
             fullpath = os.path.abspath(filename)
+
+        if not os.path.exists(fullpath):
+            raise FileNotFoundError(
+                "Can't found the include file : {0}".format(fullpath))
 
         with open(fullpath, "r") as f:
             source = f.read()

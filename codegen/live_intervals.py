@@ -103,7 +103,7 @@ class LiveIntervals(MachineFunctionPass):
                 succ = succs[inst]
 
                 for operand in inst.operands:
-                    if operand.is_mbb:
+                    if operand.is_mbb and len(operand.mbb.insts) > 0:
                         succ.append(operand.mbb.insts[0])
 
                     if operand.is_reg:

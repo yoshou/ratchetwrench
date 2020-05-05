@@ -21,8 +21,9 @@ class SimplifyCFG(FunctionPass):
             return False
 
         for inst in bb.insts:
-            if isinstance(inst, PHINode):
-                return False
+            for use in inst.uses:
+                if isinstance(use, PHINode):
+                    return False
 
         pred.terminator.remove()
 

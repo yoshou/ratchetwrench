@@ -1,5 +1,6 @@
 from ir.values import *
 
+
 class DomTreeNode:
     def __init__(self, value, idx):
         self.value = value
@@ -16,8 +17,10 @@ def get_value_successors(value):
 
     return []
 
+
 def get_value_predecessors(value):
     return value.uses
+
 
 class DominatorTreeBuider:
     def __init__(self):
@@ -33,17 +36,18 @@ class DominatorTreeBuider:
 
     def find_roots(self, func):
         roots = []
-        
+
         for bb in func.bbs:
             for inst in bb.insts:
                 if len(inst.uses) == 0:
                     roots.append(inst)
-                    
+
         return roots
 
     def dfs(self, roots):
         nodes = []
         visited = set()
+
         def dfs_rec(node, visited, nodes):
             if node in visited:
                 return
@@ -58,7 +62,6 @@ class DominatorTreeBuider:
             dfs_rec(root, visited, nodes)
 
         return nodes
-
 
     def build(self, func: Function):
         self.roots = self.find_roots(func)
@@ -90,8 +93,9 @@ class DominatorTreeBuider:
             for node in self.nodes:
                 if node in self.roots:
                     continue
-                
-                preds = [self.value_to_node[value] for value in get_value_predecessors(node.value)]
+
+                preds = [self.value_to_node[value]
+                         for value in get_value_predecessors(node.value) if value in self.value_to_node]
 
                 if len(preds) > 0:
                     intersection = preds[0].doms
@@ -111,7 +115,7 @@ class DominatorTreeBuider:
                     if len(dom.doms) == 1:
                         node.parents.append(dom)
                         node.doms.remove(dom)
-                    
+
         for node in self.nodes:
             for parent in node.parents:
                 parent.children.append(node)

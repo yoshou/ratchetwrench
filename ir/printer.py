@@ -81,8 +81,53 @@ def get_type_name(ty):
     raise ValueError("Invalid type.")
 
 
+def get_type_name2(ty, module):
+    if isinstance(ty, PrimitiveType):
+        if ty.name == "f16":
+            return "half"
+        elif ty.name == "f32":
+            return "float"
+        elif ty.name == "f64":
+            return "double"
+        elif ty.name == "f128":
+            return "fp128"
+        return ty.name
+    if isinstance(ty, VectorType):
+        return f"<{ty.size} x {get_type_name(ty.elem_ty)}>"
+    if isinstance(ty, ArrayType):
+        return f"[{ty.size} x {get_type_name(ty.elem_ty)}]"
+    if isinstance(ty, StructType):
+        if ty.name != "":
+            return f"%{ty.name}"
+
+        field_ty_names = ", ".join([get_type_name2(field_ty, module)
+                                    for field_ty in ty.fields])
+        return f"{{{field_ty_names}}}"
+    if isinstance(ty, PointerType):
+        return f"{get_type_name(ty.elem_ty)}*"
+    if isinstance(ty, LabelType):
+        return ty.name
+    if isinstance(ty, VoidType):
+        return ty.name
+    if isinstance(ty, FunctionType):
+        param_ty_list = ", ".join(
+            [f"{get_type_name(param)}" for param in ty.params if param and not isinstance(param, VoidType)])
+        return_ty_name = get_type_name(ty.return_ty)
+
+        if ty.is_variadic:
+            param_ty_list += ", ..."
+
+        return f"{return_ty_name} ({param_ty_list})"
+
+    raise ValueError("Invalid type.")
+
+
 def get_value_type(value):
     return get_type_name(value.ty)
+
+
+def get_value_type2(value, module):
+    return get_type_name2(value.ty, module)
 
 
 def float_to_hex(f):
@@ -174,12 +219,23 @@ def print_inst(inst, slot_id_map):
             return f"<{lst}>"
         elif isinstance(value, (Function, GlobalVariable)):
             return f"{value.value_name}"
+        elif isinstance(value, InlineAsm):
+            strs = ["asm"]
+            if value.has_side_effect:
+                strs.append("sideeffect")
+
+            strs.append(f'"{value.asm_string}"')
+            strs.append(f', "{value.constraints}"')
+
+            return " ".join(strs)
         else:
             # if value.has_name:
             #     return f"{value.value_name}"
             # else:
             t = type(value)
             return slot_id_map[value]
+
+    module = inst.block.func.module
 
     if isinstance(inst, ReturnInst):
         if len(inst.operands) > 0:
@@ -221,7 +277,7 @@ def print_inst(inst, slot_id_map):
         idx_list = ", ".join(
             [f"{idx}" for idx in inst.idx])
 
-        return f"{get_value_name(inst)} = extractvalue {get_value_type(inst.value)} {get_value_name(inst.value)}, {idx_list}"
+        return f"{get_value_name(inst)} = extractvalue {get_value_type2(inst.value, module)} {get_value_name(inst.value)}, {idx_list}"
 
     if isinstance(inst, BitCastInst):
         return f"{get_value_name(inst)} = bitcast {get_value_type(inst.rs)} {get_value_name(inst.rs)} to {get_value_type(inst)}"
@@ -238,10 +294,16 @@ def print_inst(inst, slot_id_map):
     if isinstance(inst, CallInst):
         arg_list = ", ".join(
             [f"{get_value_type(arg)} {get_value_name(arg)}" for arg in inst.args])
-        return_ty_name = get_value_type(inst)
-        func_ty_name = get_type_name(inst.callee.func_ty)
+        return_ty_name = get_type_name2(
+            inst.callee.func_ty.return_ty, module)
 
-        ty_or_fnty = func_ty_name if inst.callee.is_variadic else return_ty_name
+        if isinstance(inst.callee, Function):
+            func_ty_name = get_type_name(inst.callee.func_ty)
+
+            ty_or_fnty = func_ty_name if inst.callee.is_variadic else return_ty_name
+        else:
+            assert(isinstance(inst.callee, InlineAsm))
+            ty_or_fnty = return_ty_name
 
         if isinstance(inst.ty, VoidType):
             return f"call {ty_or_fnty} {get_value_name(inst.callee)}({arg_list})"

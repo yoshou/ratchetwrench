@@ -99,6 +99,12 @@ class Module:
 
             return func
 
+    def get_named_value(self, name):
+        if name in self._funcs:
+            return self._funcs[name]
+
+        return KeyError()
+
 
 class Value:
     def __init__(self, ty: Type, name=""):
@@ -114,7 +120,8 @@ class Value:
         self._uses.append(user)
 
     def remove_use(self, user):
-        self._uses.remove(user)
+        idx = self._uses.index(user)
+        self._uses.pop(idx)
 
     @property
     def has_name(self):
@@ -213,6 +220,10 @@ class GlobalObject(GlobalValue):
         super().__init__(ty, linkage, name, thread_local)
         self.comdat = None
 
+    @property
+    def has_comdat(self):
+        return self.comdat is not None
+
 
 class GlobalVariable(GlobalObject):
     def __init__(self, ty, is_constant, linkage, name, thread_local=ThreadLocalMode.NotThreadLocal, initializer=None):
@@ -220,6 +231,10 @@ class GlobalVariable(GlobalObject):
         super().__init__(ty, linkage, name, thread_local)
         self.is_constant = is_constant
         self.initializer = initializer
+
+    @property
+    def is_declaration(self):
+        return not self.initializer
 
 
 class AttributeKind(Enum):
@@ -429,6 +444,14 @@ class BasicBlock(Value):
 
         func.add_block(self, block_before)
 
+    def move(self, block_before):
+        if self == block_before:
+            return
+
+        self.func.blocks.remove(self)
+        idx = self.func.blocks.index(block_before)
+        self.func.blocks.insert(idx + 1, self)
+
     @property
     def next_block(self):
         return self.func.after_block(self)
@@ -505,6 +528,8 @@ class Instruction(User):
         super().__init__(ty, ops, num_ops, name)
 
         if isinstance(block_or_inst, BasicBlock):
+            assert(
+                not block_or_inst.insts or not block_or_inst.insts[-1].is_terminator)
             self.block = block_or_inst
             self.block.add_inst(self, None)
         else:
@@ -1101,19 +1126,60 @@ class ExtractElementInst(Instruction):
         return False
 
 
+def get_indexed_type_fixed(ty, idx_list):
+    if len(idx_list) == 0:
+        return ty
+
+    idx = idx_list[0]
+
+    if isinstance(ty, PointerType):
+        field_ty = ty.elem_ty
+    elif isinstance(ty, VectorType):
+        field_ty = ty.elem_ty
+    elif isinstance(ty, ArrayType):
+        field_ty = ty.elem_ty
+    elif isinstance(ty, StructType):
+        field_ty = ty.fields[idx]
+    else:
+        raise ValueError("Can't to access the field of the type.")
+
+    if len(idx_list) == 1:
+        return field_ty
+    else:
+        return get_indexed_type_fixed(field_ty, idx_list[1:])
+
+
 class ExtractValueInst(Instruction):
     def __init__(self, block, value, *idx):
-        assert(isinstance(value.ty, ArrayType))
-        elem_ty = get_indexed_type(value.ty, list(idx))
+        assert(isinstance(value.ty, (ArrayType, StructType)))
+        elem_ty = get_indexed_type_fixed(value.ty, list(idx))
         super().__init__(block, elem_ty, [value], 1)
+        self.idx = list(idx)
 
     @property
     def value(self):
         return self.get_operand(0)
 
     @property
-    def idx(self):
-        return self.operands[1:]
+    def is_terminator(self):
+        return False
+
+
+class InsertValueInst(Instruction):
+    def __init__(self, block, value, elem, *idx):
+        assert(isinstance(value.ty, (ArrayType, StructType)))
+        elem_ty = get_indexed_type_fixed(value.ty, list(idx))
+        assert(elem_ty == elem.ty)
+        super().__init__(block, value.ty, [value, elem], 2)
+        self.idx = list(idx)
+
+    @property
+    def value(self):
+        return self.get_operand(0)
+
+    @property
+    def elem(self):
+        return self.get_operand(1)
 
     @property
     def is_terminator(self):
@@ -1137,6 +1203,17 @@ class Comdat:
     def __init__(self, name, kind):
         self.name = name
         self.kind = kind
+
+
+class InlineAsm(Value):
+    def __init__(self, ty: FunctionType, asm_string: str, constraints: str, has_side_effect):
+        super().__init__(PointerType(ty, 0))
+
+        self.asm_string = asm_string
+        self.constraints = constraints
+        self.has_side_effect = has_side_effect
+        self.vty = ty
+        self.func_ty = ty
 
 
 # scheduling

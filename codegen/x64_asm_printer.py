@@ -426,6 +426,9 @@ class X64AsmPrinter(AsmPrinter):
         if value.linkage == GlobalLinkage.Global:
             self.stream.emit_symbol_attrib(symbol, MCSymbolAttribute.Global)
 
+        if value.linkage == GlobalLinkage.External:
+            self.stream.emit_symbol_attrib(symbol, MCSymbolAttribute.Global)
+
     def get_global_value_section_kind(self, value):
         if value.is_thread_local:
             return SectionKind.ThreadData
@@ -517,10 +520,18 @@ class X64AsmPrinter(AsmPrinter):
 
                 offset += value_size
 
+    def get_global_section_kind(self, value):
+        if isinstance(value, Function):
+            return SectionKind.Text
+
+        raise NotImplementedError()
+
     def emit_function_header(self, func):
         self.emit_constant_pool()
 
-        self.stream.switch_section(self.ctx.obj_file_info.text_section)
+        section_kind = self.get_global_section_kind(func.func_info.func)
+        self.stream.switch_section(
+            self.ctx.obj_file_info.select_section_for_global(section_kind, func.func_info.func, self.ctx))
         self.emit_linkage(func.func_info.func)
 
         func_symbol = get_global_symbol(func.func_info.func, self.ctx)
@@ -754,6 +765,14 @@ class X64AsmPrinter(AsmPrinter):
         self.emit_alignment(int(align / 8))
 
         symbol = get_global_symbol(variable, self.ctx)
+
+        self.emit_visibility(symbol, variable.visibility,
+                             not variable.is_declaration)
+
+        initializer = variable.initializer
+        if not initializer:
+            return
+
         self.stream.emit_label(symbol)
 
         if self.asm_info.has_dot_type_dot_size_directive:
@@ -762,7 +781,6 @@ class X64AsmPrinter(AsmPrinter):
 
         self.emit_linkage(variable)
 
-        initializer = variable.initializer
         if initializer is not None:
             data_layout = self.module.data_layout
             self.emit_global_constant(data_layout, initializer)
@@ -907,6 +925,12 @@ class X64RegNo:
     EDI = 7
 
 
+X64TSOpSizeShift = 7
+X64TSOpSizeMask = (0x3 << X64TSOpSizeShift)
+
+X64TSAdSizeShift = 9
+X64TSAdSizeMask = (0x3 << X64TSAdSizeShift)
+
 X64TSOpPrefixShift = 11
 X64TSOpPrefixMask = (0x3 << X64TSOpPrefixShift)
 
@@ -931,6 +955,10 @@ X64TSVEX_4VMask = (0x1 << X64TSVEX_4VShift)
 
 class X64TSFlags(IntFlag):
     Pseudo = 0
+
+    OpSizeFixed = 0 << X64TSOpSizeShift
+    OpSize16 = 1 << X64TSOpSizeShift
+    OpSize32 = 2 << X64TSOpSizeShift
 
     PD = 1 << X64TSOpPrefixShift
     XS = 2 << X64TSOpPrefixShift
@@ -1178,6 +1206,9 @@ class X64CodeEmitter(MCCodeEmitter):
             self.emit_byte(0x65, output)
 
     def emit_opcode_prefix(self, tsflags, rex, inst, output):
+        if tsflags & X64TSOpSizeMask == X64TSFlags.OpSize16:
+            self.emit_byte(0x66, output)
+
         if tsflags & X64TSOpPrefixMask == X64TSFlags.PD:
             self.emit_byte(0x66, output)
         elif tsflags & X64TSOpPrefixMask == X64TSFlags.XS:
@@ -1194,6 +1225,16 @@ class X64CodeEmitter(MCCodeEmitter):
     def compute_rex_prefix(self, inst, bias, form, tsflags, mem_op):
         rex = 0
         op_idx = bias
+
+        from codegen.x64_def import SPL, BPL, SIL, DIL
+
+        for operand in inst.operands:
+            if not isinstance(operand, MCOperandReg):
+                continue
+
+            reg = operand.reg
+            if reg.spec in [SPL, BPL, SIL, DIL]:
+                rex |= 0x40
 
         if tsflags & X64TSFlags.REX_W == X64TSFlags.REX_W:
             rex |= (1 << 3)
@@ -1261,6 +1302,12 @@ class X64CodeEmitter(MCCodeEmitter):
         elif inst.opcode in [X64MachineOps.POP32r, X64MachineOps.POP64r]:
             base_opcode = 0x58
             form = X64InstForm.AddRegFrm
+        elif inst.opcode in [X64MachineOps.MOV8ri]:
+            base_opcode = 0xB0
+            form = X64InstForm.AddRegFrm
+
+            # flags
+            imm_size = 1
         elif inst.opcode in [X64MachineOps.MOV8rr]:
             base_opcode = 0x88
             form = X64InstForm.MRMDestReg
@@ -1270,6 +1317,38 @@ class X64CodeEmitter(MCCodeEmitter):
         elif inst.opcode in [X64MachineOps.MOV8mr]:
             base_opcode = 0x88
             form = X64InstForm.MRMDestMem
+        elif inst.opcode in [X64MachineOps.MOV16ri]:
+            base_opcode = 0xB8
+            form = X64InstForm.AddRegFrm
+
+            # flags
+            imm_size = 2
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOV16rr]:
+            base_opcode = 0x89
+            form = X64InstForm.MRMDestReg
+
+            # flags
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOV16rm]:
+            base_opcode = 0x8B
+            form = X64InstForm.MRMSrcMem
+
+            # flags
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOV16mr]:
+            base_opcode = 0x89
+            form = X64InstForm.MRMDestMem
+
+            # flags
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOV16mi]:
+            base_opcode = 0xC7
+            form = X64InstForm.MRM0m
+
+            # flags
+            imm_size = 2
+            tsflags |= X64TSFlags.OpSize16
         elif inst.opcode in [X64MachineOps.MOV32ri, X64MachineOps.MOV64ri]:
             base_opcode = 0xB8
             form = X64InstForm.AddRegFrm
@@ -1279,6 +1358,7 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.MOV64ri:
                 tsflags |= X64TSFlags.REX_W
+                imm_size = 8
         elif inst.opcode in [X64MachineOps.MOV32mi, X64MachineOps.MOV64mi]:
             base_opcode = 0xC7
             form = X64InstForm.MRM0m
@@ -1288,6 +1368,7 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.MOV64mi:
                 tsflags |= X64TSFlags.REX_W
+                imm_size = 8
         elif inst.opcode in [X64MachineOps.MOV32rr, X64MachineOps.MOV64rr]:
             base_opcode = 0x89
             form = X64InstForm.MRMDestReg
@@ -1306,6 +1387,51 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.MOV64mr:
                 tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.MOVSX32rr8]:
+            base_opcode = 0xBE
+            form = X64InstForm.MRMSrcReg
+
+            tsflags |= X64TSFlags.TB
+        elif inst.opcode in [X64MachineOps.MOVSX32rr16]:
+            base_opcode = 0xBF
+            form = X64InstForm.MRMSrcReg
+
+            # flags
+            tsflags |= X64TSFlags.TB
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOVSX64rr32]:
+            base_opcode = 0x63
+            form = X64InstForm.MRMSrcReg
+        elif inst.opcode in [X64MachineOps.MOVZX16rr8]:
+            base_opcode = 0xB6
+            form = X64InstForm.MRMSrcReg
+
+            # flags
+            tsflags |= X64TSFlags.TB
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.MOVZX32rr8]:
+            base_opcode = 0xB6
+            form = X64InstForm.MRMSrcReg
+
+            # flags
+            tsflags |= X64TSFlags.TB
+        elif inst.opcode in [X64MachineOps.MOVZX32rr16]:
+            base_opcode = 0xB7
+            form = X64InstForm.MRMSrcReg  # TODO: SizeOp
+
+            tsflags |= X64TSFlags.TB
+        elif inst.opcode in [X64MachineOps.MOVZX64rr8]:
+            base_opcode = 0xB6
+            form = X64InstForm.MRMSrcReg  # TODO: SizeOp
+
+            tsflags |= X64TSFlags.TB
+            tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.MOVZX64rr16]:
+            base_opcode = 0xB7
+            form = X64InstForm.MRMSrcReg  # TODO: SizeOp
+
+            tsflags |= X64TSFlags.TB
+            tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.MOVSSrm, X64MachineOps.MOVSDrm]:
             base_opcode = 0x10
             form = X64InstForm.MRMSrcMem
@@ -1387,6 +1513,17 @@ class X64CodeEmitter(MCCodeEmitter):
                 tsflags |= (X64TSFlags.TB | X64TSFlags.PS)
             else:
                 raise ValueError()
+        elif inst.opcode in [X64MachineOps.MOVPQIto64rr]:
+            base_opcode = 0x7E
+            form = X64InstForm.MRMDestReg
+
+            if inst.opcode == X64MachineOps.MOVPQIto64rr:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.PD)
+            else:
+                raise ValueError()
+
+            if inst.opcode == X64MachineOps.MOVPQIto64rr:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.ADD32ri, X64MachineOps.ADD64ri]:
             base_opcode = 0x81
             form = X64InstForm.MRM0r
@@ -1428,6 +1565,13 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.SUB64ri:
                 tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.XOR8ri]:
+            base_opcode = 0x80
+            form = X64InstForm.MRM6r
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            # flags
+            imm_size = 1
         elif inst.opcode in [X64MachineOps.XOR32ri]:
             base_opcode = 0x81
             form = X64InstForm.MRM6r
@@ -1448,14 +1592,21 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.CMP64ri:
                 tsflags |= X64TSFlags.REX_W
-        elif inst.opcode in [X64MachineOps.OR32rr]:
-            base_opcode = 0x09
-            form = X64InstForm.MRMDestReg
-            op_idx += 1  # TODO: Should defined as operand bias
         elif inst.opcode in [X64MachineOps.OR8rr]:
             base_opcode = 0x08
             form = X64InstForm.MRMDestReg
             op_idx += 1  # TODO: Should defined as operand bias
+        elif inst.opcode in [X64MachineOps.OR32rr]:
+            base_opcode = 0x09
+            form = X64InstForm.MRMDestReg
+            op_idx += 1  # TODO: Should defined as operand bias
+        elif inst.opcode in [X64MachineOps.XOR32rr, X64MachineOps.XOR64rr]:
+            base_opcode = 0x31
+            form = X64InstForm.MRMDestReg
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.XOR64rr:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.ADDSSrr, X64MachineOps.ADDSDrr]:
             base_opcode = 0x58
             form = X64InstForm.MRMSrcReg
@@ -1467,40 +1618,59 @@ class X64CodeEmitter(MCCodeEmitter):
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
-        elif inst.opcode in [X64MachineOps.DIVSSrr]:
+        elif inst.opcode in [X64MachineOps.ADDSSrm, X64MachineOps.ADDSDrm]:
+            base_opcode = 0x58
+            form = X64InstForm.MRMSrcMem
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.ADDSSrm:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode == X64MachineOps.ADDSDrm:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
+            else:
+                raise ValueError()
+        elif inst.opcode in [X64MachineOps.DIVSSrr, X64MachineOps.DIVSDrr]:
             base_opcode = 0x5E
             form = X64InstForm.MRMSrcReg
             op_idx += 1  # TODO: Should defined as operand bias
 
             if inst.opcode == X64MachineOps.DIVSSrr:
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode == X64MachineOps.DIVSDrr:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
-        elif inst.opcode in [X64MachineOps.DIVSSrm]:
+        elif inst.opcode in [X64MachineOps.DIVSSrm, X64MachineOps.DIVSDrm]:
             base_opcode = 0x5E
             form = X64InstForm.MRMSrcMem
             op_idx += 1  # TODO: Should defined as operand bias
 
             if inst.opcode == X64MachineOps.DIVSSrm:
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode == X64MachineOps.DIVSDrm:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
-        elif inst.opcode in [X64MachineOps.MULSSrr]:
+        elif inst.opcode in [X64MachineOps.MULSSrr, X64MachineOps.MULSDrr]:
             base_opcode = 0x59
             form = X64InstForm.MRMSrcReg
             op_idx += 1  # TODO: Should defined as operand bias
 
             if inst.opcode == X64MachineOps.MULSSrr:
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode == X64MachineOps.MULSDrr:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
-        elif inst.opcode in [X64MachineOps.MULSSrm]:
+        elif inst.opcode in [X64MachineOps.MULSSrm, X64MachineOps.MULSDrm]:
             base_opcode = 0x59
             form = X64InstForm.MRMSrcMem
             op_idx += 1  # TODO: Should defined as operand bias
 
             if inst.opcode == X64MachineOps.MULSSrm:
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode == X64MachineOps.MULSSrm:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
         elif inst.opcode in [X64MachineOps.SUBSSrr, X64MachineOps.SUBSDrr]:
@@ -1525,6 +1695,42 @@ class X64CodeEmitter(MCCodeEmitter):
                 tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
             else:
                 raise ValueError()
+        elif inst.opcode in [X64MachineOps.CVTSS2SDrr]:
+            base_opcode = 0x5A
+            form = X64InstForm.MRMSrcReg
+
+            tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+        elif inst.opcode in [X64MachineOps.CVTSD2SSrr]:
+            base_opcode = 0x5A
+            form = X64InstForm.MRMSrcReg
+
+            tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
+        elif inst.opcode in [X64MachineOps.CVTTSS2SIrr, X64MachineOps.CVTTSS2SI64rr, X64MachineOps.CVTTSD2SIrr, X64MachineOps.CVTTSD2SI64rr]:
+            base_opcode = 0x2C
+            form = X64InstForm.MRMSrcReg
+
+            if inst.opcode in [X64MachineOps.CVTTSS2SIrr, X64MachineOps.CVTTSS2SI64rr]:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode in [X64MachineOps.CVTTSD2SIrr, X64MachineOps.CVTTSD2SI64rr]:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
+            else:
+                raise ValueError()
+
+            if inst.opcode in [X64MachineOps.CVTTSS2SI64rr, X64MachineOps.CVTTSD2SI64rr]:
+                tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.CVTSI2SSrr, X64MachineOps.CVTSI2SDrr, X64MachineOps.CVTSI642SSrr, X64MachineOps.CVTSI642SDrr]:
+            base_opcode = 0x2A
+            form = X64InstForm.MRMSrcReg
+
+            if inst.opcode in [X64MachineOps.CVTSI2SSrr, X64MachineOps.CVTSI642SSrr]:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XS)
+            elif inst.opcode in [X64MachineOps.CVTSI2SDrr, X64MachineOps.CVTSI642SDrr]:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.XD)
+            else:
+                raise ValueError()
+
+            if inst.opcode in [X64MachineOps.CVTSI642SSrr, X64MachineOps.CVTSI642SDrr]:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.ADDPSrr]:
             base_opcode = 0x58
             form = X64InstForm.MRMSrcReg
@@ -1561,18 +1767,45 @@ class X64CodeEmitter(MCCodeEmitter):
                 tsflags |= (X64TSFlags.TB | X64TSFlags.PS)
             else:
                 raise ValueError()
+        elif inst.opcode in [X64MachineOps.ADD16rr]:
+            base_opcode = 0x01
+            form = X64InstForm.MRMSrcReg
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            # flags
+            tsflags |= X64TSFlags.OpSize16
         elif inst.opcode in [X64MachineOps.ADD32rr, X64MachineOps.ADD64rr]:
             base_opcode = 0x01
             form = X64InstForm.MRMDestReg
+            op_idx += 1  # TODO: Should defined as operand bias
 
             if inst.opcode == X64MachineOps.ADD64rr:
                 tsflags |= X64TSFlags.REX_W
-
-            op_idx += 1  # TODO: Should defined as operand bias
-        elif inst.opcode in [X64MachineOps.SUB32rr]:
+        elif inst.opcode in [X64MachineOps.SUB32rr, X64MachineOps.SUB64rr]:
             base_opcode = 0x29
             form = X64InstForm.MRMDestReg
             op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.SUB64rr:
+                tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.IMUL16rr]:
+            base_opcode = 0xAF
+            form = X64InstForm.MRMSrcReg
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            # flags
+            tsflags |= X64TSFlags.TB
+            tsflags |= X64TSFlags.OpSize16
+        elif inst.opcode in [X64MachineOps.IMUL32rr, X64MachineOps.IMUL64rr]:
+            base_opcode = 0xAF
+            form = X64InstForm.MRMSrcReg
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            # flags
+            tsflags |= X64TSFlags.TB
+
+            if inst.opcode == X64MachineOps.IMUL64rr:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.AND32rr]:
             base_opcode = 0x21
             form = X64InstForm.MRMDestReg
@@ -1592,6 +1825,18 @@ class X64CodeEmitter(MCCodeEmitter):
             form = X64InstForm.MRMSrcMem
 
             if inst.opcode == X64MachineOps.CMP64rm:
+                tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.DIV32r, X64MachineOps.DIV64r]:
+            base_opcode = 0xF7
+            form = X64InstForm.MRM6r
+
+            if inst.opcode == X64MachineOps.DIV64r:
+                tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.IDIV32r, X64MachineOps.IDIV64r]:
+            base_opcode = 0xF7
+            form = X64InstForm.MRM7r
+
+            if inst.opcode == X64MachineOps.DIV64r:
                 tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.UCOMISSrr, X64MachineOps.UCOMISDrr]:
             base_opcode = 0x2E
@@ -1625,6 +1870,13 @@ class X64CodeEmitter(MCCodeEmitter):
 
             # flags
             imm_size = 1
+        elif inst.opcode in [X64MachineOps.SHL32rCL, X64MachineOps.SHL64rCL]:
+            base_opcode = 0xD3
+            form = X64InstForm.MRM4r
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.SHL64rCL:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.SHR32ri]:
             base_opcode = 0xC1
             form = X64InstForm.MRM5r
@@ -1632,6 +1884,13 @@ class X64CodeEmitter(MCCodeEmitter):
 
             # flags
             imm_size = 1
+        elif inst.opcode in [X64MachineOps.SHR32rCL, X64MachineOps.SHR64rCL]:
+            base_opcode = 0xD3
+            form = X64InstForm.MRM5r
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.SHR64rCL:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.SAR32ri]:
             base_opcode = 0xC1
             form = X64InstForm.MRM7r
@@ -1639,11 +1898,27 @@ class X64CodeEmitter(MCCodeEmitter):
 
             # flags
             imm_size = 1
+        elif inst.opcode in [X64MachineOps.SAR32rCL, X64MachineOps.SAR64rCL]:
+            base_opcode = 0xD3
+            form = X64InstForm.MRM7r
+            op_idx += 1  # TODO: Should defined as operand bias
+
+            if inst.opcode == X64MachineOps.SAR64rCL:
+                tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.LEA32r, X64MachineOps.LEA64r]:
             base_opcode = 0x8D
             form = X64InstForm.MRMSrcMem
 
             if inst.opcode == X64MachineOps.LEA64r:
+                tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.CWD]:
+            base_opcode = 0x99
+            form = X64InstForm.RawFrm  # TODO: SizeOp
+        elif inst.opcode in [X64MachineOps.CDQ, X64MachineOps.CQO]:
+            base_opcode = 0x99
+            form = X64InstForm.RawFrm  # TODO: SizeOp
+
+            if inst.opcode == X64MachineOps.CQO:
                 tsflags |= X64TSFlags.REX_W
         elif inst.opcode in [X64MachineOps.SETCCr]:
             base_opcode = 0x90

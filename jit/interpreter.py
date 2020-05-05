@@ -2,6 +2,7 @@ from ir.values import *
 from ir.types import *
 import ctypes
 
+
 class ExecutionContext:
     def __init__(self, func):
         self.func = func
@@ -15,7 +16,7 @@ class ExecutionContext:
             return False
 
         current_bb = self.func.bbs[self.bb_ptr]
-        
+
         if self.inst_ptr >= len(current_bb.insts) - 1:
             self.inst_ptr = 0
             self.bb_ptr += 1
@@ -31,7 +32,7 @@ class ExecutionContext:
             return None
 
         current_bb = self.func.bbs[self.bb_ptr]
-        
+
         if self.inst_ptr >= len(current_bb.insts):
             self.inst_ptr = 0
             self.bb_ptr += 1
@@ -39,14 +40,23 @@ class ExecutionContext:
 
         return current_bb.insts[self.inst_ptr]
 
+
 class GenericValue:
     def __init__(self, value):
         self.value = value
+
+
+class Pointer:
+    def __init__(self, memory, address):
+        self.memory = memory
+        self.address = address
+
 
 class Interpreter:
     def __init__(self, module):
         self.module = module
         self.exec_ctx_stack = []
+        self.memory = []
 
     def run_function(self, func: Function, *params):
         self.exec_ctx_stack.append(ExecutionContext(func))
@@ -62,8 +72,41 @@ class Interpreter:
 
         return self.exit_value
 
+    def create_ty_value(self, ty, value):
+        if isinstance(ty, StructType):
+            assert(isinstance(value, list))
+
+            field_vals = []
+            for field_ty, field_val in zip(ty.fields, value):
+                field_vals.append(self.create_ty_value(field_ty, field_val))
+
+            return (ty, field_vals)
+
+        if isinstance(ty, PrimitiveType):
+            if ty in [i1, i8, i16, i32, i64]:
+                return int((ty, value & ((1 << 64) - 1)))
+            elif ty in [f16, f32, f64, f128]:
+                return float(value)
+
+        raise NotImplementedError()
+
+    def create_struct(self, name, value):
+        ty = self.module.structs[name]
+        return self.create_ty_value(ty, value)
+
+    def create_i32(self, value):
+        return self.create_ty_value(i32, value)
+
+    def create_f64(self, value):
+        return self.create_ty_value(f64, value)
+
     def set_value(self, ir_value, value, ctx):
         ctx.values[ir_value] = value
+
+    def get_pointer(self, value):
+        address = len(self.memory)
+        self.memory.append(value)
+        return Pointer(self.memory, address)
 
     def get_constant_value(self, value: Constant):
         if isinstance(value, ConstantInt):
@@ -106,7 +149,7 @@ class Interpreter:
         data_layout = self.module.data_layout
 
         num_elem = self.get_operand_value(inst.count, frame)
-        
+
         ty = inst.ty.elem_ty
         type_size = data_layout.get_type_alloc_size(ty)
 
@@ -164,10 +207,7 @@ class Interpreter:
         elif isinstance(ty, StructType):
             self.store_bytes(val, ptr, store_bytes)
             return
-
-
         raise NotImplementedError()
-
 
     def visit_store(self, inst):
         frame = self.exec_ctx_stack[-1]
@@ -185,12 +225,14 @@ class Interpreter:
         offset = 0
         for idx in inst.idx:
             if isinstance(indexed_ty, PointerType):
-                offset += self.module.data_layout.get_type_alloc_size(indexed_ty.elem_ty) * idx.value
+                offset += self.module.data_layout.get_type_alloc_size(
+                    indexed_ty.elem_ty) * idx.value
                 indexed_ty = indexed_ty.elem_ty
             elif isinstance(indexed_ty, StructType):
-                offset += self.module.data_layout.get_elem_offset(indexed_ty, idx.value)
+                offset += self.module.data_layout.get_elem_offset(
+                    indexed_ty, idx.value)
                 indexed_ty = indexed_ty.get_elem_type(idx.value)
-            
+
         new_ptr = ptr + offset
 
         self.set_value(inst, new_ptr, frame)
@@ -203,7 +245,7 @@ class Interpreter:
         src2 = self.get_operand_value(inst.rt, frame)
 
         bits, _ = self.module.data_layout.get_type_size_in_bits(inst.ty)
-        
+
         if inst.op == "add":
             result = src1 + src2
         elif inst.op == "sub":
@@ -213,7 +255,7 @@ class Interpreter:
         elif inst.op == "or":
             result = src1 | src2
         elif inst.op == "xor":
-            result = src1 ^src2
+            result = src1 ^ src2
         elif inst.op == "lshr":
             result = (src1 >> src2) & ((0x1 << bits) - 1)
         elif inst.op == "shl":
@@ -227,7 +269,6 @@ class Interpreter:
         frame = self.exec_ctx_stack[-1]
         frame.bb_ptr = frame.func.bbs.index(bb)
         frame.inst_ptr = 0
-
 
     def visit_jump(self, inst: JumpInst):
         frame = self.exec_ctx_stack[-1]
@@ -247,7 +288,6 @@ class Interpreter:
 
         self.switch_bb(dest)
 
-
     def visit_cmp(self, inst: CmpInst):
         frame = self.exec_ctx_stack[-1]
 
@@ -258,7 +298,7 @@ class Interpreter:
 
         def unordered(value):
             return value & ((0x1 << bits) - 1)
-        
+
         if inst.op == "eq":
             result = 1 if src1 == src2 else 0
         elif inst.op == "ne":
@@ -274,14 +314,12 @@ class Interpreter:
 
         self.set_value(inst, result, frame)
 
-
     def visit_bitcast(self, inst: CmpInst):
         frame = self.exec_ctx_stack[-1]
 
         ptr = self.get_operand_value(inst.rs, frame)
 
         self.set_value(inst, ptr, frame)
-        
 
     def visit(self, inst):
         if isinstance(inst, AllocaInst):
@@ -316,5 +354,3 @@ class Interpreter:
             exec_ctx.next_inst()
 
             self.visit(inst)
-
-            

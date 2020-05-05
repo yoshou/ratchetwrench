@@ -67,6 +67,11 @@ def glued_node_iter(node):
 
 
 def is_passive_node(node):
+    from codegen.dag import MachineDagNode
+
+    if isinstance(node, MachineDagNode):
+        return False
+
     if len(node.operands) == 0:
         return True
 

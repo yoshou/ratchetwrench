@@ -186,7 +186,7 @@ def def_x64_regclass(*args, **kwargs):
 
 
 GR8 = def_x64_regclass("GR8", [ValueType.I8], 8, [
-    AL, CL, DL, BL, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
+    AL, CL, DL, AH, CH, DH, BL, BH, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
 
 GR16 = def_x64_regclass("GR16", [ValueType.I16], 32, [
     AX, CX, DX, SI, DI, BX, BP, SP, R8W, R9W, R10W, R11W, R14W, R15W, R12W, R13W])
@@ -260,8 +260,32 @@ def match_reloc_imm8(node, values, idx, dag):
     if value.node.opcode != VirtualDagOps.CONSTANT:
         return idx, None
 
+    if value.ty.value_type != ValueType.I8:
+        return idx, None
+
     constant = value.node.value.value
     if constant & 0xFF != constant:
+        return idx, None
+
+    target_value = DagValue(dag.add_target_constant_node(
+        value.ty, value.node.value), 0)
+
+    return idx + 1, target_value
+
+
+def match_reloc_imm16(node, values, idx, dag):
+    from codegen.dag import VirtualDagOps, DagValue
+    from codegen.types import ValueType
+
+    value = values[idx]
+    if value.node.opcode != VirtualDagOps.CONSTANT:
+        return idx, None
+
+    if value.ty.value_type != ValueType.I16:
+        return idx, None
+
+    constant = value.node.value.value
+    if constant & 0xFFFF != constant:
         return idx, None
 
     target_value = DagValue(dag.add_target_constant_node(
@@ -331,6 +355,7 @@ def match_reloc_immf32(node, values, idx, dag):
 
 
 reloc_imm8 = ComplexOperandMatcher(match_reloc_imm8)
+reloc_imm16 = ComplexOperandMatcher(match_reloc_imm16)
 reloc_imm32 = ComplexOperandMatcher(match_reloc_imm32)
 reloc_imm64 = ComplexOperandMatcher(match_reloc_imm64)
 reloc_immf32 = ComplexOperandMatcher(match_reloc_immf32)
@@ -528,7 +553,6 @@ def match_addr(node, operands, idx, dag):
 
         return idx + 1, [base, scale, index, disp, segment]
     else:
-        assert(operand.node.opcode in [VirtualDagOps.COPY_FROM_REG])
         base = operand
         scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
         index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
@@ -727,840 +751,1540 @@ class X64MachineOps:
                 yield value
 
     # lea32
-    LEA32r = def_inst("lea32_r",
-                      outs=[("dst", GR32)],
-                      ins=[("src", AnyMem)],
-                      patterns=[set_(("dst", GR32), ("src", lea32addr))]
-                      )
+    LEA32r = def_inst(
+        "lea32_r",
+        outs=[("dst", GR32)],
+        ins=[("src", AnyMem)],
+        patterns=[set_(("dst", GR32), ("src", lea32addr))]
+    )
 
-    LEA64r = def_inst("lea64_r",
-                      outs=[("dst", GR64)],
-                      ins=[("src", AnyMem)],
-                      patterns=[set_(("dst", GR64), ("src", lea64addr))]
-                      )
+    LEA64r = def_inst(
+        "lea64_r",
+        outs=[("dst", GR64)],
+        ins=[("src", AnyMem)],
+        patterns=[set_(("dst", GR64), ("src", lea64addr))]
+    )
 
     # mov8
-    MOV8rr = def_inst("mov8_rr",
-                      outs=[("dst", GR8)],
-                      ins=[("src", GR8)]
-                      )
+    MOV8ri = def_inst(
+        "mov8_ri",
+        outs=[("dst", GR8)],
+        ins=[("src", I8Imm)],
+        patterns=[set_(("dst", GR8), ("src", reloc_imm))]
+    )
 
-    MOV8mr = def_inst("mov8_mr",
-                      outs=[],
-                      ins=[("dst", I8Mem), ("src", GR8)]
-                      )
+    MOV8rr = def_inst(
+        "mov8_rr",
+        outs=[("dst", GR8)],
+        ins=[("src", GR8)]
+    )
 
-    MOV8rm = def_inst("mov8_rm",
-                      outs=[("dst", GR8)],
-                      ins=[("dst", I8Mem)]
-                      )
+    MOV8mr = def_inst(
+        "mov8_mr",
+        outs=[],
+        ins=[("dst", I8Mem), ("src", GR8)],
+        patterns=[store_(("src", GR8), ("dst", addr))]
+    )
+
+    MOV8rm = def_inst(
+        "mov8_rm",
+        outs=[("dst", GR8)],
+        ins=[("src", I8Mem)],
+        patterns=[set_(("dst", GR8), load_(("src", addr)))]
+    )
+
+    # mov16
+    MOV16ri = def_inst(
+        "mov16_ri",
+        outs=[("dst", GR16)],
+        ins=[("src", I16Imm)],
+        patterns=[set_(("dst", GR16), ("src", reloc_imm))]
+    )
+
+    MOV16rr = def_inst(
+        "mov16_rr",
+        outs=[("dst", GR16)],
+        ins=[("src", GR16)]
+    )
+
+    MOV16mi = def_inst(
+        "mov16_mi",
+        outs=[],
+        ins=[("dst", I16Mem), ("src", I16Imm)],
+        patterns=[store_(("src", reloc_imm16), ("dst", addr))]
+    )
+
+    MOV16mr = def_inst(
+        "mov16_mr",
+        outs=[],
+        ins=[("dst", I16Mem), ("src", GR16)],
+        patterns=[store_(("src", GR16), ("dst", addr))]
+    )
+
+    MOV16rm = def_inst(
+        "mov16_rm",
+        outs=[("dst", GR16)],
+        ins=[("src", I16Mem)],
+        patterns=[set_(("dst", GR16), load_(("src", addr)))]
+    )
 
     # mov32
-    MOV32ri = def_inst("mov32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src", I32Imm)],
-                       #    patterns=[set_(("dst", GR32), ("src", reloc_imm))]
-                       )
+    MOV32r0 = def_inst(
+        "mov32_r0",
+        outs=[("dst", GR32)],
+        ins=[]
+    )
 
-    MOV32rr = def_inst("mov32_rr",
-                       outs=[("dst", GR32)],
-                       ins=[("src", GR32)]
-                       )
+    MOV32ri = def_inst(
+        "mov32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src", I32Imm)],
+        patterns=[set_(("dst", GR32), ("src", reloc_imm))]
+    )
 
-    MOV32mi = def_inst("mov32_mi",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", I32Imm)],
-                       patterns=[store_(("src", reloc_imm32), ("dst", addr))]
-                       )
+    MOV32rr = def_inst(
+        "mov32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src", GR32)]
+    )
 
-    MOV32mr = def_inst("mov32_mr",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", GR32)],
-                       patterns=[store_(("src", GR32), ("dst", addr))]
-                       )
+    MOV32mi = def_inst(
+        "mov32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        patterns=[store_(("src", reloc_imm32), ("dst", addr))]
+    )
 
-    MOV32rm = def_inst("mov32_rm",
-                       outs=[("dst", GR32)],
-                       ins=[("src", I32Mem)],
-                       patterns=[set_(("dst", GR32), load_(("src", addr)))]
-                       )
+    MOV32mr = def_inst(
+        "mov32_mr",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", GR32)],
+        patterns=[store_(("src", GR32), ("dst", addr))]
+    )
+
+    MOV32rm = def_inst(
+        "mov32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src", I32Mem)],
+        patterns=[set_(("dst", GR32), load_(("src", addr)))]
+    )
 
     # mov64
-    MOV64rm = def_inst("mov64_rm",
-                       outs=[("dst", GR64)],
-                       ins=[("src", I64Mem)],
-                       patterns=[set_(("dst", GR64), load_(("src", addr)))]
-                       )
+    MOV64r0 = def_inst(
+        "mov64_r0",
+        outs=[("dst", GR64)],
+        ins=[]
+    )
 
-    MOV64ri = def_inst("mov64_ri",
-                       outs=[("dst", GR64)],
-                       ins=[("src", I64Imm)],
-                       #    patterns=[set_(("dst", GR64), ("src", reloc_imm))]
-                       )
+    MOV64rm = def_inst(
+        "mov64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src", I64Mem)],
+        patterns=[set_(("dst", GR64), load_(("src", addr)))]
+    )
 
-    MOV64rr = def_inst("mov64_rr",
-                       outs=[("dst", GR64)],
-                       ins=[("src", GR64)]
-                       )
+    MOV64ri = def_inst(
+        "mov64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src", I64Imm)],
+        patterns=[set_(("dst", GR64), ("src", reloc_imm))]
+    )
 
-    MOV64mi = def_inst("mov64_mi",
-                       outs=[],
-                       ins=[("dst", I64Mem), ("src", I64Imm)],
-                       patterns=[store_(("src", reloc_imm64), ("dst", addr))]
-                       )
+    MOV64rr = def_inst(
+        "mov64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src", GR64)]
+    )
 
-    MOV64mr = def_inst("mov64_mr",
-                       outs=[],
-                       ins=[("dst", I64Mem), ("src", GR64)],
-                       patterns=[store_(("src", GR64), ("dst", addr))]
-                       )
+    MOV64mi = def_inst(
+        "mov64_mi",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", I64Imm)],
+        patterns=[store_(("src", reloc_imm64), ("dst", addr))]
+    )
+
+    MOV64mr = def_inst(
+        "mov64_mr",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", GR64)],
+        patterns=[store_(("src", GR64), ("dst", addr))]
+    )
 
     # movss
-    MOVSSrr = def_inst("movss_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       constraints=[Constraint("dst", "src1")],
-                       patterns=[set_(("dst", VR128), x64movss_(
-                           ("src1", VR128), ("src2", VR128)))]
-                       )
+    MOVSSrr = def_inst(
+        "movss_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", VR128), x64movss_(
+            ("src1", VR128), ("src2", VR128)))]
+    )
 
-    MOVSSmi = def_inst("movss_mi",
-                       outs=[],
-                       ins=[("dst", F32Mem), ("src", F32Imm)],
-                       patterns=[store_(("src", reloc_immf32), ("dst", addr))]
-                       )
+    MOVSSmi = def_inst(
+        "movss_mi",
+        outs=[],
+        ins=[("dst", F32Mem), ("src", F32Imm)],
+        patterns=[store_(("src", reloc_immf32), ("dst", addr))]
+    )
 
-    MOVSSmr = def_inst("movss_mr",
-                       outs=[],
-                       ins=[("dst", F32Mem), ("src", FR32)],
-                       patterns=[store_(("src", FR32), ("dst", addr))]
-                       )
+    MOVSSmr = def_inst(
+        "movss_mr",
+        outs=[],
+        ins=[("dst", F32Mem), ("src", FR32)],
+        patterns=[store_(("src", FR32), ("dst", addr))]
+    )
 
-    MOVSSrm = def_inst("movss_rm",
-                       outs=[("dst", FR32)],
-                       ins=[("src", F32Mem)],
-                       patterns=[set_(("dst", FR32), load_(("src", addr)))]
-                       )
+    MOVSSrm = def_inst(
+        "movss_rm",
+        outs=[("dst", FR32)],
+        ins=[("src", F32Mem)],
+        patterns=[set_(("dst", FR32), load_(("src", addr)))]
+    )
 
-    VMOVSSrm = def_inst("movss_rm",
-                        outs=[("dst", VR128)],
-                        ins=[("src", F32Mem)],
-                        patterns=[set_(("dst", FR32), load_(("src", addr)))]
-                        )
+    VMOVSSrm = def_inst(
+        "movss_rm",
+        outs=[("dst", VR128)],
+        ins=[("src", F32Mem)],
+        patterns=[set_(("dst", FR32), load_(("src", addr)))]
+    )
 
     # movsd
-    MOVSDmi = def_inst("movsd_mi",
-                       outs=[],
-                       ins=[("dst", F64Mem), ("src", F64Imm)]
-                       )
+    MOVSDmi = def_inst(
+        "movsd_mi",
+        outs=[],
+        ins=[("dst", F64Mem), ("src", F64Imm)]
+    )
 
-    MOVSDmr = def_inst("movsd_mr",
-                       outs=[],
-                       ins=[("dst", F64Mem), ("src", FR64)],
-                       patterns=[store_(("src", FR64), ("dst", addr))]
-                       )
+    MOVSDmr = def_inst(
+        "movsd_mr",
+        outs=[],
+        ins=[("dst", F64Mem), ("src", FR64)],
+        patterns=[store_(("src", FR64), ("dst", addr))]
+    )
 
-    MOVSDrm = def_inst("movsd_rm",
-                       outs=[("dst", FR64)],
-                       ins=[("src", F64Mem)],
-                       patterns=[set_(("dst", FR64), load_(("src", addr)))]
-                       )
+    MOVSDrm = def_inst(
+        "movsd_rm",
+        outs=[("dst", FR64)],
+        ins=[("src", F64Mem)],
+        patterns=[set_(("dst", FR64), load_(("src", addr)))]
+    )
 
-    MOVSDrr = def_inst("movsd_rr",
-                       outs=[("dst", FR64)],
-                       ins=[("src1", FR64), ("src2", FR64)],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    MOVSDrr = def_inst(
+        "movsd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", FR64)],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # movaps
-    MOVAPSrr = def_inst("movaps_rr",
-                        outs=[("dst", VR128)],
-                        ins=[("src", VR128)]
-                        )
+    MOVAPSrr = def_inst(
+        "movaps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src", VR128)]
+    )
 
-    MOVAPSmr = def_inst("movaps_mr",
-                        outs=[],
-                        ins=[("dst", F128Mem), ("src", VR128)],
-                        # patterns=[store_(("src", VR128), ("dst", addr))]
-                        )
+    MOVAPSmr = def_inst(
+        "movaps_mr",
+        outs=[],
+        ins=[("dst", F128Mem), ("src", VR128)],
+        # patterns=[store_(("src", VR128), ("dst", addr))]
+    )
 
-    MOVAPSrm = def_inst("movaps_rm",
-                        outs=[("dst", VR128)],
-                        ins=[("src", F128Mem)],
-                        # patterns=[set_(("dst", VR128), load_(("src", addr)))]
-                        )
+    MOVAPSrm = def_inst(
+        "movaps_rm",
+        outs=[("dst", VR128)],
+        ins=[("src", F128Mem)],
+        # patterns=[set_(("dst", VR128), load_(("src", addr)))]
+    )
 
     # movups
-    MOVUPSmr = def_inst("movups_mr",
-                        outs=[],
-                        ins=[("dst", F128Mem), ("src", VR128)],
-                        patterns=[store_(("src", VR128), ("dst", addr))]
-                        )
+    MOVUPSmr = def_inst(
+        "movups_mr",
+        outs=[],
+        ins=[("dst", F128Mem), ("src", VR128)],
+        patterns=[store_(("src", VR128), ("dst", addr))]
+    )
 
-    MOVUPSrm = def_inst("movups_rm",
-                        outs=[("dst", VR128)],
-                        ins=[("src", F128Mem)],
-                        patterns=[set_(("dst", VR128), load_(("src", addr)))]
-                        )
+    MOVUPSrm = def_inst(
+        "movups_rm",
+        outs=[("dst", VR128)],
+        ins=[("src", F128Mem)],
+        patterns=[set_(("dst", VR128), load_(("src", addr)))]
+    )
+
+    # movq
+    MOVPQIto64rr = def_inst(
+        "movpqito64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src", VR128)]
+    )
+
+    # add16
+    ADD16rm = def_inst(
+        "add16_rm",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", I16Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR16), EFLAGS, add_(("src1", GR16), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    ADD16mi = def_inst(
+        "add16_mi",
+        outs=[],
+        ins=[("dst", I16Mem), ("src", I16Imm)],
+        defs=[EFLAGS]
+    )
+
+    ADD16ri = def_inst(
+        "add16_ri",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", I16Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR16), EFLAGS, add_(
+            ("src1", GR16), ("src2", reloc_imm16)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    ADD16rr = def_inst(
+        "add16_rr",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", GR16)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR16), EFLAGS, add_(
+            ("src1", GR16), ("src2", GR16)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # add32
-    ADD32rm = def_inst("add32_rm",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", GR32), EFLAGS, add_(("src1", GR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD32rm = def_inst(
+        "add32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, add_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADD32mi = def_inst("add32_mi",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", I32Imm)],
-                       defs=[EFLAGS]
-                       )
+    ADD32mi = def_inst(
+        "add32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        defs=[EFLAGS]
+    )
 
-    ADD32ri = def_inst("add32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Imm)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR32), EFLAGS, add_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD32ri = def_inst(
+        "add32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, add_(
+            ("src1", GR32), ("src2", reloc_imm32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADD32rr = def_inst("add32_rr",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", GR32)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR32), EFLAGS, add_(
-                           ("src1", GR32), ("src2", GR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD32rr = def_inst(
+        "add32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, add_(
+            ("src1", GR32), ("src2", GR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # add64
-    ADD64rm = def_inst("add64_rm",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", I64Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", GR64), EFLAGS, add_(("src1", GR64), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD64rm = def_inst(
+        "add64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR64), EFLAGS, add_(("src1", GR64), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADD64mi = def_inst("add64_mi",
-                       outs=[],
-                       ins=[("dst", I64Mem), ("src", I64Imm)],
-                       defs=[EFLAGS]
-                       )
+    ADD64mi = def_inst(
+        "add64_mi",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", I64Imm)],
+        defs=[EFLAGS]
+    )
 
-    ADD64ri = def_inst("add64_ri",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", I64Imm)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR64), EFLAGS, add_(
-                           ("src1", GR64), ("src2", reloc_imm64)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD64ri = def_inst(
+        "add64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, add_(
+            ("src1", GR64), ("src2", reloc_imm64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADD64rr = def_inst("add64_rr",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", GR64)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR64), EFLAGS, add_(
-                           ("src1", GR64), ("src2", GR64)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADD64rr = def_inst(
+        "add64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, add_(
+            ("src1", GR64), ("src2", GR64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # addss
-    ADDSSrm = def_inst("addss_rm",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", F32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", FR32), EFLAGS, fadd_(("src1", FR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADDSSrm = def_inst(
+        "addss_rm",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", F32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", FR32), EFLAGS, fadd_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADDSSrr = def_inst("addss_rr",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", FR32)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", FR32), EFLAGS, fadd_(
-                           ("src1", FR32), ("src2", FR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADDSSrr = def_inst(
+        "addss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", FR32)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", FR32), EFLAGS, fadd_(
+            ("src1", FR32), ("src2", FR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # addsd
-    ADDSDrm = def_inst("addsd_rm",
-                       outs=[("dst", FR64)],
-                       ins=[("src1", FR64), ("src2", F64Mem)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", FR64), EFLAGS, fadd_(
-                           ("src1", FR64), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADDSDrm = def_inst(
+        "addsd_rm",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", F64Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", FR64), EFLAGS, fadd_(
+        #     ("src1", FR64), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    ADDSDrr = def_inst("addsd_rr",
-                       outs=[("dst", FR64)],
-                       ins=[("src1", FR64), ("src2", FR64)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", FR64), EFLAGS, fadd_(
-                           ("src1", FR64), ("src2", FR64)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADDSDrr = def_inst(
+        "addsd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", FR64)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", FR64), EFLAGS, fadd_(
+            ("src1", FR64), ("src2", FR64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # addps
-    ADDPSrr = def_inst("addps_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       patterns=[set_(("dst", VR128), EFLAGS, fadd_(
-                           ("src1", VR128), ("src2", VR128)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    ADDPSrr = def_inst(
+        "addps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        patterns=[set_(("dst", VR128), EFLAGS, fadd_(
+            ("src1", VR128), ("src2", VR128)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # sub8
-    SUB8ri = def_inst("sub8_ri",
-                      outs=[("dst", GR8)],
-                      ins=[("src1", GR8), ("src2", I8Imm)],
-                      defs=[EFLAGS],
-                      patterns=[set_(("dst", GR8), EFLAGS, x64sub_(
-                          ("src1", GR8), ("src2", reloc_imm8)))],
-                      constraints=[Constraint("dst", "src1")],
-                      is_compare=True
-                      )
+    SUB8ri = def_inst(
+        "sub8_ri",
+        outs=[("dst", GR8)],
+        ins=[("src1", GR8), ("src2", I8Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR8), EFLAGS, x64sub_(
+            ("src1", GR8), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")],
+        is_compare=True
+    )
 
     # sub32
-    SUB32rm = def_inst("sub32_rm",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", GR32), EFLAGS, x64sub_(("src1", GR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")],
-                       is_compare=True
-                       )
+    SUB32rm = def_inst(
+        "sub32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, x64sub_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")],
+        is_compare=True
+    )
 
-    SUB32mi = def_inst("sub32_mi",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", I32Imm)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    SUB32mi = def_inst(
+        "sub32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    SUB32ri = def_inst("sub32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Imm)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")],
-                       patterns=[set_(("dst", GR32), EFLAGS, x64sub_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       is_compare=True
-                       )
+    SUB32ri = def_inst(
+        "sub32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR32), EFLAGS, x64sub_(
+            ("src1", GR32), ("src2", reloc_imm32)))],
+        is_compare=True
+    )
 
-    SUB32rr = def_inst("sub32_rr",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", GR32)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")],
-                       patterns=[set_(("dst", GR32), EFLAGS, x64sub_(
-                           ("src1", GR32), ("src2", GR32)))],
-                       is_compare=True
-                       )
+    SUB32rr = def_inst(
+        "sub32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR32), EFLAGS, x64sub_(
+            ("src1", GR32), ("src2", GR32)))],
+        is_compare=True
+    )
 
     # sub64
-    SUB64rm = def_inst("sub64_rm",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", I64Mem)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")],
-                       is_compare=True
-                       )
+    SUB64rm = def_inst(
+        "sub64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        is_compare=True
+    )
 
-    SUB64rr = def_inst("sub64_rr",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", GR64)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")],
-                       is_compare=True
-                       )
+    SUB64rr = def_inst(
+        "sub64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
+            ("src1", GR64), ("src2", GR64)))],
+        is_compare=True
+    )
 
-    SUB64mi = def_inst("sub64_mi",
-                       outs=[],
-                       ins=[("dst", I64Mem), ("src", I64Imm)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    SUB64mi = def_inst(
+        "sub64_mi",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", I64Imm)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    SUB64ri = def_inst("sub64_ri",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", I64Imm)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
-                           ("src1", GR64), ("src2", reloc_imm64)))],
-                       constraints=[Constraint("dst", "src1")],
-                       is_compare=True
-                       )
+    SUB64ri = def_inst(
+        "sub64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
+            ("src1", GR64), ("src2", reloc_imm64)))],
+        constraints=[Constraint("dst", "src1")],
+        is_compare=True
+    )
 
     # subss
-    SUBSSrm = def_inst("subss_rm",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", F32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", FR32), EFLAGS, fsub_(("src1", FR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SUBSSrm = def_inst(
+        "subss_rm",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", F32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", FR32), EFLAGS, fsub_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    SUBSSrr = def_inst("subss_rr",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", FR32)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", FR32), EFLAGS, fsub_(
-                           ("src1", FR32), ("src2", FR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SUBSSrr = def_inst(
+        "subss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", FR32)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", FR32), EFLAGS, fsub_(
+            ("src1", FR32), ("src2", FR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # subsd
-    SUBSDrm = def_inst("subsd_rm",
-                       outs=[("dst", FR64)],
-                       ins=[("src1", FR64), ("src2", F64Mem)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SUBSDrm = def_inst(
+        "subsd_rm",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", F64Mem)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    SUBSDrr = def_inst("subsd_rr",
-                       outs=[("dst", FR64)],
-                       ins=[("src1", FR64), ("src2", FR64)],
-                       defs=[EFLAGS],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SUBSDrr = def_inst(
+        "subsd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", FR64)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", FR64), EFLAGS, fsub_(
+            ("src1", FR64), ("src2", FR64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # subps
-    SUBPSrr = def_inst("subps_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       patterns=[set_(("dst", VR128), EFLAGS, fsub_(
-                           ("src1", VR128), ("src2", VR128)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SUBPSrr = def_inst(
+        "subps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        patterns=[set_(("dst", VR128), EFLAGS, fsub_(
+            ("src1", VR128), ("src2", VR128)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # imul16
+    IMUL16rm = def_inst(
+        "imul16_rm",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", I16Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR16), EFLAGS, x64mul_(("src1", GR16), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    IMUL16rr = def_inst(
+        "imul16_rr",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", GR16)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR16), EFLAGS, mul_(
+            ("src1", GR16), ("src2", GR16)))]
+    )
+
+    # imul32
+    IMUL32rm = def_inst(
+        "imul32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, x64mul_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    IMUL32rr = def_inst(
+        "imul32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR32), EFLAGS, mul_(
+            ("src1", GR32), ("src2", GR32)))]
+    )
+
+    # imul64
+    IMUL64rm = def_inst(
+        "imul64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    IMUL64rr = def_inst(
+        "imul64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR64), EFLAGS, mul_(
+            ("src1", GR64), ("src2", GR64)))]
+    )
+
+    # mul32
+    MUL64r = def_inst(
+        "mul32_r",
+        outs=[],
+        ins=[("src", GR32)],
+        defs=[EAX, EDX, EFLAGS],
+        uses=[EAX]
+    )
+
+    # mul64
+    MUL64r = def_inst(
+        "mul64_r",
+        outs=[],
+        ins=[("src", GR64)],
+        defs=[RAX, RDX, EFLAGS],
+        uses=[RAX]
+    )
 
     # mulss
-    MULSSrm = def_inst("mulss_rm",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", F32Mem)],
-                       # patterns=[set_(("dst", FR32), EFLAGS, fmul_(("src1", FR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    MULSSrm = def_inst(
+        "mulss_rm",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", F32Mem)],
+        # patterns=[set_(("dst", FR32), EFLAGS, fmul_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    MULSSrr = def_inst("mulss_rr",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", FR32)],
-                       patterns=[set_(("dst", FR32), EFLAGS, fmul_(
-                           ("src1", FR32), ("src2", FR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    MULSSrr = def_inst(
+        "mulss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", FR32)],
+        patterns=[set_(("dst", FR32), EFLAGS, fmul_(
+            ("src1", FR32), ("src2", FR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # mulsd
+    MULSDrm = def_inst(
+        "mulsd_rm",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", F64Mem)],
+        # patterns=[set_(("dst", FR32), EFLAGS, fmul_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    MULSDrr = def_inst(
+        "mulsd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", FR64)],
+        patterns=[set_(("dst", FR64), EFLAGS, fmul_(
+            ("src1", FR64), ("src2", FR64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # mulps
-    MULPSrm = def_inst("mulps_rm",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", F128Mem)],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    MULPSrm = def_inst(
+        "mulps_rm",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", F128Mem)],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    MULPSrr = def_inst("mulps_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       patterns=[set_(("dst", VR128), EFLAGS, fmul_(
-                           ("src1", VR128), ("src2", VR128)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    MULPSrr = def_inst(
+        "mulps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        patterns=[set_(("dst", VR128), EFLAGS, fmul_(
+            ("src1", VR128), ("src2", VR128)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # idiv8
+    IDIV8r = def_inst(
+        "idiv8_r",
+        outs=[],
+        ins=[("src", GR8)],
+        defs=[AL, AH, EFLAGS],
+        uses=[AX]
+    )
+
+    # idiv16
+    IDIV16r = def_inst(
+        "idiv16_r",
+        outs=[],
+        ins=[("src", GR16)],
+        defs=[AX, DX, EFLAGS],
+        uses=[AX, DX]
+    )
+
+    # idiv32
+    IDIV32r = def_inst(
+        "idiv32_r",
+        outs=[],
+        ins=[("src", GR32)],
+        defs=[EAX, EDX, EFLAGS],
+        uses=[EAX, EDX]
+    )
+
+    # idiv64
+    IDIV64r = def_inst(
+        "idiv64_r",
+        outs=[],
+        ins=[("src", GR64)],
+        defs=[RAX, RDX, EFLAGS],
+        uses=[RAX, RDX]
+    )
+
+    # div8
+    DIV8r = def_inst(
+        "div8_r",
+        outs=[],
+        ins=[("src", GR8)],
+        defs=[AL, AH, EFLAGS],
+        uses=[AX]
+    )
+
+    # div16
+    DIV16r = def_inst(
+        "div16_r",
+        outs=[],
+        ins=[("src", GR16)],
+        defs=[AX, DX, EFLAGS],
+        uses=[AX, DX]
+    )
+
+    # div32
+    DIV32r = def_inst(
+        "div32_r",
+        outs=[],
+        ins=[("src", GR32)],
+        defs=[EAX, EDX, EFLAGS],
+        uses=[EAX, EDX]
+    )
+
+    # div64
+    DIV64r = def_inst(
+        "div64_r",
+        outs=[],
+        ins=[("src", GR64)],
+        defs=[RAX, RDX, EFLAGS],
+        uses=[RAX, RDX]
+    )
 
     # divss
-    DIVSSrm = def_inst("divss_rm",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", F32Mem)],
-                       # patterns=[set_(("dst", FR32), EFLAGS, fdiv_(("src1", FR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    DIVSSrm = def_inst(
+        "divss_rm",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", F32Mem)],
+        # patterns=[set_(("dst", FR32), EFLAGS, fdiv_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    DIVSSrr = def_inst("divss_rr",
-                       outs=[("dst", FR32)],
-                       ins=[("src1", FR32), ("src2", FR32)],
-                       patterns=[set_(("dst", FR32), EFLAGS, fdiv_(
-                           ("src1", FR32), ("src2", FR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    DIVSSrr = def_inst(
+        "divss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src1", FR32), ("src2", FR32)],
+        patterns=[set_(("dst", FR32), EFLAGS, fdiv_(
+            ("src1", FR32), ("src2", FR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # divsd
+    DIVSDrm = def_inst(
+        "divsd_rm",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", F64Mem)],
+        # patterns=[set_(("dst", FR32), EFLAGS, fdiv_(("src1", FR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    DIVSDrr = def_inst(
+        "divsd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src1", FR64), ("src2", FR64)],
+        patterns=[set_(("dst", FR64), EFLAGS, fdiv_(
+            ("src1", FR64), ("src2", FR64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # divps
-    DIVPSrm = def_inst("divps_rm",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", F128Mem)],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    DIVPSrm = def_inst(
+        "divps_rm",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", F128Mem)],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    DIVPSrr = def_inst("divps_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       patterns=[set_(("dst", VR128), EFLAGS, fdiv_(
-                           ("src1", VR128), ("src2", VR128)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    DIVPSrr = def_inst(
+        "divps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        patterns=[set_(("dst", VR128), EFLAGS, fdiv_(
+            ("src1", VR128), ("src2", VR128)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # and8
-    AND8rr = def_inst("and8_rr",
-                      outs=[("dst", GR8)],
-                      ins=[("src1", GR8), ("src2", GR8)],
-                      defs=[EFLAGS],
-                      patterns=[set_(("dst", GR8), EFLAGS, and_(
-                          ("src1", GR8), ("src2", GR8)))],
-                      constraints=[Constraint("dst", "src1")]
-                      )
+    AND8rr = def_inst(
+        "and8_rr",
+        outs=[("dst", GR8)],
+        ins=[("src1", GR8), ("src2", GR8)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR8), EFLAGS, and_(
+            ("src1", GR8), ("src2", GR8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # and32
-    AND32rm = def_inst("and32_rm",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", GR32), EFLAGS, and_(("src1", GR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    AND32rm = def_inst(
+        "and32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, and_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    AND32mi = def_inst("and32_mi",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", I32Imm)],
-                       defs=[EFLAGS]
-                       )
+    AND32mi = def_inst(
+        "and32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        defs=[EFLAGS]
+    )
 
-    AND32ri = def_inst("and32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Imm)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR32), EFLAGS, and_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    AND32ri = def_inst(
+        "and32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, and_(
+            ("src1", GR32), ("src2", reloc_imm32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    AND32rr = def_inst("and32_rr",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", GR32)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR32), EFLAGS, and_(
-                           ("src1", GR32), ("src2", GR32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    AND32rr = def_inst(
+        "and32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, and_(
+            ("src1", GR32), ("src2", GR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # or8
-    OR8rr = def_inst("or8_rr",
-                     outs=[("dst", GR8)],
-                     ins=[("src1", GR8), ("src2", GR8)],
-                     defs=[EFLAGS],
-                     patterns=[set_(("dst", GR8), EFLAGS, or_(
-                         ("src1", GR8), ("src2", GR8)))],
-                     constraints=[Constraint("dst", "src1")]
-                     )
+    OR8rr = def_inst(
+        "or8_rr",
+        outs=[("dst", GR8)],
+        ins=[("src1", GR8), ("src2", GR8)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR8), EFLAGS, or_(
+            ("src1", GR8), ("src2", GR8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # or32
-    OR32rm = def_inst("or32_rm",
-                      outs=[("dst", GR32)],
-                      ins=[("src1", GR32), ("src2", I32Mem)],
-                      defs=[EFLAGS],
-                      # patterns=[set_(("dst", GR32), EFLAGS, or_(("src1", GR32), ("src2", addr)))],
-                      constraints=[Constraint("dst", "src1")]
-                      )
+    OR32rm = def_inst(
+        "or32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, or_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    OR32mi = def_inst("or32_mi",
-                      outs=[],
-                      ins=[("dst", I32Mem), ("src", I32Imm)],
-                      defs=[EFLAGS]
-                      )
+    OR32mi = def_inst(
+        "or32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        defs=[EFLAGS]
+    )
 
-    OR32ri = def_inst("or32_ri",
-                      outs=[("dst", GR32)],
-                      ins=[("src1", GR32), ("src2", I32Imm)],
-                      defs=[EFLAGS],
-                      patterns=[set_(("dst", GR32), EFLAGS, or_(
-                          ("src1", GR32), ("src2", reloc_imm32)))],
-                      constraints=[Constraint("dst", "src1")]
-                      )
+    OR32ri = def_inst(
+        "or32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, or_(
+            ("src1", GR32), ("src2", reloc_imm32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    OR32rr = def_inst("or32_rr",
-                      outs=[("dst", GR32)],
-                      ins=[("src1", GR32), ("src2", GR32)],
-                      defs=[EFLAGS],
-                      patterns=[set_(("dst", GR32), EFLAGS, or_(
-                          ("src1", GR32), ("src2", GR32)))],
-                      constraints=[Constraint("dst", "src1")]
-                      )
+    OR32rr = def_inst(
+        "or32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, or_(
+            ("src1", GR32), ("src2", GR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # xor8
+    XOR8ri = def_inst(
+        "xor8_ri",
+        outs=[("dst", GR8)],
+        ins=[("src1", GR8), ("src2", I8Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR8), EFLAGS, xor_(
+            ("src1", GR8), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    XOR8rr = def_inst(
+        "xor8_rr",
+        outs=[("dst", GR8)],
+        ins=[("src1", GR8), ("src2", GR8)],
+        patterns=[set_(("dst", GR8), EFLAGS, xor_(
+            ("src1", GR8), ("src2", GR8)))],
+        defs=[EFLAGS], constraints=[Constraint("dst", "src1")]
+    )
+
+    # xor16
+    XOR16ri = def_inst(
+        "xor16_ri",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", I16Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR16), EFLAGS, xor_(
+            ("src1", GR16), ("src2", reloc_imm16)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    XOR16rr = def_inst(
+        "xor16_rr",
+        outs=[("dst", GR16)],
+        ins=[("src1", GR16), ("src2", GR16)],
+        patterns=[set_(("dst", GR16), EFLAGS, xor_(
+            ("src1", GR16), ("src2", GR16)))],
+        defs=[EFLAGS], constraints=[Constraint("dst", "src1")]
+    )
 
     # xor32
-    XOR32rm = def_inst("xor32_rm",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Mem)],
-                       defs=[EFLAGS],
-                       # patterns=[set_(("dst", GR32), EFLAGS, xor_(("src1", GR32), ("src2", addr)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    XOR32rm = def_inst(
+        "xor32_rm",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR32), EFLAGS, xor_(("src1", GR32), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    XOR32mi = def_inst("xor32_mi",
-                       outs=[],
-                       ins=[("dst", I32Mem), ("src", I32Imm)],
-                       defs=[EFLAGS]
-                       )
+    XOR32mi = def_inst(
+        "xor32_mi",
+        outs=[],
+        ins=[("dst", I32Mem), ("src", I32Imm)],
+        defs=[EFLAGS]
+    )
 
-    XOR32ri = def_inst("xor32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I32Imm)],
-                       defs=[EFLAGS],
-                       patterns=[set_(("dst", GR32), EFLAGS, xor_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    XOR32ri = def_inst(
+        "xor32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR32), EFLAGS, xor_(
+            ("src1", GR32), ("src2", reloc_imm32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    XOR32rr = def_inst("xor32_rr",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", GR32)],
-                       patterns=[set_(("dst", GR32), EFLAGS, xor_(
-                           ("src1", GR32), ("src2", GR32)))],
-                       defs=[EFLAGS], constraints=[Constraint("dst", "src1")]
-                       )
+    XOR32rr = def_inst(
+        "xor32_rr",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", GR32)],
+        patterns=[set_(("dst", GR32), EFLAGS, xor_(
+            ("src1", GR32), ("src2", GR32)))],
+        defs=[EFLAGS], constraints=[Constraint("dst", "src1")]
+    )
+
+    # xor64
+    XOR64ri = def_inst(
+        "xor64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, xor_(
+            ("src1", GR64), ("src2", reloc_imm64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    XOR64rr = def_inst(
+        "xor64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        patterns=[set_(("dst", GR64), EFLAGS, xor_(
+            ("src1", GR64), ("src2", GR64)))],
+        defs=[EFLAGS], constraints=[Constraint("dst", "src1")]
+    )
 
     # xorps
-    XORPSrr = def_inst("xorps_rr",
-                       outs=[("dst", VR128)],
-                       ins=[("src1", VR128), ("src2", VR128)],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    XORPSrr = def_inst(
+        "xorps_rr",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128)],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # shr32
-    SHR32ri = def_inst("shr32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I8Imm)],
-                       patterns=[set_(("dst", GR32), srl_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SHR32ri = def_inst(
+        "shr32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR32), srl_(
+            ("src1", GR32), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    SHR32rCL = def_inst("shr32_rcl",
-                        outs=[("dst", GR32)],
-                        ins=[("src", GR32)],
-                        uses=[CL],
-                        patterns=[
-                            set_(("dst", GR32), srl_(("src", GR32), CL))],
-                        constraints=[Constraint("dst", "src")]
-                        )
+    SHR32rCL = def_inst(
+        "shr32_rcl",
+        outs=[("dst", GR32)],
+        ins=[("src", GR32)],
+        uses=[CL],
+        # patterns=[
+        #     set_(("dst", GR32), srl_(("src", GR32), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
+
+    # shr64
+    SHR64ri = def_inst(
+        "shr64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR64), srl_(
+            ("src1", GR64), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    SHR64rCL = def_inst(
+        "shr64_rcl",
+        outs=[("dst", GR64)],
+        ins=[("src", GR64)],
+        uses=[CL],
+        # patterns=[
+        #     set_(("dst", GR64), srl_(("src", GR64), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
 
     # sar32
-    SAR32ri = def_inst("sar32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I8Imm)],
-                       patterns=[set_(("dst", GR32), sra_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SAR32ri = def_inst(
+        "sar32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR32), sra_(
+            ("src1", GR32), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    SAR32rCL = def_inst("sar32_rcl",
-                        outs=[("dst", GR32)],
-                        ins=[("src", GR32)],
-                        uses=[CL],
-                        patterns=[
-                            set_(("dst", GR32), sra_(("src", GR32), CL))],
-                        constraints=[Constraint("dst", "src")]
-                        )
+    SAR32rCL = def_inst(
+        "sar32_rcl",
+        outs=[("dst", GR32)],
+        ins=[("src", GR32)],
+        uses=[CL],
+        # patterns=[
+        #     set_(("dst", GR32), sra_(("src", GR32), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
+
+    # sar64
+    SAR64ri = def_inst(
+        "sar64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR64), sra_(
+            ("src1", GR64), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    SAR64rCL = def_inst(
+        "sar64_rcl",
+        outs=[("dst", GR64)],
+        ins=[("src", GR64)],
+        uses=[CL],
+        # patterns=[
+        #     set_(("dst", GR64), sra_(("src", GR64), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
 
     # shl32
-    SHL32ri = def_inst("shl32_ri",
-                       outs=[("dst", GR32)],
-                       ins=[("src1", GR32), ("src2", I8Imm)],
-                       patterns=[set_(("dst", GR32), shl_(
-                           ("src1", GR32), ("src2", reloc_imm32)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SHL32ri = def_inst(
+        "shl32_ri",
+        outs=[("dst", GR32)],
+        ins=[("src1", GR32), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR32), shl_(
+            ("src1", GR32), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
-    SHL32rCL = def_inst("shl32_rcl",
-                        outs=[("dst", GR32)],
-                        ins=[("src", GR32)],
-                        uses=[CL],
-                        patterns=[
-                            set_(("dst", GR32), shl_(("src", GR32), CL))],
-                        constraints=[Constraint("dst", "src")]
-                        )
+    SHL32rCL = def_inst(
+        "shl32_rcl",
+        outs=[("dst", GR32)],
+        ins=[("src", GR32)],
+        uses=[CL],
+        # patterns=[
+        #     set_(("dst", GR32), shl_(("src", GR32), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
 
     # shl64
-    SHL64ri = def_inst("shl64_ri",
-                       outs=[("dst", GR64)],
-                       ins=[("src1", GR64), ("src2", I8Imm)],
-                       patterns=[set_(("dst", GR64), shl_(
-                           ("src1", GR64), ("src2", reloc_imm8)))],
-                       constraints=[Constraint("dst", "src1")]
-                       )
+    SHL64ri = def_inst(
+        "shl64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I8Imm)],
+        patterns=[set_(("dst", GR64), shl_(
+            ("src1", GR64), ("src2", reloc_imm8)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    SHL64rCL = def_inst(
+        "shl64_rcl",
+        outs=[("dst", GR64)],
+        ins=[("src", GR64)],
+        uses=[CL],
+        # patterns=[set_(("dst", GR64), shl_(("src", GR64), CL))],
+        constraints=[Constraint("dst", "src")]
+    )
 
     # shufps
-    SHUFPSrri = def_inst("shufps_rri",
-                         outs=[("dst", VR128)],
-                         ins=[("src1", VR128), ("src2", VR128), ("src3", I8Imm)],
-                         patterns=[set_(("dst", VR128), x64shufp_(
-                             ("src1", VR128), ("src2", VR128), ("src3", timm)))],
-                         constraints=[Constraint("dst", "src1")]
-                         )
+    SHUFPSrri = def_inst(
+        "shufps_rri",
+        outs=[("dst", VR128)],
+        ins=[("src1", VR128), ("src2", VR128), ("src3", I8Imm)],
+        patterns=[set_(("dst", VR128), x64shufp_(
+            ("src1", VR128), ("src2", VR128), ("src3", timm)))],
+        constraints=[Constraint("dst", "src1")]
+    )
 
     # cmp8
-    CMP8ri = def_inst("cmp8_ri",
-                      outs=[],
-                      ins=[("src1", GR8), ("src2", I8Imm)],
-                      defs=[EFLAGS],
-                      patterns=[set_(EFLAGS, x64cmp_(
-                          ("src1", GR8), ("src2", reloc_imm8)))],
-                      is_compare=True
-                      )
+    CMP8ri = def_inst(
+        "cmp8_ri",
+        outs=[],
+        ins=[("src1", GR8), ("src2", I8Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(EFLAGS, x64cmp_(
+            ("src1", GR8), ("src2", reloc_imm8)))],
+        is_compare=True
+    )
 
     # cmp32
-    CMP32rm = def_inst("cmp32_rm",
-                       outs=[],
-                       ins=[("src1", GR32), ("src2", I32Mem)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP32rm = def_inst(
+        "cmp32_rm",
+        outs=[],
+        ins=[("src1", GR32), ("src2", I32Mem)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    CMP32rr = def_inst("cmp32_rr",
-                       outs=[],
-                       ins=[("src1", GR32), ("src2", GR32)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP32rr = def_inst(
+        "cmp32_rr",
+        outs=[],
+        ins=[("src1", GR32), ("src2", GR32)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    CMP32ri = def_inst("cmp32_ri",
-                       outs=[],
-                       ins=[("src1", GR32), ("src2", I32Imm)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP32ri = def_inst(
+        "cmp32_ri",
+        outs=[],
+        ins=[("src1", GR32), ("src2", I32Imm)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
     # cmp64
-    CMP64rm = def_inst("cmp64_rm",
-                       outs=[],
-                       ins=[("src1", GR64), ("src2", I64Mem)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP64rm = def_inst(
+        "cmp64_rm",
+        outs=[],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    CMP64rr = def_inst("cmp64_rr",
-                       outs=[],
-                       ins=[("src1", GR64), ("src2", GR64)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP64rr = def_inst(
+        "cmp64_rr",
+        outs=[],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
-    CMP64ri = def_inst("cmp64_ri",
-                       outs=[],
-                       ins=[("src1", GR64), ("src2", I64Imm)],
-                       defs=[EFLAGS],
-                       is_compare=True
-                       )
+    CMP64ri = def_inst(
+        "cmp64_ri",
+        outs=[],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        is_compare=True
+    )
 
     # ucomiss
-    UCOMISSrr = def_inst("ucomiss_rr",
-                         outs=[],
-                         ins=[("src1", FR32), ("src2", FR32)],
-                         defs=[EFLAGS],
-                         patterns=[set_(EFLAGS, x64cmp_(
-                             ("src1", FR32), ("src2", FR32)))],
-                         is_compare=True
-                         )
+    UCOMISSrr = def_inst(
+        "ucomiss_rr",
+        outs=[],
+        ins=[("src1", FR32), ("src2", FR32)],
+        defs=[EFLAGS],
+        patterns=[set_(EFLAGS, x64cmp_(
+            ("src1", FR32), ("src2", FR32)))],
+        is_compare=True
+    )
 
     # ucomisd
-    UCOMISDrr = def_inst("ucomisd_rr",
-                         outs=[],
-                         ins=[("src1", FR64), ("src2", FR64)],
-                         defs=[EFLAGS],
-                         patterns=[set_(EFLAGS, x64cmp_(
-                             ("src1", FR64), ("src2", FR64)))],
-                         is_compare=True
-                         )
+    UCOMISDrr = def_inst(
+        "ucomisd_rr",
+        outs=[],
+        ins=[("src1", FR64), ("src2", FR64)],
+        defs=[EFLAGS],
+        patterns=[set_(EFLAGS, x64cmp_(
+            ("src1", FR64), ("src2", FR64)))],
+        is_compare=True
+    )
+
+    # cvtsd2ss
+    CVTSD2SSrr = def_inst(
+        "cvtsd2ss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src", FR64)],
+        patterns=[set_(("dst", FR32), fp_round_(
+            ("src", FR64)))]
+    )
+
+    # cvtss2sd
+    CVTSS2SDrr = def_inst(
+        "cvtss2sd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src", FR32)],
+        patterns=[set_(("dst", FR64), fp_extend_(
+            ("src", FR32)))]
+    )
+
+    # cvttss2si
+    CVTTSS2SIrr = def_inst(
+        "cvttss2si_rr",
+        outs=[("dst", GR32)],
+        ins=[("src", FR32)],
+        patterns=[set_(("dst", GR32), fp_to_sint_(
+            ("src", FR32)))]
+    )
+    CVTTSS2SI64rr = def_inst(
+        "cvttss2si64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src", FR32)],
+        patterns=[set_(("dst", GR64), fp_to_sint_(
+            ("src", FR32)))]
+    )
+
+    # cvttsd2si
+    CVTTSD2SIrr = def_inst(
+        "cvttsd2si_rr",
+        outs=[("dst", GR32)],
+        ins=[("src", FR64)],
+        patterns=[set_(("dst", GR32), fp_to_sint_(
+            ("src", FR64)))]
+    )
+    CVTTSD2SI64rr = def_inst(
+        "cvttsd2si64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src", FR64)],
+        patterns=[set_(("dst", GR64), fp_to_sint_(
+            ("src", FR64)))]
+    )
+
+    # cvtsi2ss
+    CVTSI2SSrr = def_inst(
+        "cvtsi2ss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src", GR32)],
+        patterns=[set_(("dst", FR32), sint_to_fp_(
+            ("src", GR32)))]
+    )
+    CVTSI642SSrr = def_inst(
+        "cvtsi642ss_rr",
+        outs=[("dst", FR32)],
+        ins=[("src", GR64)],
+        patterns=[set_(("dst", FR32), sint_to_fp_(
+            ("src", GR64)))]
+    )
+
+    # cvtsi2sd
+    CVTSI2SDrr = def_inst(
+        "cvtsi2sd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src", GR32)],
+        patterns=[set_(("dst", FR64), sint_to_fp_(
+            ("src", GR32)))]
+    )
+    CVTSI642SDrr = def_inst(
+        "cvtsi642sd_rr",
+        outs=[("dst", FR64)],
+        ins=[("src", GR64)],
+        patterns=[set_(("dst", FR64), sint_to_fp_(
+            ("src", GR64)))]
+    )
+
+    # movsx
+    MOVSX32rr8 = def_inst(
+        "movsx32_rr8",
+        outs=[("dst", GR32)],
+        ins=[("src", GR8)],
+        patterns=[set_(("dst", GR32), sext_(("src", GR8)))]
+    )
+
+    MOVSX32rr16 = def_inst(
+        "movsx32_rr16",
+        outs=[("dst", GR32)],
+        ins=[("src", GR16)],
+        patterns=[set_(("dst", GR32), sext_(("src", GR16)))]
+    )
+
+    MOVSX64rr32 = def_inst(
+        "movsx64_rr32",
+        outs=[("dst", GR64)],
+        ins=[("src", GR32)],
+        patterns=[set_(("dst", GR64), sext_(("src", GR32)))]
+    )
+
+    # movzx
+    MOVZX16rr8 = def_inst(
+        "movzx16_rr8",
+        outs=[("dst", GR16)],
+        ins=[("src", GR8)],
+        patterns=[set_(("dst", GR16), zext_(("src", GR8)))]
+    )
+
+    MOVZX32rr8 = def_inst(
+        "movzx32_rr8",
+        outs=[("dst", GR32)],
+        ins=[("src", GR8)],
+        patterns=[set_(("dst", GR32), zext_(("src", GR8)))]
+    )
+
+    MOVZX32rr16 = def_inst(
+        "movzx32_rr16",
+        outs=[("dst", GR32)],
+        ins=[("src", GR16)],
+        patterns=[set_(("dst", GR32), zext_(("src", GR16)))]
+    )
+
+    MOVZX64rr8 = def_inst(
+        "movzx64_rr8",
+        outs=[("dst", GR64)],
+        ins=[("src", GR8)],
+        patterns=[set_(("dst", GR64), zext_(("src", GR8)))]
+    )
+
+    MOVZX64rr16 = def_inst(
+        "movzx64_rr16",
+        outs=[("dst", GR64)],
+        ins=[("src", GR16)],
+        patterns=[set_(("dst", GR64), zext_(("src", GR16)))]
+    )
+
+    # convert byte to word
+    CBW = def_inst(
+        "cbw",
+        outs=[],
+        ins=[],
+        defs=[AX],
+        uses=[AL]
+    )
+
+    # convert word to double word
+    CWDE = def_inst(
+        "cwde",
+        outs=[],
+        ins=[],
+        defs=[EAX],
+        uses=[AX]
+    )
+
+    # convert double word to quad word
+    CDQE = def_inst(
+        "cdqe",
+        outs=[],
+        ins=[],
+        defs=[RAX],
+        uses=[EAX]
+    )
+
+    # convert word to double word
+    CWD = def_inst(
+        "cwd",
+        outs=[],
+        ins=[],
+        defs=[AX, DX],
+        uses=[AX]
+    )
+
+    # convert double word to quad word
+    CDQ = def_inst(
+        "cdq",
+        outs=[],
+        ins=[],
+        defs=[EAX, EDX],
+        uses=[EAX]
+    )
+
+    # convert quad word to octet word
+    CQO = def_inst(
+        "cqo",
+        outs=[],
+        ins=[],
+        defs=[RAX, RDX],
+        uses=[RAX]
+    )
 
     # jcc
-    JCC_1 = def_inst("jcc",
-                     outs=[],
-                     ins=[("dst", BrTarget8), ("cond", I32Imm)],
-                     uses=[EFLAGS],
-                     patterns=[x64brcond_(
-                         ("dst", bb), ("cond", timm), EFLAGS)],
-                     is_terminator=True
-                     )
+    JCC_1 = def_inst(
+        "jcc",
+        outs=[],
+        ins=[("dst", BrTarget8), ("cond", I32Imm)],
+        uses=[EFLAGS],
+        patterns=[x64brcond_(
+            ("dst", bb), ("cond", timm), EFLAGS)],
+        is_terminator=True
+    )
 
-    JCC_2 = def_inst("jcc",
-                     outs=[],
-                     ins=[("dst", BrTarget16), ("cond", I32Imm)],
-                     uses=[EFLAGS],
-                     is_terminator=True
-                     )
+    JCC_2 = def_inst(
+        "jcc",
+        outs=[],
+        ins=[("dst", BrTarget16), ("cond", I32Imm)],
+        uses=[EFLAGS],
+        is_terminator=True
+    )
 
-    JCC_4 = def_inst("jcc",
-                     outs=[],
-                     ins=[("dst", BrTarget32), ("cond", I32Imm)],
-                     uses=[EFLAGS],
-                     is_terminator=True
-                     )
+    JCC_4 = def_inst(
+        "jcc",
+        outs=[],
+        ins=[("dst", BrTarget32), ("cond", I32Imm)],
+        uses=[EFLAGS],
+        is_terminator=True
+    )
 
     # jmp
-    JMP_1 = def_inst("jmp",
-                     outs=[],
-                     ins=[("dst", BrTarget8)],
-                     patterns=[br_(("dst", bb))],
-                     is_terminator=True
-                     )
+    JMP_1 = def_inst(
+        "jmp",
+        outs=[],
+        ins=[("dst", BrTarget8)],
+        patterns=[br_(("dst", bb))],
+        is_terminator=True
+    )
 
-    JMP_2 = def_inst("jmp",
-                     outs=[],
-                     ins=[("dst", BrTarget16)],
-                     is_terminator=True
-                     )
+    JMP_2 = def_inst(
+        "jmp",
+        outs=[],
+        ins=[("dst", BrTarget16)],
+        is_terminator=True
+    )
 
-    JMP_4 = def_inst("jmp",
-                     outs=[],
-                     ins=[("dst", BrTarget32)],
-                     is_terminator=True
-                     )
+    JMP_4 = def_inst(
+        "jmp",
+        outs=[],
+        ins=[("dst", BrTarget32)],
+        is_terminator=True
+    )
 
     # setcc
-    SETCCr = def_inst("setcc_r",
-                      outs=[("dst", GR8)],
-                      ins=[("cond", I32Imm)],
-                      uses=[EFLAGS],
-                      patterns=[
-                          set_(("dst", GR8), x64setcc_(("cond", timm), EFLAGS))]
-                      )
+    SETCCr = def_inst(
+        "setcc_r",
+        outs=[("dst", GR8)],
+        ins=[("cond", I32Imm)],
+        uses=[EFLAGS],
+        patterns=[
+            set_(("dst", GR8), x64setcc_(("cond", timm), EFLAGS))]
+    )
 
     # push
-    PUSH32r = def_inst("push32_r",
-                       outs=[],
-                       ins=[("src", GR32)],
-                       uses=[ESP],
-                       defs=[ESP]
-                       )
+    PUSH32r = def_inst(
+        "push32_r",
+        outs=[],
+        ins=[("src", GR32)],
+        uses=[ESP],
+        defs=[ESP]
+    )
 
-    PUSH64r = def_inst("push64_r",
-                       outs=[],
-                       ins=[("src", GR64)],
-                       uses=[RSP],
-                       defs=[RSP]
-                       )
+    PUSH64r = def_inst(
+        "push64_r",
+        outs=[],
+        ins=[("src", GR64)],
+        uses=[RSP],
+        defs=[RSP]
+    )
 
     # pop
-    POP32r = def_inst("pop32_r",
-                      outs=[],
-                      ins=[("dst", GR32)],
-                      uses=[ESP],
-                      defs=[ESP]
-                      )
+    POP32r = def_inst(
+        "pop32_r",
+        outs=[],
+        ins=[("dst", GR32)],
+        uses=[ESP],
+        defs=[ESP]
+    )
 
-    POP64r = def_inst("pop64_r",
-                      outs=[],
-                      ins=[("dst", GR64)],
-                      uses=[RSP],
-                      defs=[RSP]
-                      )
+    POP64r = def_inst(
+        "pop64_r",
+        outs=[],
+        ins=[("dst", GR64)],
+        uses=[RSP],
+        defs=[RSP]
+    )
 
-    V_SET0 = def_inst("v_set0",
-                      outs=[("dst", VR128)],
-                      ins=[],
-                      patterns=[
-                          set_(("dst", VR128), v4f32_(imm_zero_vec))]
-                      )
+    V_SET0 = def_inst(
+        "v_set0",
+        outs=[("dst", VR128)],
+        ins=[],
+        patterns=[
+            set_(("dst", VR128), v4f32_(imm_zero_vec))]
+    )
 
     CALLpcrel32 = def_inst(
         "call",
@@ -1570,43 +2294,50 @@ class X64MachineOps:
         defs=[RSP]
     )
 
-    RET = def_inst("ret",
-                   outs=[],
-                   ins=[],
-                   is_terminator=True
-                   )
+    RET = def_inst(
+        "ret",
+        outs=[],
+        ins=[],
+        is_terminator=True
+    )
 
-    ADJCALLSTACKDOWN32 = def_inst("ADJCALLSTACKDOWN",
-                                  outs=[],
-                                  ins=[("amt1", I32Imm),
-                                       ("amt2", I32Imm), ("amt3", I32Imm)]
-                                  )
+    ADJCALLSTACKDOWN32 = def_inst(
+        "ADJCALLSTACKDOWN",
+        outs=[],
+        ins=[("amt1", I32Imm),
+             ("amt2", I32Imm), ("amt3", I32Imm)]
+    )
 
-    ADJCALLSTACKUP32 = def_inst("ADJCALLSTACKUP",
-                                outs=[],
-                                ins=[("amt1", I32Imm), ("amt2", I32Imm)]
-                                )
+    ADJCALLSTACKUP32 = def_inst(
+        "ADJCALLSTACKUP",
+        outs=[],
+        ins=[("amt1", I32Imm), ("amt2", I32Imm)]
+    )
 
-    MEMBARRIER = def_inst("MEMBARRIER",
-                          outs=[],
-                          ins=[],
-                          patterns=[x64membarrier]
-                          )
+    MEMBARRIER = def_inst(
+        "MEMBARRIER",
+        outs=[],
+        ins=[],
+        patterns=[x64membarrier]
+    )
 
-    TLSADDR64 = def_inst("TLSADDR64",
-                         outs=[],
-                         ins=[("sym", I64Mem)],
-                         defs=[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
-                               XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, EFLAGS],
-                         patterns=[x64tlsaddr_(("sym", tlsaddr))]
-                         )
+    TLSADDR64 = def_inst(
+        "TLSADDR64",
+        outs=[],
+        ins=[("sym", I64Mem)],
+        defs=[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+              XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, EFLAGS],
+        patterns=[x64tlsaddr_(("sym", tlsaddr))]
+    )
 
-    DATA16_PREFIX = def_inst("DATA16_PREFIX",
-                             outs=[],
-                             ins=[])
-    REX64_PREFIX = def_inst("REX64_PREFIX",
-                            outs=[],
-                            ins=[])
+    DATA16_PREFIX = def_inst(
+        "DATA16_PREFIX",
+        outs=[],
+        ins=[])
+    REX64_PREFIX = def_inst(
+        "REX64_PREFIX",
+        outs=[],
+        ins=[])
 
 
 def loadf32_(addr): return f32_(load_(addr))
@@ -1622,5 +2353,6 @@ def def_pat_x64(pattern, result):
     def_pat(pattern, result, x64_patterns)
 
 
+def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
 def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
 # def_pat(v4f32_(scalar_to_vector_(loadf32_(("src", addr)))), VMOVSSrm(("src", F32Mem)))

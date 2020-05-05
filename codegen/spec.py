@@ -204,11 +204,11 @@ def iter_sub_regs(reg):
         if reg in visited:
             return
 
-        for subreg, subreg_idx in zip(reg.subregs, reg.subreg_idx):
-            yield subreg, subreg_idx
+        for subreg_and_idx in reg.subregs:
+            yield subreg_and_idx.reg, subreg_and_idx.idx
 
-        for subreg in reg.subregs:
-            yield from iter_sub_regs_dfs(subreg, visited)
+        for subreg_and_idx in reg.subregs:
+            yield from iter_sub_regs_dfs(subreg_and_idx.reg, visited)
 
     yield from iter_sub_regs_dfs(reg, set())
 
