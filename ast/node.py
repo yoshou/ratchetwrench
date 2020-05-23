@@ -84,8 +84,8 @@ def define_node(name, fields, extends_opt=None):
                     "__setitem__": setitem_,
                     "__str__": str_,
                     "__repr__": str_,
-                    "__eq__": eq_,
-                    "__hash__": hash_,
+                    # "__eq__": eq_,
+                    # "__hash__": hash_,
                     "__bool__": bool_,
                 })
 
@@ -96,7 +96,10 @@ FullType = define_node(
     'FullType', ('qualifiers', 'specifier', 'array_specifier'))
 StructSpecifier = define_node(
     'StructSpecifier', ('ident', 'decls', 'is_union'))
+RecordDecl = define_node(
+    'RecordDecl', ('ident', 'decls', 'is_union', 'is_packed'))
 StructDeclaration = define_node('StructDeclaration', ('type', 'declarators'))
+FieldDecl = define_node('FieldDecl', ('type', 'declarators'))
 StructDeclarator = define_node('StructDeclarator', ('ident', 'arrspec'))
 
 ArraySpecifier = define_node('ArraySpecifier', ('sizes',))
@@ -139,8 +142,10 @@ ForStmt = define_node('ForStmt', ('init', 'cond', 'loop', 'stmt'))
 WhileStmt = define_node('WhileStmt', ('cond', 'stmt'))
 DoWhileStmt = define_node('DoWhileStmt', ('cond', 'stmt'))
 ReturnStmt = define_node('ReturnStmt', ('expr',))
+GotoStmt = define_node('GotoStmt', ('label',))
 ContinueStmt = define_node('ContinueStmt', ())
 BreakStmt = define_node('BreakStmt', ())
+LabelStmt = define_node('LabelStmt', ('label', 'stmt'))
 
 SwitchStmt = define_node('SwitchStmt', ('cond', 'stmts'))
 CaseLabel = define_node('CaseLabel', ('expr',))

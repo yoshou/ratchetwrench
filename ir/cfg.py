@@ -163,7 +163,7 @@ def gen_edge_label(edge):
     return edge.edge_type.value
 
 
-def print_cfg(funcs, out_dir, font_size=10, font_name="Ricty Diminished"):
+def print_cfg(func, out_dir, font_size=10, font_name="Ricty Diminished"):
 
     class GraphToList:
         def __init__(self):
@@ -172,23 +172,33 @@ def print_cfg(funcs, out_dir, font_size=10, font_name="Ricty Diminished"):
         def visit(self, node):
             self.nodes.append(node)
 
-    for func in funcs:
-        g = pgv.AGraph(directed=True)
+    g = pgv.AGraph(directed=True)
 
-        lst = GraphToList()
-        cfg_traverse_depth(func.start, lst.visit, set())
+    lst = GraphToList()
+    cfg_traverse_depth(func.start, lst.visit, set())
 
-        slot_id_map = SlotTracker()
-        slot_id_map.track(func)
+    slot_id_map = SlotTracker()
+    slot_id_map.track(func)
 
-        for node in lst.nodes:
-            g.add_node(node, label=gen_block_label(node, slot_id_map),
-                       shape="plaintext", fontsize=font_size, fontname=font_name)
+    for node in lst.nodes:
+        g.add_node(node, label=gen_block_label(node, slot_id_map),
+                   shape="plaintext", fontsize=font_size, fontname=font_name)
 
-        for node in lst.nodes:
-            for edge in node.successors:
-                g.add_edge(edge.node_from, edge.node_to,
-                           label=gen_edge_label(edge), fontsize=font_size, fontname=font_name)
+    for node in lst.nodes:
+        for edge in node.successors:
+            g.add_edge(edge.node_from, edge.node_to,
+                       label=gen_edge_label(edge), fontsize=font_size, fontname=font_name)
 
-        g.draw(os.path.join(
-            out_dir, f'{func.name}.png'), prog='dot')
+    g.draw(os.path.join(
+        out_dir, f'{func.name}.png'), prog='dot')
+
+
+from codegen.passes import FunctionPass
+
+
+class CFGPrinter(FunctionPass):
+    def process_function(self, func):
+        blocks = [CFGNode(bb) for bb in func.bbs]
+        cfg = CFGFunc(func.name, func.return_ty, func.args, blocks)
+        print_cfg(cfg, "./")
+        print(cfg)

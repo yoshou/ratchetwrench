@@ -1237,6 +1237,10 @@ class X64InstructionSelector(InstructionSelector):
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS:
             return node
+        elif node.opcode == VirtualDagOps.TARGET_EXTERNAL_SYMBOL:
+            return node
+        elif node.opcode == VirtualDagOps.INLINEASM:
+            return node
         elif node.opcode == VirtualDagOps.EXTERNAL_SYMBOL:
             return dag.add_external_symbol_node(node.value_types[0], node.symbol, True)
         elif node.opcode == VirtualDagOps.MERGE_VALUES:
@@ -2099,6 +2103,63 @@ class X64TargetLowering(TargetLowering):
             ValueType.I1)] = MachineValueType(ValueType.I8)
 
         self.reg_count_for_vt = {MachineValueType(e): 1 for e in ValueType}
+
+    def get_reg_for_inline_asm_constraint(self, reg_info, code, vt):
+        reg, regclass = None, None
+
+        def is_gr_class(regclass):
+            return regclass in [GR8, GR16, GR32, GR64]
+
+        def is_fr_class(regclass):
+            return regclass in [FR32, FR64, VR128]
+
+        def get_sub_or_super_reg_for_size(reg, size_in_bits, high=False):
+            if size_in_bits == 8:
+                raise NotImplementedError()
+            elif size_in_bits == 16:
+                raise NotImplementedError()
+            elif size_in_bits == 32:
+                if reg in [CL, CX, ECX, RCX]:
+                    return ECX
+                elif reg in [DL, DX, EDX, RDX]:
+                    return EDX
+                raise NotImplementedError()
+            elif size_in_bits == 64:
+                if reg in [DIL, DI, EDI, RDI]:
+                    return RDI
+                raise NotImplementedError()
+
+            raise ValueError("Can't found the suitable register")
+
+        TABLE = {
+            "{di}": (DI, GR16),
+            "{cx}": (CX, GR16),
+            "{dx}": (DX, GR16)
+        }
+        if code in TABLE:
+            reg, regclass = TABLE[code]
+
+        if not reg:
+            return None
+
+        if is_gr_class(regclass):
+            size = vt.get_size_in_bits()
+            if size == 8:
+                rc = GR8
+            elif size == 16:
+                rc = GR16
+            elif size == 32:
+                rc = GR32
+            elif size == 64:
+                rc = GR64
+
+            reg = get_sub_or_super_reg_for_size(reg, size)
+
+            return reg
+        else:
+            raise NotImplementedError()
+
+        raise NotImplementedError()
 
     def get_register_type(self, vt):
         if vt in self.reg_type_for_vt:

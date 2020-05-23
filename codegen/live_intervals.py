@@ -107,13 +107,13 @@ class LiveIntervals(MachineFunctionPass):
                         succ.append(operand.mbb.insts[0])
 
                     if operand.is_reg:
-                        if operand.is_use:
-                            gens[inst].add(operand.reg)
-                        else:
+                        if operand.is_def:
                             kills[inst].add(operand.reg)
 
                             if operand.is_phys:
                                 phys_regs.add(operand.reg)
+                        elif operand.is_use or (operand.is_def and operand.subreg):
+                            gens[inst].add(operand.reg)
 
                 if inst.is_call:
                     non_csrs = self.target_reg_info.get_callee_clobbered_regs()
@@ -127,7 +127,7 @@ class LiveIntervals(MachineFunctionPass):
                 if inst != mbb.insts[-1]:
                     succ.append(inst.next_inst)
 
-                if inst == inst.mbb.insts[-1]:
+                if inst == mbb.insts[-1]:
                     for phys_reg in phys_regs:
                         kills[inst].add(phys_reg)
 
@@ -171,14 +171,38 @@ class LiveIntervals(MachineFunctionPass):
         live_ranges = {}
         live_regs = set()
 
+        for live_in, _ in mfunc.reg_info.live_ins:
+            live_regs.add(live_in)
+
+            live_ranges[live_in] = LiveRange()
+            live_ranges[live_in].reg = live_in
+
+            seg = SlotSegment()
+            seg.start = inst
+            seg.end = inst.mbb.func.bbs[0].insts[0]
+            live_ranges[live_in].segments.append(seg)
+
         for inst in insts:
             live_in = live_ins[inst]
             live_out = live_outs[inst]
 
-            new_live_regs = live_in - live_regs
+            killed_regs = live_in - live_out
+            for killed_reg in killed_regs:
+                # live_regs.remove(killed_reg)
+                if killed_reg not in live_ranges:
+                    live_ranges[killed_reg] = LiveRange()
+                    live_ranges[killed_reg].reg = killed_reg
+
+                    seg = SlotSegment()
+                    seg.start = inst
+                    live_ranges[killed_reg].segments.append(seg)
+
+                live_ranges[killed_reg].segments[-1].end = inst
+
+            new_live_regs = live_out - live_in
 
             for new_live_reg in new_live_regs:
-                live_regs.add(new_live_reg)
+                # live_regs.add(new_live_reg)
                 if new_live_reg not in live_ranges:
                     live_ranges[new_live_reg] = LiveRange()
                     live_ranges[new_live_reg].reg = new_live_reg
@@ -187,10 +211,5 @@ class LiveIntervals(MachineFunctionPass):
                 seg.start = inst
                 seg.end = inst.mbb.func.bbs[-1].insts[-1]
                 live_ranges[new_live_reg].segments.append(seg)
-
-            killed_regs = live_in - live_out
-            for killed_reg in killed_regs:
-                live_regs.remove(killed_reg)
-                live_ranges[killed_reg].segments[-1].end = inst
 
         self.mfunc.live_ranges = live_ranges

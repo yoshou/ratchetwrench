@@ -4,11 +4,11 @@
 from codegen.spec import *
 from codegen.mir_emitter import *
 from codegen.isel import *
-from codegen.arm_def import *
+from codegen.aarch64_def import *
 from codegen.matcher import *
 
 
-class ARMOperandFlag(IntFlag):
+class AArch64OperandFlag(IntFlag):
     NO_FLAG = auto()
     MO_LO16 = auto()
     MO_HI16 = auto()
@@ -22,7 +22,7 @@ def is_null_fp_constant(value):
     return isinstance(value.node, ConstantFPDagNode) and value.node.is_zero
 
 
-class ARMInstructionSelector(InstructionSelector):
+class AArch64InstructionSelector(InstructionSelector):
     def __init__(self):
         super().__init__()
 
@@ -35,10 +35,10 @@ class ARMInstructionSelector(InstructionSelector):
 
             zero = DagValue(dag.add_target_constant_node(value_ty, 0), 0)
             zero = DagValue(dag.add_machine_dag_node(
-                ARMMachineOps.MOVi16, [value_ty], zero), 0)
+                AArch64MachineOps.MOVi16, [value_ty], zero), 0)
             one = DagValue(dag.add_target_constant_node(value_ty, 1), 0)
 
-            return dag.add_machine_dag_node(ARMMachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
+            return dag.add_machine_dag_node(AArch64MachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
 
         raise NotImplementedError()
 
@@ -47,7 +47,7 @@ class ARMInstructionSelector(InstructionSelector):
         in_bytes = new_ops[1]
         out_bytes = new_ops[2]
         opt = dag.add_target_constant_node(MachineValueType(ValueType.I32), 0)
-        return dag.add_machine_dag_node(ARMMachineOps.ADJCALLSTACKDOWN, node.value_types, in_bytes, out_bytes, DagValue(opt, 0), chain)
+        return dag.add_machine_dag_node(AArch64MachineOps.ADJCALLSTACKDOWN, node.value_types, in_bytes, out_bytes, DagValue(opt, 0), chain)
 
     def select_callseq_end(self, node: DagNode, dag: Dag, new_ops):
         chain = new_ops[0]
@@ -59,7 +59,7 @@ class ARMInstructionSelector(InstructionSelector):
         if glue:
             ops.append(glue)
 
-        return dag.add_machine_dag_node(ARMMachineOps.ADJCALLSTACKUP, node.value_types, *ops)
+        return dag.add_machine_dag_node(AArch64MachineOps.ADJCALLSTACKUP, node.value_types, *ops)
 
     def get_glue(self, operands):
         for operand in operands:
@@ -77,7 +77,7 @@ class ARMInstructionSelector(InstructionSelector):
         if glue:
             ops.append(glue)
 
-        return dag.add_machine_dag_node(ARMMachineOps.BL, node.value_types, *ops)
+        return dag.add_machine_dag_node(AArch64MachineOps.BL, node.value_types, *ops)
 
     def select_copy_from_reg(self, node: DagNode, dag: Dag, new_ops):
         return node
@@ -107,7 +107,7 @@ class ARMInstructionSelector(InstructionSelector):
         return dag.add_node(VirtualDagOps.COPY_TO_REG, node.value_types, *ops)
 
     def select_code(self, node: DagNode, dag: Dag):
-        ops_table = [op for op in ARMMachineOps.insts()]
+        ops_table = [op for op in AArch64MachineOps.insts()]
 
         value = DagValue(node, 0)
 
@@ -134,7 +134,7 @@ class ARMInstructionSelector(InstructionSelector):
             node.value_types[0], 0), 0)
         ops = [base, offset]
 
-        return dag.add_machine_dag_node(ARMMachineOps.ADDri, node.value_types, *ops)
+        return dag.add_machine_dag_node(AArch64MachineOps.ADDXri, node.value_types, *ops)
 
     def select_vdup(self, node: DagNode, dag: Dag, new_ops):
         in_type = node.operands[0].ty
@@ -146,7 +146,7 @@ class ARMInstructionSelector(InstructionSelector):
         if in_type in tys and out_type.value_type == ValueType.V4F32:
             lane = DagValue(dag.add_target_constant_node(
                 MachineValueType(ValueType.I32), 0), 0)
-            return dag.add_machine_dag_node(ARMMachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
+            return dag.add_machine_dag_node(AArch64MachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
 
         raise ValueError()
 
@@ -208,9 +208,9 @@ class ARMInstructionSelector(InstructionSelector):
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
             VirtualDagOps.INSERT_VECTOR_ELT: self.select_insert_vector_elt,
             VirtualDagOps.SCALAR_TO_VECTOR: self.select_scalar_to_vector,
-            ARMDagOps.SETCC: self.select_setcc,
-            ARMDagOps.CALL: self.select_call,
-            ARMDagOps.VDUP: self.select_vdup,
+            AArch64DagOps.SETCC: self.select_setcc,
+            AArch64DagOps.CALL: self.select_call,
+            AArch64DagOps.VDUP: self.select_vdup,
         }
 
         if node.opcode == VirtualDagOps.ENTRY:
@@ -235,8 +235,6 @@ class ARMInstructionSelector(InstructionSelector):
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == VirtualDagOps.TOKEN_FACTOR:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
-        elif node.opcode == ARMDagOps.WRAPPER_PIC:
-            return self.lower_wrapper_rip(node, dag)
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
@@ -269,7 +267,7 @@ class CallInfo:
         self.arg_list = arg_list
 
 
-class ARMCallingConv(CallingConv):
+class AArch64CallingConv(CallingConv):
     def __init__(self):
         pass
 
@@ -373,7 +371,7 @@ class ARMCallingConv(CallingConv):
 
             ops = [builder.root, stack_pop_bytes, reg_node]
 
-        node = g.add_node(ARMDagOps.RETURN, [
+        node = g.add_node(AArch64DagOps.RETURN, [
                           MachineValueType(ValueType.OTHER)], *ops)
 
         builder.root = DagValue(node, 0)
@@ -520,7 +518,7 @@ class ARMCallingConv(CallingConv):
 
         # Function call
         call_node = dag.add_node(
-            ARMDagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], chain, func_address, copy_to_reg_chain.get_value(1))
+            AArch64DagOps.CALL, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)], chain, func_address, copy_to_reg_chain.get_value(1))
 
         chain = DagValue(call_node, 0)
 
@@ -587,30 +585,49 @@ class ARMCallingConv(CallingConv):
 
         return dag.add_merge_values(ret_parts)
 
-    def allocate_return_arm_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+    def allocate_return_aarch64_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
         if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
             loc_vt = MachineValueType(ValueType.I32)
+            loc_info = CCArgLocInfo.ZExt
 
-        if loc_vt.value_type == ValueType.F32:
-            regs = [S0, S1, S2, S3]
-            reg = ccstate.alloc_reg_from_list(regs)
+        if loc_vt.value_type == ValueType.I32:
+            regs1 = [W0, W1, W2, W3, W4, W5, W6, W7]
+            regs2 = [X0, X1, X2, X3, X4, X5, X6, X7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
-        if loc_vt.value_type == ValueType.I32:
-            regs = [R0, R1, R2, R3]
-            reg = ccstate.alloc_reg_from_list(regs)
+        if loc_vt.value_type == ValueType.I64:
+            regs1 = [X0, X1, X2, X3, X4, X5, X6, X7]
+            regs2 = [W0, W1, W2, W3, W4, W5, W6, W7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.F32:
+            regs1 = [S0, S1, S2, S3, S4, S5, S6, S7]
+            regs2 = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.F64:
+            regs1 = [D0, D1, D2, D3, D4, D5, D6, D7]
+            regs2 = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
         if loc_vt.value_type in [ValueType.V4F32]:
-            loc_vt = MachineValueType(ValueType.V2F64)
+            loc_vt = MachineValueType(ValueType.F128)
             loc_info = CCArgLocInfo.BCvt
 
-        if loc_vt.value_type == ValueType.V2F64:
-            regs = [Q0, Q1, Q2, Q3]
+        if loc_vt.value_type == ValueType.F128:
+            regs = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
@@ -619,59 +636,83 @@ class ARMCallingConv(CallingConv):
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_return(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
-        self.allocate_return_arm_cdecl(
+        self.allocate_return_aarch64_cdecl(
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
-    def allocate_argument_arm_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
+    def allocate_argument_aarch64_cdecl(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
         if loc_vt.value_type in [ValueType.I1, ValueType.I8, ValueType.I16]:
             loc_vt = MachineValueType(ValueType.I32)
+            loc_info = CCArgLocInfo.ZExt
 
-        if loc_vt.value_type == ValueType.F32:
-            regs = [S0, S1, S2, S3, S4, S5, S6, S7,
-                    S8, S9, S10, S11, S12, S13, S14, S15]
-            reg = ccstate.alloc_reg_from_list(regs)
+        if loc_vt.value_type == ValueType.I32:
+            regs1 = [W0, W1, W2, W3, W4, W5, W6, W7]
+            regs2 = [X0, X1, X2, X3, X4, X5, X6, X7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
-        if loc_vt.value_type == ValueType.I32:
-            regs = [R0, R1, R2, R3]
-            reg = ccstate.alloc_reg_from_list(regs)
+        if loc_vt.value_type == ValueType.I64:
+            regs1 = [X0, X1, X2, X3, X4, X5, X6, X7]
+            regs2 = [W0, W1, W2, W3, W4, W5, W6, W7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
 
-        if loc_vt.value_type == ValueType.I32:
-            stack_offset = ccstate.alloc_stack(4, 4)
-            ccstate.assign_stack_value(
-                idx, vt, loc_vt, loc_info, stack_offset, flags)
-            return False
-
         if loc_vt.value_type == ValueType.F32:
-            stack_offset = ccstate.alloc_stack(4, 4)
-            ccstate.assign_stack_value(
-                idx, vt, loc_vt, loc_info, stack_offset, flags)
-            return False
+            regs1 = [S0, S1, S2, S3, S4, S5, S6, S7]
+            regs2 = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
+
+        if loc_vt.value_type == ValueType.F64:
+            regs1 = [D0, D1, D2, D3, D4, D5, D6, D7]
+            regs2 = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
+            reg = ccstate.alloc_reg_from_list(regs1, regs2)
+            if reg is not None:
+                ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
+                return False
 
         if loc_vt.value_type in [ValueType.V4F32]:
-            loc_vt = MachineValueType(ValueType.V2F64)
+            loc_vt = MachineValueType(ValueType.F128)
             loc_info = CCArgLocInfo.BCvt
 
-        if loc_vt.value_type == ValueType.V2F64:
-            regs = [Q0, Q1, Q2, Q3]
+        if loc_vt.value_type == ValueType.F128:
+            regs = [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]
             reg = ccstate.alloc_reg_from_list(regs)
             if reg is not None:
                 ccstate.assign_reg_value(idx, vt, loc_vt, loc_info, reg, flags)
                 return False
+
+        if loc_vt.value_type == ValueType.I32:
+            stack_offset = ccstate.alloc_stack(8, 8)
+            ccstate.assign_stack_value(
+                idx, vt, loc_vt, loc_info, stack_offset, flags)
+            return False
+
+        if loc_vt.value_type == ValueType.F32:
+            stack_offset = ccstate.alloc_stack(8, 8)
+            ccstate.assign_stack_value(
+                idx, vt, loc_vt, loc_info, stack_offset, flags)
+            return False
+
+        if loc_vt.value_type == ValueType.F128:
+            stack_offset = ccstate.alloc_stack(16, 16)
+            ccstate.assign_stack_value(
+                idx, vt, loc_vt, loc_info, stack_offset, flags)
+            return False
 
         raise NotImplementedError("The type is unsupporting.")
 
     def allocate_argument(self, idx, vt: MachineValueType, loc_vt, loc_info, flags: CCArgFlags, ccstate: CallingConvState):
-        self.allocate_argument_arm_cdecl(
+        self.allocate_argument_aarch64_cdecl(
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
 
-class ARMTargetInstInfo(TargetInstInfo):
+class AArch64TargetInstInfo(TargetInstInfo):
     def __init__(self):
         super().__init__()
 
@@ -680,13 +721,13 @@ class ARMTargetInstInfo(TargetInstInfo):
         assert(isinstance(dst_reg, MachineRegister))
 
         if src_reg.spec in GPR.regs and dst_reg.spec in GPR.regs:
-            opcode = ARMMachineOps.MOVsi
+            opcode = AArch64MachineOps.MOVsi
         elif src_reg.spec in SPR.regs and dst_reg.spec in SPR.regs:
-            opcode = ARMMachineOps.VMOVS
+            opcode = AArch64MachineOps.VMOVS
         elif src_reg.spec in DPR.regs and dst_reg.spec in DPR.regs:
-            opcode = ARMMachineOps.VMOVD
+            opcode = AArch64MachineOps.VMOVD
         elif src_reg.spec in QPR.regs and dst_reg.spec in QPR.regs:
-            opcode = ARMMachineOps.VORRq
+            opcode = AArch64MachineOps.VORRq
         else:
             raise NotImplementedError(
                 "Move instructions support GPR, SPR, DPR or QPR at the present time.")
@@ -696,11 +737,11 @@ class ARMTargetInstInfo(TargetInstInfo):
         copy_inst.add_reg(dst_reg, RegState.Define)
         copy_inst.add_reg(src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == ARMMachineOps.VORRq:
+        if opcode == AArch64MachineOps.VORRq:
             copy_inst.add_reg(
                 src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == ARMMachineOps.MOVsi:
+        if opcode == AArch64MachineOps.MOVsi:
             copy_inst.add_imm(2)
 
         copy_inst.insert_after(inst)
@@ -727,14 +768,14 @@ class ARMTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if has_reg_regclass(reg, GPR):
-                copy_inst = MachineInstruction(ARMMachineOps.STRi12)
+                copy_inst = MachineInstruction(AArch64MachineOps.STRi12)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
             elif has_reg_regclass(reg, SPR):
-                copy_inst = MachineInstruction(ARMMachineOps.VSTRS)
+                copy_inst = MachineInstruction(AArch64MachineOps.VSTRS)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -744,7 +785,7 @@ class ARMTargetInstInfo(TargetInstInfo):
                 raise NotImplementedError()
         elif size == 8:
             if has_reg_regclass(reg, DPR):
-                copy_inst = MachineInstruction(ARMMachineOps.VSTRD)
+                copy_inst = MachineInstruction(AArch64MachineOps.VSTRD)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -758,14 +799,14 @@ class ARMTargetInstInfo(TargetInstInfo):
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
 
-                addr_inst = MachineInstruction(ARMMachineOps.ADDri)
+                addr_inst = MachineInstruction(AArch64MachineOps.ADDri)
                 addr_inst.add_reg(scratch_reg, RegState.Define)
                 addr_inst.add_frame_index(stack_slot)
                 addr_inst.add_imm(0)
 
                 addr_inst.insert_before(inst)
 
-                copy_inst = MachineInstruction(ARMMachineOps.VST1q64)
+                copy_inst = MachineInstruction(AArch64MachineOps.VST1q64)
                 copy_inst.add_reg(reg, RegState.Non)
                 copy_inst.add_reg(scratch_reg, RegState.Kill)
                 copy_inst.add_imm(1)
@@ -800,13 +841,13 @@ class ARMTargetInstInfo(TargetInstInfo):
             raise NotImplementedError()
         elif size == 4:
             if has_reg_regclass(reg, GPR):
-                copy_inst = MachineInstruction(ARMMachineOps.LDRi12)
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRi12)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
             elif has_reg_regclass(reg, SPR):
-                copy_inst = MachineInstruction(ARMMachineOps.VLDRS)
+                copy_inst = MachineInstruction(AArch64MachineOps.VLDRS)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -815,7 +856,7 @@ class ARMTargetInstInfo(TargetInstInfo):
                 raise NotImplementedError()
         elif size == 8:
             if has_reg_regclass(reg, DPR):
-                copy_inst = MachineInstruction(ARMMachineOps.VLDRD)
+                copy_inst = MachineInstruction(AArch64MachineOps.VLDRD)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -828,14 +869,14 @@ class ARMTargetInstInfo(TargetInstInfo):
                 regclass = GPR  # TODO
                 scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
 
-                addr_inst = MachineInstruction(ARMMachineOps.ADDri)
+                addr_inst = MachineInstruction(AArch64MachineOps.ADDri)
                 addr_inst.add_reg(scratch_reg, RegState.Define)
                 addr_inst.add_frame_index(stack_slot)
                 addr_inst.add_imm(0)
 
                 addr_inst.insert_before(inst)
 
-                copy_inst = MachineInstruction(ARMMachineOps.VLD1q64)
+                copy_inst = MachineInstruction(AArch64MachineOps.VLD1q64)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_reg(scratch_reg, RegState.Kill)
@@ -867,7 +908,7 @@ class ARMTargetInstInfo(TargetInstInfo):
             stack_obj = func.frame.get_stack_object(operand.index)
             offset = self.calculate_frame_offset(func, operand.index)
 
-            if inst.opcode in [ARMMachineOps.VLDRS, ARMMachineOps.VSTRS, ARMMachineOps.VLDRD, ARMMachineOps.VSTRD]:
+            if inst.opcode in [AArch64MachineOps.VLDRS, AArch64MachineOps.VSTRS, AArch64MachineOps.VLDRD, AArch64MachineOps.VSTRD]:
                 assert(offset % 4 == 0)
                 offset = offset >> 2
 
@@ -877,15 +918,15 @@ class ARMTargetInstInfo(TargetInstInfo):
             inst.operands[idx + 1] = MOImm(inst.operands[idx + 1].val + offset)
 
             if inst.operands[idx + 1].val < 0:
-                if inst.opcode == ARMMachineOps.ADDri:
-                    inst.opcode = ARMMachineOps.SUBri
+                if inst.opcode == AArch64MachineOps.ADDri:
+                    inst.opcode = AArch64MachineOps.SUBri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode == ARMMachineOps.SUBri:
-                    inst.opcode = ARMMachineOps.ADDri
+                elif inst.opcode == AArch64MachineOps.SUBri:
+                    inst.opcode = AArch64MachineOps.ADDri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
                 elif inst.opcode in [
-                        ARMMachineOps.STRi12, ARMMachineOps.LDRi12, ARMMachineOps.VSTRS, ARMMachineOps.VLDRS,
-                        ARMMachineOps.VSTRD, ARMMachineOps.VLDRD, ARMMachineOps.VST1q64, ARMMachineOps.VLD1q64]:
+                        AArch64MachineOps.STRi12, AArch64MachineOps.LDRi12, AArch64MachineOps.VSTRS, AArch64MachineOps.VLDRS,
+                        AArch64MachineOps.VSTRD, AArch64MachineOps.VLDRD, AArch64MachineOps.VST1q64, AArch64MachineOps.VLD1q64]:
                     pass
                 else:
                     raise ValueError()
@@ -895,14 +936,14 @@ class ARMTargetInstInfo(TargetInstInfo):
         reginfo = func.reg_info
         if reginfo.is_use_empty(inst.operands[0].reg):
 
-            if inst.opcode == ARMMachineOps.SUB32ri:
-                inst.opcode = ARMMachineOps.CMP32ri
-            elif inst.opcode == ARMMachineOps.SUB32rm:
-                inst.opcode = ARMMachineOps.CMP32rm
-            elif inst.opcode == ARMMachineOps.SUB32rr:
-                inst.opcode = ARMMachineOps.CMP32rr
-            elif inst.opcode == ARMMachineOps.SUB8ri:
-                inst.opcode = ARMMachineOps.CMP8ri
+            if inst.opcode == AArch64MachineOps.SUB32ri:
+                inst.opcode = AArch64MachineOps.CMP32ri
+            elif inst.opcode == AArch64MachineOps.SUB32rm:
+                inst.opcode = AArch64MachineOps.CMP32rm
+            elif inst.opcode == AArch64MachineOps.SUB32rr:
+                inst.opcode = AArch64MachineOps.CMP32rr
+            elif inst.opcode == AArch64MachineOps.SUB8ri:
+                inst.opcode = AArch64MachineOps.CMP8ri
             else:
                 raise ValueError("Not supporting instruction.")
 
@@ -915,11 +956,11 @@ class ARMTargetInstInfo(TargetInstInfo):
             inst.remove_operand(0)
 
     def expand_post_ra_pseudo(self, inst: MachineInstruction):
-        # if inst.opcode == ARMMachineOps.LDRLIT_ga_abs:
+        # if inst.opcode == AArch64MachineOps.LDRLIT_ga_abs:
         #     # Replace with 'LDR' from constant pool.
         #     dst = inst.operands[0]
         #     gv = inst.operands[1]
-        #     opc = ARMMachineOps.LDRi12
+        #     opc = AArch64MachineOps.LDRi12
 
         #     cp = inst.mbb.func.constant_pool
         #     index = cp.get_or_create_index(gv.value, 4)
@@ -933,12 +974,12 @@ class ARMTargetInstInfo(TargetInstInfo):
         #     new_inst.insert_after(inst)
         #     inst.remove()
 
-        if inst.opcode == ARMMachineOps.MOVi32imm:
+        if inst.opcode == AArch64MachineOps.MOVi32imm:
             dst = inst.operands[0]
             src = inst.operands[1]
 
-            lo_opc = ARMMachineOps.MOVi16
-            hi_opc = ARMMachineOps.MOVTi16
+            lo_opc = AArch64MachineOps.MOVi16
+            hi_opc = AArch64MachineOps.MOVTi16
 
             lo_inst = MachineInstruction(lo_opc)
             lo_inst.add_reg(dst.reg, RegState.Define)
@@ -949,9 +990,9 @@ class ARMTargetInstInfo(TargetInstInfo):
 
             if isinstance(src, MOGlobalAddress):
                 lo_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | ARMOperandFlag.MO_LO16.value))
+                    src.value, target_flags=(src.target_flags | AArch64OperandFlag.MO_LO16.value))
                 hi_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | ARMOperandFlag.MO_HI16.value))
+                    src.value, target_flags=(src.target_flags | AArch64OperandFlag.MO_HI16.value))
             else:
                 raise ValueError()
 
@@ -959,12 +1000,12 @@ class ARMTargetInstInfo(TargetInstInfo):
             lo_inst.insert_after(inst)
             inst.remove()
 
-        if inst.opcode == ARMMachineOps.LEApcrel:
+        if inst.opcode == AArch64MachineOps.LEApcrel:
             dst = inst.operands[0]
             src = inst.operands[1]
 
-            lo_opc = ARMMachineOps.MOVi16
-            hi_opc = ARMMachineOps.MOVTi16
+            lo_opc = AArch64MachineOps.MOVi16
+            hi_opc = AArch64MachineOps.MOVTi16
 
             lo_inst = MachineInstruction(lo_opc)
             lo_inst.add_reg(dst.reg, RegState.Define)
@@ -975,9 +1016,9 @@ class ARMTargetInstInfo(TargetInstInfo):
 
             if isinstance(src, MOConstantPoolIndex):
                 lo_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | ARMOperandFlag.MO_LO16.value))
+                    src.index, target_flags=(src.target_flags | AArch64OperandFlag.MO_LO16.value))
                 hi_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | ARMOperandFlag.MO_HI16.value))
+                    src.index, target_flags=(src.target_flags | AArch64OperandFlag.MO_HI16.value))
             else:
                 raise ValueError()
 
@@ -1045,36 +1086,36 @@ def find_if(values, pred):
     return -1
 
 
-ARMCC_EQ = 0b0000  # Equal                      Equal
-ARMCC_NE = 0b0001  # Not equal                  Not equal, or unordered
-ARMCC_HS = 0b0010  # Carry set                  >, ==, or unordered
-ARMCC_LO = 0b0011  # Carry clear                Less than
-ARMCC_MI = 0b0100  # Minus, negative            Less than
-ARMCC_PL = 0b0101  # Plus, positive or zero     >, ==, or unordered
-ARMCC_VS = 0b0110  # Overflow                   Unordered
-ARMCC_VC = 0b0111  # No overflow                Not unordered
-ARMCC_HI = 0b1000  # Unsigned higher            Greater than, or unordered
-ARMCC_LS = 0b1001  # Unsigned lower or same     Less than or equal
-ARMCC_GE = 0b1010  # Greater than or equal      Greater than or equal
-ARMCC_LT = 0b1011  # Less than                  Less than, or unordered
-ARMCC_GT = 0b1100  # Greater than               Greater than
-ARMCC_LE = 0b1101  # Less than or equal         <, ==, or unordered
-ARMCC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
+AArch64CC_EQ = 0b0000  # Equal                      Equal
+AArch64CC_NE = 0b0001  # Not equal                  Not equal, or unordered
+AArch64CC_HS = 0b0010  # Carry set                  >, ==, or unordered
+AArch64CC_LO = 0b0011  # Carry clear                Less than
+AArch64CC_MI = 0b0100  # Minus, negative            Less than
+AArch64CC_PL = 0b0101  # Plus, positive or zero     >, ==, or unordered
+AArch64CC_VS = 0b0110  # Overflow                   Unordered
+AArch64CC_VC = 0b0111  # No overflow                Not unordered
+AArch64CC_HI = 0b1000  # Unsigned higher            Greater than, or unordered
+AArch64CC_LS = 0b1001  # Unsigned lower or same     Less than or equal
+AArch64CC_GE = 0b1010  # Greater than or equal      Greater than or equal
+AArch64CC_LT = 0b1011  # Less than                  Less than, or unordered
+AArch64CC_GT = 0b1100  # Greater than               Greater than
+AArch64CC_LE = 0b1101  # Less than or equal         <, ==, or unordered
+AArch64CC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
 
 
-class ARMConstantPoolKind(Enum):
+class AArch64ConstantPoolKind(Enum):
     Value = auto()
     ExtSymbol = auto()
     BlockAddress = auto()
     BasicBlock = auto()
 
 
-class ARMConstantPoolModifier(Enum):
+class AArch64ConstantPoolModifier(Enum):
     Non = auto()
     TLSGlobalDesc = auto()
 
 
-class ARMConstantPoolConstant(MachineConstantPoolValue):
+class AArch64ConstantPoolConstant(MachineConstantPoolValue):
     def __init__(self, ty, label_id, value, kind, modifier, pc_offset, relative):
         super().__init__(ty)
         self.label_id = label_id
@@ -1088,7 +1129,7 @@ class ARMConstantPoolConstant(MachineConstantPoolValue):
         return hash((self.value, self.kind, self.modifier, self.pc_offset, self.relative))
 
     def __eq__(self, other):
-        if not isinstance(other, ARMConstantPoolConstant):
+        if not isinstance(other, AArch64ConstantPoolConstant):
             return False
 
         eq1 = self.value == other.value and self.kind == other.kind and self.modifier == other.modifier
@@ -1099,7 +1140,7 @@ class ARMConstantPoolConstant(MachineConstantPoolValue):
         return not self.__eq__(other)
 
 
-class ARMTargetLowering(TargetLowering):
+class AArch64TargetLowering(TargetLowering):
     def __init__(self):
         super().__init__()
 
@@ -1135,29 +1176,29 @@ class ARMTargetLowering(TargetLowering):
 
             if is_fcmp:
                 if cond in [CondCode.SETEQ, CondCode.SETOEQ]:
-                    node = dag.add_target_constant_node(ty, ARMCC_EQ)
+                    node = dag.add_target_constant_node(ty, AArch64CC_EQ)
                 elif cond in [CondCode.SETGT, CondCode.SETOGT]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GT)
+                    node = dag.add_target_constant_node(ty, AArch64CC_GT)
                 elif cond in [CondCode.SETLT, CondCode.SETOLT]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, AArch64CC_GE)
                     swap = True
                 elif cond in [CondCode.SETGE, CondCode.SETOGE]:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, AArch64CC_GE)
                 else:
                     raise NotImplementedError()
             else:
                 if cond == CondCode.SETEQ:
-                    node = dag.add_target_constant_node(ty, ARMCC_EQ)
+                    node = dag.add_target_constant_node(ty, AArch64CC_EQ)
                 elif cond == CondCode.SETNE:
-                    node = dag.add_target_constant_node(ty, ARMCC_NE)
+                    node = dag.add_target_constant_node(ty, AArch64CC_NE)
                 elif cond == CondCode.SETLT:
-                    node = dag.add_target_constant_node(ty, ARMCC_LT)
+                    node = dag.add_target_constant_node(ty, AArch64CC_LT)
                 elif cond == CondCode.SETGT:
-                    node = dag.add_target_constant_node(ty, ARMCC_GT)
+                    node = dag.add_target_constant_node(ty, AArch64CC_GT)
                 elif cond == CondCode.SETLE:
-                    node = dag.add_target_constant_node(ty, ARMCC_LE)
+                    node = dag.add_target_constant_node(ty, AArch64CC_LE)
                 elif cond == CondCode.SETGE:
-                    node = dag.add_target_constant_node(ty, ARMCC_GE)
+                    node = dag.add_target_constant_node(ty, AArch64CC_GE)
                 elif cond == CondCode.SETULT:
                     node = dag.add_target_constant_node(ty, 0b0011)
                 elif cond == CondCode.SETUGT:
@@ -1176,16 +1217,16 @@ class ARMTargetLowering(TargetLowering):
             op1, op2 = op2, op1
 
         if is_fcmp:
-            cmp_node = DagValue(dag.add_node(ARMDagOps.CMPFP,
+            cmp_node = DagValue(dag.add_node(AArch64DagOps.CMPFP,
                                              [MachineValueType(ValueType.GLUE)], op1, op2), 0)
-            cmp_node = DagValue(dag.add_node(ARMDagOps.FMSTAT,
+            cmp_node = DagValue(dag.add_node(AArch64DagOps.FMSTAT,
                                              [MachineValueType(ValueType.GLUE)], cmp_node), 0)
         else:
-            cmp_node = DagValue(dag.add_node(ARMDagOps.CMP,
+            cmp_node = DagValue(dag.add_node(AArch64DagOps.CMP,
                                              [MachineValueType(ValueType.GLUE)], op1, op2), 0)
 
         # operand 1 is eflags.
-        setcc_node = dag.add_node(ARMDagOps.SETCC, node.value_types,
+        setcc_node = dag.add_node(AArch64DagOps.SETCC, node.value_types,
                                   DagValue(condcode, 0), cmp_node)
 
         return setcc_node
@@ -1198,13 +1239,13 @@ class ARMTargetLowering(TargetLowering):
         if cond.node.opcode == VirtualDagOps.SETCC:
             cond = DagValue(self.lower_setcc(cond.node, dag), 0)
 
-        if cond.node.opcode == ARMDagOps.SETCC:
+        if cond.node.opcode == AArch64DagOps.SETCC:
             condcode = cond.node.operands[0]
             glue = cond.node.operands[1]
             cond = DagValue(dag.add_target_register_node(
-                MachineValueType(ValueType.I32), CPSR), 0)
+                MachineValueType(ValueType.I32), NZCV), 0)
 
-            return dag.add_node(ARMDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
         else:
             if cond.ty == MachineValueType(ValueType.I1):
                 cond = DagValue(dag.add_node(VirtualDagOps.ZERO_EXTEND, [
@@ -1221,12 +1262,12 @@ class ARMTargetLowering(TargetLowering):
             cond = DagValue(dag.add_target_register_node(
                 MachineValueType(ValueType.I32), CPSR), 0)
 
-            return dag.add_node(ARMDagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
 
     def lower_global_address(self, node: DagNode, dag: Dag):
         target_address = dag.add_global_address_node(
             node.value_types[0], node.value, True)
-        return dag.add_node(ARMDagOps.WRAPPER, node.value_types, DagValue(target_address, 0))
+        return dag.add_node(AArch64DagOps.ADRP, node.value_types, DagValue(target_address, 0))
 
     def lower_global_tls_address(self, node: DagNode, dag: Dag):
         data_layout = dag.mfunc.func_info.func.module.data_layout
@@ -1236,14 +1277,14 @@ class ARMTargetLowering(TargetLowering):
         if global_value.thread_local == ThreadLocalMode.GeneralDynamicTLSModel:
             pc_label_id = dag.mfunc.func_info.create_pic_label_id()
 
-            cp_value = ARMConstantPoolConstant(
-                global_value.ty, pc_label_id, global_value, ARMConstantPoolKind.Value, ARMConstantPoolModifier.TLSGlobalDesc, 8, True)
+            cp_value = AArch64ConstantPoolConstant(
+                global_value.ty, pc_label_id, global_value, AArch64ConstantPoolKind.Value, AArch64ConstantPoolModifier.TLSGlobalDesc, 8, True)
 
             argument = DagValue(
                 dag.add_constant_pool_node(ptr_ty, cp_value, True, 4), 0)
 
             argument = DagValue(dag.add_node(
-                ARMDagOps.WRAPPER, [MachineValueType(ValueType.I32)], argument), 0)
+                AArch64DagOps.WRAPPER, [MachineValueType(ValueType.I32)], argument), 0)
 
             argument = DagValue(dag.add_load_node(
                 ptr_ty, dag.entry, argument, False), 0)
@@ -1253,7 +1294,7 @@ class ARMTargetLowering(TargetLowering):
             pic_label = DagValue(dag.add_target_constant_node(
                 ptr_ty, ConstantInt(pc_label_id, i32)), 0)
 
-            argument = DagValue(dag.add_node(ARMDagOps.PIC_ADD,
+            argument = DagValue(dag.add_node(AArch64DagOps.PIC_ADD,
                                              [ptr_ty], argument, pic_label), 0)
 
             arg_list = []
@@ -1291,7 +1332,7 @@ class ARMTargetLowering(TargetLowering):
 
         target_constant_pool = dag.add_constant_pool_node(
             self.get_pointer_type(data_layout), node.value, True)
-        return dag.add_node(ARMDagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
+        return dag.add_node(AArch64DagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
 
     def lower_build_vector(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
@@ -1308,7 +1349,7 @@ class ARMTargetLowering(TargetLowering):
                                MachineValueType(ValueType.V2F32)], node.operands[0]), 0)
                 lane = DagValue(dag.add_target_constant_node(
                     MachineValueType(ValueType.I32), 0), 0)
-                return dag.add_node(ARMDagOps.VDUP, node.value_types, vec, lane)
+                return dag.add_node(AArch64DagOps.VDUP, node.value_types, vec, lane)
 
         operands = []
         for operand in node.operands:
@@ -1373,9 +1414,9 @@ class ARMTargetLowering(TargetLowering):
             VirtualDagOps.SCALAR_TO_VECTOR, [vt], vec2_elem), 0)
 
         if elem_vt.value_type == ValueType.F32:
-            opcode = ARMDagOps.MOVSS
+            opcode = AArch64DagOps.MOVSS
         else:
-            opcode = ARMDagOps.MOVSD
+            opcode = AArch64DagOps.MOVSD
 
         return dag.add_node(opcode, [vt], vec1, vec2)
 
@@ -1395,7 +1436,7 @@ class ARMTargetLowering(TargetLowering):
 
             # Merge the vectors.
             blend_mask = [mask[vec2_idx] - 4, 0, mask[vec2_idx_adj], 0]
-            vec2 = DagValue(dag.add_node(ARMDagOps.SHUFP, [
+            vec2 = DagValue(dag.add_node(AArch64DagOps.SHUFP, [
                 vt], vec2, vec1, self.get_x86_shuffle_mask_v4(blend_mask, dag)), 0)
 
             if vec2_idx < 2:
@@ -1410,7 +1451,7 @@ class ARMTargetLowering(TargetLowering):
         elif num_vec2_elems == 2:
             raise NotImplementedError()
 
-        return dag.add_node(ARMDagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
+        return dag.add_node(AArch64DagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
 
     def lower_v4f32_shuffle(self, node: DagNode, dag: Dag):
         vec1 = node.operands[0]
@@ -1430,7 +1471,7 @@ class ARMTargetLowering(TargetLowering):
         raise ValueError()
 
     def lower_sub(self, node: DagNode, dag: Dag):
-        return dag.add_node(ARMDagOps.SUB, node.value_types, *node.operands)
+        return dag.add_node(AArch64DagOps.SUB, node.value_types, *node.operands)
 
     def lower_bitcast(self, node: DagNode, dag: Dag):
         hwmode = dag.mfunc.target_info.hwmode
@@ -1512,19 +1553,19 @@ class ARMTargetLowering(TargetLowering):
             loc_info = arg_val.loc_info
             if isinstance(arg_val, CCArgReg):
                 if arg_vt.value_type == ValueType.I8:
-                    regclass = GPRwoPC
+                    regclass = GPR32
                 elif arg_vt.value_type == ValueType.I16:
-                    regclass = GPRwoPC
+                    regclass = GPR32
                 elif arg_vt.value_type == ValueType.I32:
-                    regclass = GPRwoPC
+                    regclass = GPR32
                 elif arg_vt.value_type == ValueType.I64:
-                    raise ValueError()
+                    regclass = GPR64
                 elif arg_vt.value_type == ValueType.F32:
-                    regclass = SPR
+                    regclass = FPR32
                 elif arg_vt.value_type == ValueType.F64:
-                    regclass = DPR
+                    regclass = FPR64
                 elif arg_vt.value_type == ValueType.V2F64:
-                    regclass = QPR
+                    regclass = FPR128
                 else:
                     raise ValueError()
 
@@ -1629,9 +1670,9 @@ class ARMTargetLowering(TargetLowering):
         #     MachineValueType(ValueType.OTHER)], arg_load_chains), 0)
 
     def is_frame_op(self, inst):
-        if inst.opcode == ARMMachineOps.ADJCALLSTACKDOWN:
+        if inst.opcode == AArch64MachineOps.ADJCALLSTACKDOWN:
             return True
-        if inst.opcode == ARMMachineOps.ADJCALLSTACKUP:
+        if inst.opcode == AArch64MachineOps.ADJCALLSTACKUP:
             return True
 
         return False
@@ -1644,7 +1685,7 @@ class ARMTargetLowering(TargetLowering):
 
         front_inst = bb.insts[0]
 
-        push_fp_lr_inst = MachineInstruction(ARMMachineOps.STMDB_UPD)
+        push_fp_lr_inst = MachineInstruction(AArch64MachineOps.STMDB_UPD)
         push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
         push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
         push_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
@@ -1652,14 +1693,14 @@ class ARMTargetLowering(TargetLowering):
 
         push_fp_lr_inst.insert_before(front_inst)
 
-        mov_esp_inst = MachineInstruction(ARMMachineOps.MOVr)
+        mov_esp_inst = MachineInstruction(AArch64MachineOps.MOVr)
         mov_esp_inst.add_reg(MachineRegister(R11), RegState.Define)  # To
         mov_esp_inst.add_reg(MachineRegister(SP), RegState.Non)  # From
 
         mov_esp_inst.insert_before(front_inst)
 
         stack_size = func.frame.estimate_stack_size(
-            ARMMachineOps.ADJCALLSTACKDOWN, ARMMachineOps.ADJCALLSTACKUP)
+            AArch64MachineOps.ADJCALLSTACKDOWN, AArch64MachineOps.ADJCALLSTACKUP)
 
         max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
         stack_size = int(
@@ -1667,7 +1708,7 @@ class ARMTargetLowering(TargetLowering):
 
         assert(get_mod_imm(stack_size) != -1)
 
-        sub_sp_inst = MachineInstruction(ARMMachineOps.SUBri)
+        sub_sp_inst = MachineInstruction(AArch64MachineOps.SUBri)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Define)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Non)
         sub_sp_inst.add_imm(stack_size)
@@ -1697,13 +1738,13 @@ class ARMTargetLowering(TargetLowering):
             inst_info.copy_reg_from_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
 
-        restore_esp_inst = MachineInstruction(ARMMachineOps.MOVr)
+        restore_esp_inst = MachineInstruction(AArch64MachineOps.MOVr)
         restore_esp_inst.add_reg(MachineRegister(SP), RegState.Define)  # To
         restore_esp_inst.add_reg(MachineRegister(R11), RegState.Non)  # From
 
         restore_esp_inst.insert_before(front_inst)
 
-        pop_fp_lr_inst = MachineInstruction(ARMMachineOps.LDMIA_UPD)
+        pop_fp_lr_inst = MachineInstruction(AArch64MachineOps.LDMIA_UPD)
         pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
         pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
         pop_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
@@ -1716,19 +1757,19 @@ class ARMTargetLowering(TargetLowering):
 
     def get_machine_vreg(self, ty: MachineValueType):
         if ty.value_type == ValueType.I8:
-            return GPR
+            return GPR32
         elif ty.value_type == ValueType.I16:
-            return GPR
+            return GPR32
         elif ty.value_type == ValueType.I32:
-            return GPR
+            return GPR32
         elif ty.value_type == ValueType.I64:
-            pass
+            return GPR64
         elif ty.value_type == ValueType.F32:
-            return SPR
+            return FPR32
         elif ty.value_type == ValueType.F64:
-            return DPR
+            return FPR64
         elif ty.value_type == ValueType.V4F32:
-            return QPR
+            return FPR128
 
         raise NotImplementedError()
 
@@ -1776,7 +1817,7 @@ class ARMTargetLowering(TargetLowering):
         return MachineValueType(ValueType.I32)
 
 
-class ARMTargetRegisterInfo(TargetRegisterInfo):
+class AArch64TargetRegisterInfo(TargetRegisterInfo):
     def __init__(self, target_info):
         super().__init__()
 
@@ -1819,7 +1860,7 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
 
     def get_regclass_for_vt(self, vt):
         hwmode = self.target_info.hwmode
-        for regclass in arm_regclasses:
+        for regclass in aarch64_regclasses:
             tys = regclass.get_types(hwmode)
             if vt in tys:
                 return regclass
@@ -1827,7 +1868,7 @@ class ARMTargetRegisterInfo(TargetRegisterInfo):
         raise ValueError("Could not find the register class.")
 
 
-class ARMFrameLowering(TargetFrameLowering):
+class AArch64FrameLowering(TargetFrameLowering):
     def __init__(self, alignment):
         super().__init__(alignment)
 
@@ -1838,7 +1879,7 @@ class ARMFrameLowering(TargetFrameLowering):
         return StackGrowsDirection.Down
 
 
-class ARMLegalizer(Legalizer):
+class AArch64Legalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
@@ -2032,17 +2073,17 @@ class ARMLegalizer(Legalizer):
         return None
 
 
-class ARMTargetInfo(TargetInfo):
+class AArch64TargetInfo(TargetInfo):
     def __init__(self, triple):
         super().__init__(triple)
 
-        self._inst_info = ARMTargetInstInfo()
-        self._lowering = ARMTargetLowering()
-        self._reg_info = ARMTargetRegisterInfo(self)
-        self._calling_conv = ARMCallingConv()
-        self._isel = ARMInstructionSelector()
-        self._legalizer = ARMLegalizer()
-        self._frame_lowering = ARMFrameLowering(16)
+        self._inst_info = AArch64TargetInstInfo()
+        self._lowering = AArch64TargetLowering()
+        self._reg_info = AArch64TargetRegisterInfo(self)
+        self._calling_conv = AArch64CallingConv()
+        self._isel = AArch64InstructionSelector()
+        self._legalizer = AArch64Legalizer()
+        self._frame_lowering = AArch64FrameLowering(16)
 
     def get_inst_info(self) -> TargetInstInfo:
         return self._inst_info
@@ -2067,39 +2108,39 @@ class ARMTargetInfo(TargetInfo):
 
     @property
     def hwmode(self) -> MachineHWMode:
-        if self.triple.arch == ArchType.ARM:
-            return ARM
+        if self.triple.arch == ArchType.ARM64:
+            return AArch64
 
         raise ValueError("Invalid arch type")
 
 
-class ARMTargetMachine:
+class AArch64TargetMachine:
     def __init__(self, triple):
         self.triple = triple
 
     def get_target_info(self, func: Function):
-        return ARMTargetInfo(self.triple)
+        return AArch64TargetInfo(self.triple)
 
     def add_mc_emit_passes(self, pass_manager, mccontext, output, is_asm):
-        from codegen.arm_asm_printer import ARMAsmInfo, MCAsmStream, ARMCodeEmitter, ARMAsmBackend, ARMAsmPrinter
+        from codegen.aarch64_asm_printer import AArch64AsmInfo, MCAsmStream, AArch64CodeEmitter, AArch64AsmBackend, AArch64AsmPrinter
         from codegen.coff import WinCOFFObjectWriter, WinCOFFObjectStream
-        from codegen.elf import ELFObjectStream, ELFObjectWriter, ARMELFObjectWriter
+        from codegen.elf import ELFObjectStream, ELFObjectWriter, AArch64ELFObjectWriter
         from codegen.arm_constant_island import ARMConstantIsland
 
         pass_manager.passes.append(ARMConstantIsland())
 
         objformat = self.triple.objformat
 
-        mccontext.asm_info = ARMAsmInfo()
+        mccontext.asm_info = AArch64AsmInfo()
         if is_asm:
             raise NotImplementedError()
         else:
-            emitter = ARMCodeEmitter(mccontext)
-            backend = ARMAsmBackend()
+            emitter = AArch64CodeEmitter(mccontext)
+            backend = AArch64AsmBackend()
 
             if objformat == ObjectFormatType.ELF:
-                target_writer = ARMELFObjectWriter()
+                target_writer = AArch64ELFObjectWriter()
                 writer = ELFObjectWriter(output, target_writer)
                 stream = ELFObjectStream(mccontext, backend, writer, emitter)
 
-        pass_manager.passes.append(ARMAsmPrinter(stream))
+        pass_manager.passes.append(AArch64AsmPrinter(stream))

@@ -9,21 +9,6 @@ import ast
 
 
 def evaluate_constant_expr(ctx, expr):
-    if isinstance(expr, TypedFunctionCall):
-        if expr.ident.name.name == "vec3":
-            params = []
-            for param in expr.params:
-                param_expr = evaluate_constant_expr(ctx, param)
-                assert(isinstance(param_expr, Constant))
-                params.append(param_expr)
-
-            if len(params) == 3:
-                param_w = ConstantFP(0.0, f32)
-                return ConstantVector(params + [param_w], VectorType("", f32, 4))
-
-            if len(params) == 1:
-                return ConstantVector(params * 4, VectorType("", f32, 4))
-
     if isinstance(expr, FloatingConstantExpr):
         return ConstantFP(expr.val, ctx.get_ir_type(expr.type))
 
@@ -36,6 +21,8 @@ def evaluate_constant_expr(ctx, expr):
         val = evaluate_constant_expr(ctx, expr.expr)
         if op == "-":
             def calc(a): return -a
+        if op == "~":
+            def calc(a): return ((1 << 64) - 1) ^ a
 
         if isinstance(val, ConstantInt):
             return ConstantInt(calc(val.value), val.ty)
@@ -49,51 +36,121 @@ def evaluate_constant_expr(ctx, expr):
 
         lhs_val = evaluate_constant_expr(ctx, expr.lhs)
         rhs_val = evaluate_constant_expr(ctx, expr.rhs)
-        if op == "+":
-            def calc(a, b): return a + b
-        elif op == "-":
-            def calc(a, b): return a - b
-        elif op == "*":
-            def calc(a, b): return a * b
-        elif op == "/":
-            def calc(a, b): return a / b
 
-        if isinstance(lhs_val, ConstantInt):
-            return ConstantInt(calc(lhs_val.value, rhs_val.value), lhs_val.ty)
+        if isinstance(lhs_val, (ConstantInt, CastInst)):
+            def construct_val(value, ty):
+                return ConstantInt(value, ty)
         elif isinstance(lhs_val, ConstantFP):
-            return ConstantFP(calc(lhs_val.value, rhs_val.value), lhs_val.ty)
-        else:
-            raise ValueError("Invalid type")
+            def construct_val(value, ty):
+                return ConstantFP(value, ty)
+
+        if op == "+":
+            def calc(a, b): return construct_val(a.value + b.value, a.ty)
+        elif op == "-":
+            def calc(a, b): return construct_val(a.value - b.value, a.ty)
+        elif op == "*":
+            def calc(a, b): return construct_val(a.value * b.value, a.ty)
+        elif op == "/":
+            def calc(a, b): return construct_val(a.value / b.value, a.ty)
+        elif op == "<<":
+            def calc(a, b): return construct_val(a.value << b.value, a.ty)
+        elif op == ">>":
+            def calc(a, b): return construct_val(a.value >> b.value, a.ty)
+        elif op == "&":
+            def calc(a, b): return construct_val(a.value & b.value, a.ty)
+        elif op == "|":
+            def calc(a, b): return construct_val(a.value | b.value, a.ty)
+        elif op == "^":
+            def calc(a, b): return construct_val(a.value ^ b.value, a.ty)
+
+        if isinstance(lhs_val, CastInst):
+            lhs_val = lhs_val.rs
+        if isinstance(rhs_val, CastInst):
+            rhs_val = rhs_val.rs
+
+        result = calc(lhs_val, rhs_val)
+        result_ty = ctx.get_ir_type(expr.type)
+
+        if isinstance(result_ty, PointerType):
+            return cast(None, result, result_ty, is_signed_type(result.ty), ctx)
+
+        return result
 
     if isinstance(expr, TypedIdentExpr):
         if not isinstance(expr.type, ast.types.EnumType):
-            raise ValueError("Invalid type")
+            _, value = get_lvalue(expr, None, ctx)
+            assert(isinstance(value, (GlobalVariable, Function)))
+            return value
 
         value = expr.type.values[expr.val.name]
 
         return ConstantInt(value, i32)
+
+    if isinstance(expr, StringLiteralExpr):
+        assert(isinstance(expr.type, ast.types.ArrayType))
+
+        values = []
+        for ch in expr.val:
+            values.append(ConstantInt(ord(ch), i8))
+
+        values.append(ConstantInt(0, i8))
+
+        ty = ctx.get_ir_type(expr.type)
+
+        return ConstantArray(values, ty)
 
     if isinstance(expr, TypedInitializerList):
         field_idx = 0
         if isinstance(expr.type, ast.types.CompositeType):
             field_vals = []
             for field_ty, field_name, _ in expr.type.fields:
-                _, field_val = expr.exprs[field_idx]
+                designator, field_val = expr.exprs[field_idx]
+
+                if designator:
+                    raise NotImplementedError()
+
                 field_idx += 1
                 field_vals.append(evaluate_constant_expr(ctx, field_val))
             return ConstantStruct(field_vals, ctx.get_ir_type(expr.type))
         elif isinstance(expr.type, (ast.types.ArrayType, ast.types.PointerType)):
             values = []
-            for _, elem_expr in expr.exprs:
-                values.append(evaluate_constant_expr(ctx, elem_expr))
 
             ty = ctx.get_ir_type(expr.type)
-            ty = ArrayType(ty.elem_ty, len(expr.exprs))
+            elem_ty = ctx.get_ir_type(expr.type.elem_ty)
+
+            for designators, elem_expr in expr.exprs:
+                if designators:
+                    value = evaluate_constant_expr(ctx, elem_expr)
+                    for designator in designators:
+                        assert(isinstance(designator, IntegerConstantExpr))
+                        designator_idx = designator.val
+
+                        if designator_idx > len(values):
+                            values.extend([get_constant_null_value(
+                                ty.elem_ty)] * (designator_idx - len(values)))
+                        values.insert(designator_idx, value)
+                else:
+                    if isinstance(elem_ty, PointerType) and isinstance(elem_expr, StringLiteralExpr):
+                        _, value = get_lvalue(elem_expr, None, ctx)
+                    else:
+                        value = evaluate_constant_expr(ctx, elem_expr)
+
+                    if elem_ty != value.ty:
+                        value = cast(None, value, elem_ty,
+                                     is_signed_type(elem_expr), ctx)
+                    values.append(value)
+
+            if ty.size > len(values):
+                values.extend([get_constant_null_value(ty.elem_ty)]
+                              * (ty.size - len(values)))
+
+            ty = ArrayType(ty.elem_ty, len(values))
 
             return ConstantArray(values, ty)
 
     if isinstance(expr, CastExpr):
-        return evaluate_constant_expr(ctx, expr.expr)
+        ty = ctx.get_ir_type(expr.type)
+        return cast(None, evaluate_constant_expr(ctx, expr.expr), ty, is_signed_type(expr.expr.type), ctx)
 
     raise NotImplementedError()
 
@@ -114,6 +171,15 @@ class Context:
         self.module = module
         self.func_ctx = []
         self.funcs = {}
+        self.goto_jump_query = []
+        self.goto_targets = {}
+
+    def query_goto_jump(self, jump_from, goto_label):
+        if goto_label in self.goto_targets:
+            JumpInst(jump_from, self.goto_targets[goto_label])
+            return
+
+        self.goto_jump_query.append((jump_from, goto_label))
 
     @property
     def in_inline(self):
@@ -136,7 +202,7 @@ class Context:
     @property
     def named_values(self):
         if not self.func_ctx:
-            return None
+            return {}
 
         return self.func_ctx[-1].named_values
 
@@ -240,12 +306,19 @@ class Context:
                 return f64
         if isinstance(ast_ty, ast.types.CompositeType):
             if ast_ty.name and self.module.contains_struct_type(ast_ty.name):
-                return self.module.structs[ast_ty.name]
+                ty = self.module.structs[ast_ty.name]
+                return ty
 
-            fields = [self.get_ir_type(ty) for ty, name, arr in ast_ty.fields]
-            ty = StructType(ast_ty.name, fields)
-            assert(ast_ty.name)
+            if not ast_ty.fields:
+                # Incomplete type
+                return PrimitiveType("i8")
+
+            ty = StructType(name=ast_ty.name, is_packed=ast_ty.is_packed)
             self.module.add_struct_type(ast_ty.name, ty)
+
+            ty.fields = [self.get_ir_type(field_ty)
+                         for field_ty, name, arr in ast_ty.fields]
+            assert(ast_ty.name)
             return ty
 
         if isinstance(ast_ty, ast.types.VoidType):
@@ -259,16 +332,18 @@ class Context:
             return_ty = func_info.return_info.ty
             if func_info.return_info.kind == ABIArgKind.Direct:
                 pass
-            elif func_info.return_info.kind in [ABIArgKind.Indirect, ABIArgKind.Ignore]:
+            elif func_info.return_info.kind == ABIArgKind.Indirect:
                 params_ty.append(return_ty)
+                return_ty = void
+            elif func_info.return_info.kind == ABIArgKind.Ignore:
                 return_ty = void
             else:
                 raise NotImplementedError()
 
             params_ty.extend([self.get_ir_type(ast_param_ty)
-                              for (ast_param_ty, _, _) in ast_ty.params])
+                              for (ast_param_ty, _, _) in ast_ty.params if not isinstance(ast_param_ty, ast.types.VoidType)])
 
-            return FunctionType(None, return_ty, params_ty, ast_ty.is_variadic)
+            return FunctionType(return_ty, params_ty, ast_ty.is_variadic)
 
         if isinstance(ast_ty, ast.types.VectorType):
             elem_ty = self.get_ir_type(ast_ty.elem_ty)
@@ -302,15 +377,64 @@ class Context:
         arg_tys = [PointerType(i8, 0)]
         return self.module.get_or_declare_intrinsic_func("llvm.va_end", arg_tys)
 
+    def get_returnaddress_func(self, level):
+        arg_tys = [i32]
+        return self.module.get_or_declare_intrinsic_func("llvm.returnaddress", arg_tys)
+
 
 def get_lvalue(node, block, ctx):
     if isinstance(node, TypedIdentExpr):
-        return block, ctx.named_values[node.val]
+        if node.val in ctx.named_values:
+            return block, ctx.named_values[node.val]
+
+        return block, ctx.global_named_values[node.val]
 
     if isinstance(node, TypedUnaryOp):
         if node.op == "*":
             block, expr = get_lvalue(node.expr, block, ctx)
             return block, LoadInst(block, expr)
+        if node.op == "&":
+            return get_lvalue(node.expr, block, ctx)
+        if node.op in ["++", "--"]:
+            block, mem = get_lvalue(node.expr, block, ctx)
+            value = LoadInst(block, mem)
+
+            if node.op == "++":
+                op = 'add'
+            else:
+                op = 'sub'
+
+            if isinstance(node.expr.type, ast.types.PointerType):
+                inc_value = GetElementPtrInst(
+                    block, value, value.ty, ConstantInt(1, i32))
+            else:
+                one = ConstantInt(1, ctx.get_ir_type(node.expr.type))
+                inc_value = BinaryInst(block, op, value, one)
+
+            StoreInst(block, inc_value, mem)
+
+            return block, mem
+
+    if isinstance(node, TypedPostOp):
+        if node.op in ["++", "--"]:
+            block, mem = get_lvalue(node.expr, block, ctx)
+            value = LoadInst(block, mem)
+
+            if node.op == "++":
+                op = 'add'
+            else:
+                op = 'sub'
+
+            if isinstance(node.expr.type, ast.types.PointerType):
+                inc_value = GetElementPtrInst(
+                    block, value, value.ty, ConstantInt(1, i32))
+            else:
+                one = ConstantInt(1, ctx.get_ir_type(node.expr.type))
+                inc_value = BinaryInst(block, op, value, one)
+
+            StoreInst(block, inc_value, mem)
+
+            return block, mem
 
     if isinstance(node, TypedCommaOp):
         return block, get_lvalue(node.exprs[-1], block, ctx)
@@ -325,7 +449,7 @@ def get_lvalue(node, block, ctx):
             return [(field_idx, None)]
 
         for idx, (field_ty, field_name, _) in enumerate(ty.fields):
-            if field_name.startswith("struct.anon"):
+            if not field_name:
                 result = get_field_ptr(field_ty, field)
                 if result:
                     if ty.is_union:
@@ -418,9 +542,9 @@ def get_lvalue(node, block, ctx):
         value = ConstantArray(values, ctx.get_ir_type(node.type))
 
         value = GlobalVariable(
-            value.ty, True, GlobalLinkage.Global, f".str{len(ctx.module.global_variables)}", initializer=value)
+            value.ty, True, GlobalLinkage.Global, f".str{len(ctx.module.globals)}", initializer=value)
 
-        ctx.module.add_global_variable(value)
+        ctx.module.add_global(value.name, value)
 
         ctx.named_values[node] = value
 
@@ -484,21 +608,26 @@ def build_ir_assign_op(lhs_node, rhs, block, ctx):
     if lhs.ty.elem_ty != rhs.ty:
         rhs = cast(block, rhs, lhs.ty.elem_ty,
                    is_signed_type(lhs_node.type), ctx)
-    return block, StoreInst(block, rhs, lhs)
+
+    StoreInst(block, rhs, lhs)
+    return block, rhs
 
 
 def build_ir_expr_assign_op(node, block, ctx):
-    if node.op in ["+=", "-=", "*=", "/=", "<<=", ">>="]:
+    if node.op in ["+=", "-=", "*=", "/=", "<<=", ">>=", "&=", "|=", "^="]:
         block, lhs = build_ir_expr(node.lhs, block, ctx)
         block, rhs = build_ir_expr(node.rhs, block, ctx)
+
+        if isinstance(node.lhs.type, ast.types.PointerType) and is_integer_type(node.rhs.type):
+            return block, GetElementPtrInst(block, lhs, lhs.ty, rhs)
 
         if rhs.ty != lhs.ty:
             rhs = cast(block, rhs, lhs.ty, is_signed_type(node.lhs.type), ctx)
 
-        if is_integer_ty(lhs.ty):
-            prefix = ""
-        else:
+        if is_float_ty(lhs.ty):
             prefix = "f"
+        else:
+            prefix = ""
 
         if node.op == "+=":
             op = "add"
@@ -518,6 +647,12 @@ def build_ir_expr_assign_op(node, block, ctx):
                 op = "ashr"
             else:
                 op = "lshr"
+        elif node.op == "&=":
+            op = "and"
+        elif node.op == "|=":
+            op = "or"
+        elif node.op == "^=":
+            op = "xor"
 
         op = prefix + op
         rhs = BinaryInst(block, op, lhs, rhs)
@@ -593,11 +728,21 @@ def cast(block, value, ty, signed, ctx):
         raise ValueError("Unsupporing cast")
 
 
+def is_constant_zero(value):
+    if not isinstance(value.ty, PrimitiveType):
+        return False
+
+    return value.value == 0
+
+
 def build_ir_expr_cmp_op(node, block, ctx):
     block, lhs = build_ir_expr(node.lhs, block, ctx)
     block, rhs = build_ir_expr(node.rhs, block, ctx)
 
     result_ty = ctx.get_ir_type(node.type)
+
+    if isinstance(lhs.ty, PointerType) and is_constant_zero(rhs):
+        rhs = ConstantPointerNull(lhs.ty)
 
     assert(lhs.ty == rhs.ty)
 
@@ -632,9 +777,30 @@ def build_ir_expr_cmp_op(node, block, ctx):
         elif node.op == '>':
             op = 'sgt' if is_signed else 'ugt'
         elif node.op == '<=':
-            op = 'slte' if is_signed else 'ulte'
+            op = 'sle' if is_signed else 'ule'
         elif node.op == '>=':
-            op = 'sgte' if is_signed else 'ulte'
+            op = 'sge' if is_signed else 'uge'
+        else:
+            raise ValueError(
+                "The compare node has invalid operator: " + node.op)
+
+        return block, CmpInst(block, op, lhs, rhs)
+
+    elif isinstance(node.lhs.type, ast.types.PointerType):
+        is_signed = False
+
+        if node.op == '==':
+            op = 'eq'
+        elif node.op == '!=':
+            op = 'ne'
+        elif node.op == '<':
+            op = 'slt' if is_signed else 'ult'
+        elif node.op == '>':
+            op = 'sgt' if is_signed else 'ugt'
+        elif node.op == '<=':
+            op = 'sle' if is_signed else 'ule'
+        elif node.op == '>=':
+            op = 'sge' if is_signed else 'uge'
         else:
             raise ValueError(
                 "The compare node has invalid operator: " + node.op)
@@ -647,6 +813,12 @@ def build_ir_expr_cmp_op(node, block, ctx):
 def build_ir_expr_logical_op(node, block, ctx):
     block, lhs = build_ir_expr(node.lhs, block, ctx)
     block, rhs = build_ir_expr(node.rhs, block, ctx)
+
+    if lhs.ty == i1:
+        lhs = ZExtInst(block, lhs, i32)
+
+    if rhs.ty == i1:
+        rhs = ZExtInst(block, rhs, i32)
 
     if node.op == '&&':
         op = 'and'
@@ -662,10 +834,16 @@ def build_ir_expr_logical_op(node, block, ctx):
 
 
 def is_integer_type(ty):
+    if not isinstance(ty, ast.types.PrimitiveType):
+        return False
+
     return ty.name in ["char", "unsigned char", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long"]
 
 
 def is_floating_type(ty):
+    if not isinstance(ty, ast.types.PrimitiveType):
+        return False
+
     return ty.name in ["float", "double"]
 
 
@@ -692,6 +870,8 @@ def build_ir_expr_arith_op(node, block, ctx):
             op = 'mul'
         elif node.op == '/':
             op = 'sdiv' if is_signed else 'udiv'
+        elif node.op == '%':
+            op = 'srem' if is_signed else 'urem'
         elif node.op == '>>':
             op = 'ashr' if is_signed else 'lshr'
         elif node.op == '<<':
@@ -712,9 +892,33 @@ def build_ir_expr_arith_op(node, block, ctx):
             op = 'fmul'
         elif node.op == '/':
             op = 'fdiv'
+        elif node.op == '%':
+            op = 'frem'
         else:
             raise ValueError(
                 "The arithematic node has invalid operator: " + node.op)
+    elif isinstance(node.lhs.type, ast.types.PointerType) and is_integer_type(node.rhs.type):
+        block, ptr = build_ir_expr(node.lhs, block, ctx)
+        block, idx = build_ir_expr(node.rhs, block, ctx)
+        elem_size = ctx.module.data_layout.get_type_alloc_size(
+            ctx.get_ir_type(node.lhs.type.elem_ty))
+        offset = BinaryInst(block, "mul", idx, ConstantInt(elem_size, idx.ty))
+        return block, GetElementPtrInst(block, ptr, ptr.ty, offset)
+    elif isinstance(node.lhs.type, ast.types.PointerType) and isinstance(node.rhs.type, ast.types.PointerType):
+        block, lhs_ptr = build_ir_expr(node.lhs, block, ctx)
+        block, rhs_ptr = build_ir_expr(node.rhs, block, ctx)
+
+        lhs_ptr = BitCastInst(block, lhs_ptr, i64)
+        rhs_ptr = BitCastInst(block, rhs_ptr, i64)
+
+        elem_size = ctx.module.data_layout.get_type_alloc_size(
+            ctx.get_ir_type(node.lhs.type.elem_ty))
+
+        diff = BinaryInst(block, "sub", lhs_ptr, rhs_ptr)
+        diff = BinaryInst(block, "udiv", diff,
+                          ConstantInt(elem_size, lhs_ptr.ty))
+
+        return block, diff
     else:
         raise ValueError(
             "Can't find the operator appropriating for the values")
@@ -757,7 +961,7 @@ def build_ir_expr_arith_op(node, block, ctx):
 
 
 def build_ir_expr_binary_op(node, block, ctx):
-    if node.op in ['=', '+=', '-=', '*=', '/=', '>>=', '<<=']:
+    if node.op in ['=', '+=', '-=', '*=', '/=', '>>=', '<<=', '&=', '|=', '^=']:
         return build_ir_expr_assign_op(node, block, ctx)
 
     if node.op in ['+', '-', '*', '/', '%', '>>', '<<', '&', '|']:
@@ -807,14 +1011,18 @@ def build_ir_expr_post_op(node, block, ctx):
         block, mem = get_lvalue(node.expr, block, ctx)
         value = LoadInst(block, mem)
 
-        one = ConstantInt(1, ctx.get_ir_type(node.expr.type))
-
         if node.op == "++":
             op = 'add'
         else:
             op = 'sub'
 
-        inc_value = BinaryInst(block, op, value, one)
+        if isinstance(node.expr.type, ast.types.PointerType):
+            inc_value = GetElementPtrInst(
+                block, value, value.ty, ConstantInt(1, i32))
+        else:
+            one = ConstantInt(1, ctx.get_ir_type(node.expr.type))
+            inc_value = BinaryInst(block, op, value, one)
+
         StoreInst(block, inc_value, mem)
 
         return block, value
@@ -824,26 +1032,41 @@ def build_ir_expr_post_op(node, block, ctx):
 
 def build_ir_expr_unary_op(node, block, ctx):
     if node.op in ["++", "--"]:
-        block, lhs_ptr = get_lvalue(node.expr, block, ctx)
-        lhs = LoadInst(block, lhs_ptr)
-        rhs = ConstantInt(1, ctx.get_ir_type(node.expr.type))
+        block, mem = get_lvalue(node.expr, block, ctx)
+        value = LoadInst(block, mem)
 
         if node.op == "++":
             op = 'add'
         elif node.op == "--":
             op = 'sub'
 
-        val = BinaryInst(block, op, lhs, rhs)
-        StoreInst(block, val, lhs_ptr)
+        if isinstance(node.expr.type, ast.types.PointerType):
+            inc_value = GetElementPtrInst(
+                block, value, value.ty, ConstantInt(1, i32))
+        else:
+            one = ConstantInt(1, ctx.get_ir_type(node.expr.type))
+            inc_value = BinaryInst(block, op, value, one)
 
-        return block, val
+        StoreInst(block, inc_value, mem)
+
+        return block, inc_value
 
     if node.op == "!":
         block, val = build_ir_expr(node.expr, block, ctx)
 
         op = 'xor'
 
+        if isinstance(val.ty, PointerType):
+            val = PtrToIntInst(block, val, i32)
+
         return block, BinaryInst(block, op, val, ConstantInt(1, val.ty))
+
+    if node.op == "~":
+        block, val = build_ir_expr(node.expr, block, ctx)
+
+        op = 'xor'
+
+        return block, BinaryInst(block, op, val, ConstantInt(-1, val.ty))
 
     if node.op in ["-"]:
         block, rhs = build_ir_expr(node.expr, block, ctx)
@@ -879,6 +1102,13 @@ def build_ir_expr_ident(node, block, ctx):
     if isinstance(node.type, ast.types.CompositeType):
         block, lval = get_lvalue(node, block, ctx)
         return block, LoadInst(block, lval)
+
+    if isinstance(node.val, FunctionSymbol):
+        return block, ctx.funcs[node.val.name]
+
+    if isinstance(node.type, ast.types.EnumType):
+        value = node.type.values[node.val.name]
+        return block, ConstantInt(value, i32)
 
     mem = ctx.named_values[node.val]
     return block, LoadInst(block, mem)
@@ -921,111 +1151,98 @@ def build_ir_assign_op_formal_arg(lhs_node, rhs, block, ctx):
     return build_ir_assign_op(lhs_node, rhs, block, ctx)
 
 
+from c.symtab import FunctionSymbol, VariableSymbol
+
+
 def build_ir_expr_func_call(node, block, ctx):
     from ir.types import PointerType
 
-    if node.ident.name == "__va_start":
-        block, va_list = build_ir_expr(node.params[0], block, ctx)
-        va_list = BitCastInst(block, va_list, PointerType(i8, 0))
-        va_start_func = ctx.get_va_start_func(va_list)
-        return block, CallInst(block, va_start_func, [va_list])
+    if isinstance(node.ident, FunctionSymbol):
+        if node.ident.name == "__va_start":
+            block, va_list = build_ir_expr(node.params[0], block, ctx)
+            va_list = BitCastInst(block, va_list, PointerType(i8, 0))
+            va_start_func = ctx.get_va_start_func(va_list)
+            return block, CallInst(block, va_start_func.func_ty, va_start_func, [va_list])
 
-    if node.ident.name == "__va_end":
-        block, va_list = build_ir_expr(node.params[0], block, ctx)
-        va_list = BitCastInst(block, va_list, PointerType(i8, 0))
-        va_end_func = ctx.get_va_end_func(va_list)
-        return block, CallInst(block, va_end_func, [va_list])
+        if node.ident.name == "__va_end":
+            block, va_list = build_ir_expr(node.params[0], block, ctx)
+            va_list = BitCastInst(block, va_list, PointerType(i8, 0))
+            va_end_func = ctx.get_va_end_func(va_list)
+            return block, CallInst(block, va_end_func.func_ty, va_end_func, [va_list])
 
-    if node.ident in ctx.defined_funcs:
-        callee_func = ctx.defined_funcs[node.ident]
+        if node.ident.name == "__builtin_return_address":
+            block, level = build_ir_expr(node.params[0], block, ctx)
+            returnaddress_func = ctx.get_returnaddress_func(level)
+            return block, CallInst(block, returnaddress_func.func_ty, returnaddress_func, [level])
 
-        test = node.ident.name in[
-            # "add_v3v3",
-            # "sub_v3v3",
-            # "mul_v3v3",
-            # "div_v3v3",
-            # "dot_v3v3",
-            # "cross_v3v3",
+        if node.ident in ctx.defined_funcs:
+            callee_func = ctx.defined_funcs[node.ident]
 
-            # "normalize_v3",
-            # "max_v3",
-            # "min_v3",
-            # "minus_v3",
+            if callee_func.proto.specs.func_spec_inline and callee_func.stmts:
+                arg_values = []
+                for arg in node.params:
+                    if isinstance(arg.type, ast.types.ArrayType):
+                        block, arg_value = get_lvalue(arg, block, ctx)
+                    else:
+                        block, arg_value = build_ir_expr(arg, block, ctx)
+                    arg_values.append(arg_value)
 
-            # "add_v3d",
-            # "sub_v3d",
-            # "mul_v3d",
-            # "div_v3d",
+                ctx.begin_func()
 
-            # "eval_r",
-            # "intersect_sphere",
-            # "intersect",
-            # "_dorand48",
-            # "erand48",
-            # "ideal_specular_reflect",
-            # "cosine_weighted_sample_on_hemisphere",
-            # "schlick_reflectance",
-            # "reflectance0",
-            "ideal_specular_transmit",
-        ]
+                ctx.named_values.update(ctx.global_named_values)
+                traverse_depth(callee_func, enter_func=build_ir_stack_alloc,
+                               args=(block, ctx))
 
-        if "inline" in callee_func.proto.specs and callee_func.stmts:
-            arg_values = []
-            for arg in node.params:
-                if isinstance(arg.type, ast.types.ArrayType):
-                    block, arg_value = get_lvalue(arg, block, ctx)
-                else:
-                    block, arg_value = build_ir_expr(arg, block, ctx)
-                arg_values.append(arg_value)
+                alloca_insert_pt = get_alloca_insert_pt(ctx)
 
-            ctx.begin_func()
+                for arg, formal_arg in zip(arg_values, callee_func.params):
+                    if isinstance(formal_arg.ty, ast.types.ArrayType):
+                        formal_arg_ty = PointerType(
+                            ctx.get_ir_type(formal_arg.ty.elem_ty), 0)
+                    else:
+                        formal_arg_ty = ctx.get_ir_type(formal_arg.ty)
+                    mem = alloca_insert_pt = AllocaInst(
+                        alloca_insert_pt, ConstantInt(1, i32), formal_arg_ty, 0)
+                    ctx.named_values[formal_arg] = mem
 
-            ctx.named_values.update(ctx.global_named_values)
-            traverse_depth(callee_func, enter_func=build_ir_stack_alloc,
-                           args=(block, ctx))
+                    block, _ = build_ir_assign_op_formal_arg(TypedIdentExpr(
+                        formal_arg, formal_arg.ty), arg, block, ctx)
 
-            alloca_insert_pt = get_alloca_insert_pt(ctx)
+                return_ty = ctx.get_ir_type(callee_func.proto.type)
+                if return_ty != void:
+                    return_value = alloca_insert_pt = AllocaInst(
+                        alloca_insert_pt, ConstantInt(1, i32), return_ty, 0)
 
-            for arg, formal_arg in zip(arg_values, callee_func.params):
-                if isinstance(formal_arg.ty, ast.types.ArrayType):
-                    formal_arg_ty = PointerType(
-                        ctx.get_ir_type(formal_arg.ty.elem_ty), 0)
-                else:
-                    formal_arg_ty = ctx.get_ir_type(formal_arg.ty)
-                mem = alloca_insert_pt = AllocaInst(
-                    alloca_insert_pt, ConstantInt(1, i32), formal_arg_ty, 0)
-                ctx.named_values[formal_arg] = mem
+                    ctx.return_value = return_value
 
-                block, _ = build_ir_assign_op_formal_arg(TypedIdentExpr(
-                    formal_arg, formal_arg.ty), arg, block, ctx)
+                block_end = BasicBlock(block.func, block)
+                if callee_func.stmts:
+                    ctx.push_return_target(block_end)
+                    for stmt in callee_func.stmts:
+                        block = build_ir_stmt(stmt, block, ctx)
+                    ctx.push_return_target(block_end)
 
-            return_ty = ctx.get_ir_type(callee_func.proto.type)
-            if return_ty != void:
-                return_value = alloca_insert_pt = AllocaInst(
-                    alloca_insert_pt, ConstantInt(1, i32), return_ty, 0)
+                ctx.end_func()
 
-                ctx.return_value = return_value
+                JumpInst(block, block_end)
 
-            block_end = BasicBlock(block.func, block)
-            if callee_func.stmts:
-                ctx.push_return_target(block_end)
-                for stmt in callee_func.stmts:
-                    block = build_ir_stmt(stmt, block, ctx)
-                ctx.push_return_target(block_end)
+                if return_ty != void:
+                    return block_end, LoadInst(block_end, return_value)
 
-            ctx.end_func()
+                block_end.move(block)
 
-            JumpInst(block, block_end)
-
-            if return_ty != void:
-                return block_end, LoadInst(block_end, return_value)
-
-            block_end.move(block)
-
-            return block_end, None
+                return block_end, None
 
     params = []
-    func_info = compute_func_info(ctx, node.ident.ty)
+
+    if isinstance(node.ident, FunctionSymbol):
+        func_ty = node.ident.ty.elem_ty
+    elif isinstance(node.ident, VariableSymbol):
+        func_ty = node.ident.ty.elem_ty
+    else:
+        func_ty = node.ident.type.elem_ty
+
+    func_info = compute_func_info(ctx, func_ty)
 
     if func_info.return_info.kind == ABIArgKind.Indirect:
         mem = ctx.named_values[node]
@@ -1041,7 +1258,7 @@ def build_ir_expr_func_call(node, block, ctx):
             ty = arg_info.ty
             kind = arg_info.kind
         else:
-            assert(node.ident.ty.is_variadic)
+            assert(func_ty.is_variadic)
             ty = param_ty
             src_size = ctx.module.data_layout.get_type_alloc_size(ty)
             dst_size = ctx.module.data_layout.get_type_alloc_size(i32)
@@ -1057,21 +1274,29 @@ def build_ir_expr_func_call(node, block, ctx):
                 src_type = param_ty
                 dst_type = ty
 
+                if isinstance(src_type, FunctionType) and isinstance(dst_type, PointerType):
+                    block, val = get_lvalue(param, block, ctx)
+                    print("")
+
                 src_size = ctx.module.data_layout.get_type_alloc_size(src_type)
                 dst_size = ctx.module.data_layout.get_type_alloc_size(dst_type)
 
                 if src_type in [i1, i8, i16, i32, i64] and dst_type in [i1, i8, i16, i32, i64]:
                     if src_size <= dst_size:
                         block, val = build_ir_expr(param, block, ctx)
-                        val = ZExtInst(block, val, ty)
+                        val = ZExtInst(block, val, dst_type)
                     else:
-                        raise NotImplementedError()
+                        block, val = build_ir_expr(param, block, ctx)
+                        val = TruncInst(block, val, dst_type)
                 elif src_type in [f16, f32, f64, f128] and dst_type in [f16, f32, f64, f128]:
                     if src_size <= dst_size:
                         block, val = build_ir_expr(param, block, ctx)
                         val = FPExtInst(block, val, dst_type)
                     else:
                         raise NotImplementedError()
+                elif src_type in [i1, i8, i16, i32, i64] and isinstance(dst_type, PointerType):
+                    block, val = build_ir_expr(param, block, ctx)
+                    val = IntToPtrInst(block, val, dst_type)
                 elif isinstance(src_type, PointerType) and isinstance(dst_type, PointerType):
                     block, val = get_lvalue(param, block, ctx)
                     val = BitCastInst(
@@ -1095,7 +1320,15 @@ def build_ir_expr_func_call(node, block, ctx):
 
         params.append(val)
 
-    call_inst = CallInst(block, ctx.funcs[node.ident.name], params)
+    if isinstance(node.ident, FunctionSymbol):
+        callee = ctx.funcs[node.ident.name]
+    elif isinstance(node.ident, VariableSymbol):
+        callee = ctx.named_values[node.ident]
+        callee = LoadInst(block, callee)
+    else:
+        block, callee = build_ir_expr(node.ident, block, ctx)
+
+    call_inst = CallInst(block, ctx.get_ir_type(func_ty), callee, params)
 
     if func_info.return_info.kind == ABIArgKind.Indirect:
         value = LoadInst(block, return_mem)
@@ -1120,6 +1353,8 @@ def build_ir_expr_accessor(node, block, ctx):
     assert isinstance(node, (TypedAccessorOp,))
 
     block, lval = get_lvalue(node, block, ctx)
+    if isinstance(lval.ty.elem_ty, ArrayType):
+        return block, GetElementPtrInst(block, lval, lval.ty, ConstantInt(0, i32), ConstantInt(0, i32))
     return block, LoadInst(block, lval)
 
 
@@ -1189,9 +1424,16 @@ def build_ir_expr(node, block, ctx):
     if isinstance(node, CastExpr):
         result_ty = ctx.get_ir_type(node.type)
 
+        if isinstance(node.expr.type, ast.types.ArrayType) and isinstance(node.type, ast.types.PointerType):
+            block, val = get_lvalue(node.expr, block, ctx)
+            val = GetElementPtrInst(
+                block, val, val.ty, ConstantInt(0, i32), ConstantInt(0, i32))
+            return block, val
+
         block, value = build_ir_expr(node.expr, block, ctx)
         return block, cast(block, value, result_ty, is_signed_type(node.expr.type), ctx)
 
+    print(node)
     raise Exception("Unreachable")
 
 
@@ -1211,6 +1453,8 @@ def build_ir_if_stmt(node, block, ctx):
     block, cond = build_ir_expr(node.cond, block, ctx)
 
     if cond.ty != i1:
+        if isinstance(cond.ty, PointerType):
+            cond = PtrToIntInst(block, cond, i32)
         cond = CmpInst(block, "ne", cond, ConstantInt(0, cond.ty))
 
     ctx.push_branch_target(block_cont)
@@ -1257,6 +1501,8 @@ def build_ir_while_stmt(node, block, ctx):
     block_cond, cond = build_ir_expr(node.cond, block_cond, ctx)
 
     if cond.ty != i1:
+        if isinstance(cond.ty, PointerType):
+            cond = PtrToIntInst(block_cond, cond, i32)
         cond = CmpInst(block_cond, "ne", cond, ConstantInt(0, cond.ty))
 
     BranchInst(block_cond, cond, block_then, block_cont)
@@ -1292,9 +1538,17 @@ def build_ir_for_stmt(node, block, ctx):
 
     JumpInst(block, block_cond)
 
-    block_cond, cond = build_ir_expr(node.cond, block_cond, ctx)
+    if node.cond:
+        block_cond, cond = build_ir_expr(node.cond, block_cond, ctx)
 
-    BranchInst(block_cond, cond, block_then, block_cont)
+        if cond.ty != i1:
+            if isinstance(cond.ty, PointerType):
+                cond = PtrToIntInst(block_cond, cond, i32)
+            cond = CmpInst(block_cond, "ne", cond, ConstantInt(0, cond.ty))
+
+        BranchInst(block_cond, cond, block_then, block_cont)
+    else:
+        JumpInst(block_cond, block_then)
 
     ctx.push_break_target(block_cont)
     ctx.push_continue_target(block_cond)
@@ -1328,6 +1582,14 @@ def build_ir_continue_stmt(node, block, ctx):
 
 def build_ir_break_stmt(node, block, ctx):
     JumpInst(block, ctx.get_break_target())
+
+    block = BasicBlock(block.func, block)
+    return block
+
+
+def build_ir_goto_stmt(node, block, ctx):
+    assert(isinstance(node.label, Ident))
+    ctx.query_goto_jump(block, node.label.val)
 
     block = BasicBlock(block.func, block)
     return block
@@ -1375,7 +1637,7 @@ def build_ir_return_stmt(node, block, ctx):
         lhs = BitCastInst(block, lhs, PointerType(i8, 0))
 
         memcpy = ctx.get_memcpy_func(lhs, rhs, size)
-        CallInst(block, memcpy, [lhs, rhs, ConstantInt(
+        CallInst(block, memcpy.func_ty, memcpy, [lhs, rhs, ConstantInt(
             int(size / 8), i32), ConstantInt(int(align / 8), i32), ConstantInt(0, i1)])
 
         JumpInst(block, ctx.get_return_target())
@@ -1408,49 +1670,88 @@ def build_ir_switch_stmt(node, block, ctx):
 
     blocks = {}
     cur_block = block
+    default_block = None
     for stmt in stmts:
-        assert(isinstance(stmt, CaseLabelStmt))
+        if not isinstance(stmt, CaseLabelStmt):
+            continue
+
+        if not stmt.expr:
+            continue
 
         cur_block = BasicBlock(block.func, cur_block)
         blocks[stmt] = cur_block
 
+    cur_block = BasicBlock(block.func, cur_block)
+    default_block = cur_block
+
     cont_block = BasicBlock(block.func, cur_block)
 
     block, cond = build_ir_expr(node.cond, block, ctx)
-    assert(cond.ty in [i32])
+    if cond.ty in [i1, i8, i16]:
+        cond = cast(block, cond, i32, is_signed_type(node.cond.type), ctx)
+    assert(cond.ty in [i32, i64])
+
+    label_ty = cond.ty
 
     cases = []
-    default_block = None
     for case_label, case_block in blocks.items():
         if not case_label.expr:
-            default_block = case_block
             continue
 
-        cases.append(evaluate_constant_expr(ctx, case_label.expr))
+        label = evaluate_constant_expr(ctx, case_label.expr)
+        if label.ty in [i1, i8, i16, i32, i64] and label.ty != label_ty:
+            label = ConstantInt(label.value, label_ty)
+        assert(label.ty == label_ty)
+
+        if label.ty in [i1, i8, i16]:
+            label = ConstantInt(label.value, label_ty)
+
+        cases.append(label)
         cases.append(case_block)
 
     SwitchInst(block, cond, default_block, cases)
 
-    for case_label in stmts:
-        assert(isinstance(case_label, CaseLabelStmt))
+    cur_label = None
+    for stmt in stmts:
+        if isinstance(stmt, CaseLabelStmt):
+            cur_label = stmt
+
+        if not cur_label.expr:
+            ctx.push_break_target(cont_block)
+
+            default_block = build_ir_stmt(
+                stmt, default_block, ctx)
+
+            ctx.pop_break_target()
+            continue
 
         ctx.push_break_target(cont_block)
 
-        blocks[case_label] = build_ir_stmt(
-            case_label.stmt, blocks[case_label], ctx)
+        blocks[cur_label] = build_ir_stmt(
+            stmt, blocks[cur_label], ctx)
 
         ctx.pop_break_target()
 
+    prev_block = None
     for i, case_label in enumerate(stmts):
-        assert(isinstance(case_label, CaseLabelStmt))
+        if not isinstance(case_label, CaseLabelStmt):
+            continue
 
-        current_block = blocks[case_label]
-        if i + 1 < len(stmts):
-            next_block = blocks[stmts[i + 1]]
-        else:
-            next_block = cont_block
+        if not case_label.expr:
+            continue
 
-        JumpInst(current_block, next_block)
+        cur_block = blocks[case_label]
+
+        if prev_block:
+            JumpInst(prev_block, cur_block)
+        prev_block = cur_block
+
+    if prev_block:
+        JumpInst(prev_block, default_block)
+    prev_block = default_block
+
+    if prev_block:
+        JumpInst(prev_block, cont_block)
 
     return cont_block
 
@@ -1460,22 +1761,37 @@ def build_ir_asm_stmt(node, block, ctx):
     input_operands = node.operands[1]
     cobbers = node.operands[2]
 
+    result_elems = []
     operands = []
+
+    for constraint, name in output_operands:
+        if not name:
+            continue
+
+        if constraint.value.startswith("+"):
+            block, var = get_lvalue(name, block, ctx)
+            operands.append(var)
+        else:
+            block, var = get_lvalue(name, block, ctx)
+
+            assert(isinstance(var.ty, PointerType))
+            result_elems.append(var)
+
     for constraint, name in input_operands:
-        var = ctx.named_values[name]
+        block, var = get_lvalue(name, block, ctx)
         var = LoadInst(block, var)
 
         operands.append(var)
 
-    result_ty_elems = []
-    for constraint, name in output_operands:
-        var = ctx.named_values[name]
+    if len(result_elems) == 1:
+        result_ty = result_elems[0].ty.elem_ty
+    elif result_elems:
+        result_ty = StructType(
+            fields=[elem.ty.elem_ty for elem in result_elems])
+    else:
+        result_ty = void
 
-        assert(isinstance(var.ty, PointerType))
-        result_ty_elems.append(var.ty.elem_ty)
-
-    result_ty = StructType("", result_ty_elems)
-    func_ty = FunctionType("", result_ty, [operand.ty for operand in operands])
+    func_ty = FunctionType(result_ty, [operand.ty for operand in operands])
 
     def parse_constraint(constraint):
         m = re.match("([=+&%]?)(.*)", constraint)
@@ -1501,6 +1817,10 @@ def build_ir_asm_stmt(node, block, ctx):
             constraint = "0"
         elif constraint == "1":
             constraint = "1"
+        elif constraint == "r":
+            constraint = "r"
+        elif constraint == "m":
+            constraint = "m"
         else:
             raise ValueError("Invalid constraint")
 
@@ -1509,12 +1829,22 @@ def build_ir_asm_stmt(node, block, ctx):
     asm_string = node.template
     constraints = []
     for constraint, name in output_operands:
+        if not name:
+            continue
+
         constraint = constraint.value
 
         modifier, constraint = parse_constraint(constraint)
+
+        if modifier == "+":
+            modifier = "=*"
+
         constraints.append(f"{modifier}{constraint}")
 
     for constraint, name in input_operands:
+        if not name:
+            continue
+
         constraint = constraint.value
 
         modifier, constraint = parse_constraint(constraint)
@@ -1530,14 +1860,26 @@ def build_ir_asm_stmt(node, block, ctx):
         else:
             raise ValueError("Invalid constraint")
 
+    for i in range(10):
+        asm_string = asm_string.replace(f"%{i}", f"${i}")
+    asm_string = asm_string.replace("%%", "%")
+
     asm = InlineAsm(func_ty, asm_string, ",".join(constraints), True)
 
-    asm_result = CallInst(block, asm, operands)
+    asm_result = CallInst(block, asm.func_ty, asm, operands)
 
-    for i, (constraint, name) in enumerate(output_operands):
-        var = ctx.named_values[name]
-        value = ExtractValueInst(block, asm_result, i)
-        StoreInst(block, value, var)
+    if len(result_elems) == 1:
+        result = result_elems[0]
+
+        if result:
+            StoreInst(block, asm_result, result)
+    elif result_elems:
+        for i, result in enumerate(result_elems):
+            if not result:
+                continue
+
+            value = ExtractValueInst(block, asm_result, i)
+            StoreInst(block, value, result)
 
     return block
 
@@ -1559,7 +1901,7 @@ def build_ir_stmt(node, block, ctx):
 
                     gv = GlobalVariable(
                         ty, False, GlobalLinkage.Internal, var_name, initializer=init)
-                    ctx.module.add_global_variable(gv)
+                    ctx.module.add_global(gv.name, gv)
                     ctx.named_values[variable.val] = gv
 
                 continue
@@ -1595,6 +1937,10 @@ def build_ir_stmt(node, block, ctx):
         return build_ir_return_stmt(node, block, ctx)
 
     if isinstance(node, TypedVariable):
+        if "static" in node.storage_class:
+            emit_global_variable(node, ctx)
+            return block
+
         for variable, initializer in node.idents:
             if initializer is not None:
                 block, init_expr = build_ir_expr(initializer, block, ctx)
@@ -1605,8 +1951,33 @@ def build_ir_stmt(node, block, ctx):
     if isinstance(node, SwitchStmt):
         return build_ir_switch_stmt(node, block, ctx)
 
+    if isinstance(node, CaseLabelStmt):
+        return build_ir_stmt(node.stmt, block, ctx)
+
     if isinstance(node, AsmStmt):
         return build_ir_asm_stmt(node, block, ctx)
+
+    if isinstance(node, GotoStmt):
+        return build_ir_goto_stmt(node, block, ctx)
+
+    if isinstance(node, LabelStmt):
+        cont_block = BasicBlock(block.func, block)
+        JumpInst(block, cont_block)
+
+        assert(isinstance(node.label, Ident))
+        ctx.goto_targets[node.label.val] = cont_block
+
+        remains = []
+        for block_from, target_label in ctx.goto_jump_query:
+            if node.label.val != target_label:
+                remains.append((block_from, target_label))
+                continue
+
+            JumpInst(block_from, cont_block)
+
+        ctx.goto_jump_query = remains
+
+        return cont_block
 
     return block
 
@@ -1615,19 +1986,29 @@ def build_ir_stack_alloc(node, block, ctx):
     alloca_insert_pt = get_alloca_insert_pt(ctx)
 
     # Allocate params of all callee functions.
-    if isinstance(node, TypedFunctionCall):
-        for i, (param_type, _, _) in enumerate(node.ident.ty.params):
-            if ctx.get_ir_type(param_type) == void:
-                continue
+    # if isinstance(node, TypedFunctionCall):
+    #     for i, (param_type, _, _) in enumerate(node.params):
+    #         if ctx.get_ir_type(param_type) == void:
+    #             continue
 
-            mem = alloca_insert_pt = AllocaInst(alloca_insert_pt, ConstantInt(1, i32),
-                                                ctx.get_ir_type(param_type), 0)
-            ctx.named_values[(node, i)] = mem
+    #         mem = alloca_insert_pt = AllocaInst(alloca_insert_pt, ConstantInt(1, i32),
+    #                                             ctx.get_ir_type(param_type), 0)
+    #         ctx.named_values[(node, i)] = mem
 
     # Allocate return value of all callee functions.
+    from c.symtab import FunctionSymbol, VariableSymbol
+
     if isinstance(node, TypedFunctionCall):
-        return_ty = ctx.get_ir_type(node.ident.ty.return_ty)
-        func_info = compute_func_info(ctx, node.ident.ty)
+        return_ty = ctx.get_ir_type(node.type)
+
+        if isinstance(node.ident, FunctionSymbol):
+            func_ty = node.ident.ty.elem_ty
+        elif isinstance(node.ident, VariableSymbol):
+            func_ty = node.ident.ty.elem_ty
+        else:
+            func_ty = node.ident.type.elem_ty
+
+        func_info = compute_func_info(ctx, func_ty)
         if func_info.return_info.kind == ABIArgKind.Indirect:
             mem = alloca_insert_pt = AllocaInst(alloca_insert_pt,
                                                 ConstantInt(1, i32), return_ty, 0)
@@ -1635,9 +2016,11 @@ def build_ir_stack_alloc(node, block, ctx):
 
 
 def build_ir_func_header(node, func, ctx):
-    func_info = compute_func_info(ctx, node.ident.ty)
+    func_info = compute_func_info(ctx, node.ident.ty.elem_ty)
 
     return_ty = ctx.get_ir_type(node.type)
+
+    func.args = []
 
     if func_info.return_info.kind == ABIArgKind.Indirect:
         ir_arg = Argument(PointerType(return_ty, 0))
@@ -1657,17 +2040,20 @@ def build_ir_func_header(node, func, ctx):
 
 
 def build_ir_func(node, block, ctx):
-    func_info = compute_func_info(ctx, node.proto.ident.ty)
+    func_info = compute_func_info(ctx, node.proto.ident.ty.elem_ty)
     ctx.func_info = func_info
     alloca_insert_pt = get_alloca_insert_pt(ctx)
 
     return_ty = ctx.get_ir_type(node.proto.type)
 
+    func = block.func
+    func.args = []
+
     if func_info.return_info.kind == ABIArgKind.Indirect:
         ir_arg = Argument(PointerType(return_ty, 0))
         ir_arg.add_attribute(Attribute(AttributeKind.StructRet))
         ctx.return_value = ir_arg
-        block.func.add_arg(ir_arg)
+        func.add_arg(ir_arg)
 
     for arg, arg_info in zip(node.params, func_info.arguments):
         if isinstance(arg.ty, ast.types.ArrayType):
@@ -1696,9 +2082,9 @@ def build_ir_func(node, block, ctx):
             StoreInst(block, ir_arg, ir_arg_mem_ptr)
 
         ctx.named_values[arg] = ir_arg_ptr
-        block.func.add_arg(ir_arg)
+        func.add_arg(ir_arg)
 
-    block_end = BasicBlock(block.func)
+    block_end = BasicBlock(func)
 
     if func_info.return_info.kind in [ABIArgKind.Indirect, ABIArgKind.Ignore]:
         pass
@@ -1714,6 +2100,9 @@ def build_ir_func(node, block, ctx):
         if len(ctx.branch_target) == 0 and isinstance(stmt, ReturnStmt):
             break
     ctx.pop_return_target()
+
+    assert(not ctx.goto_jump_query)
+    ctx.goto_targets = {}
 
     if func_info.return_info.kind in [ABIArgKind.Indirect, ABIArgKind.Ignore]:
         ReturnInst(block_end, None)
@@ -1897,7 +2286,7 @@ class ABIClass(Enum):
 
 
 def is_float_ty(ty):
-    return ty == f32
+    return ty in [f32, f64]
 
 
 class X86_64ABIInfo(ABIInfo):
@@ -2170,6 +2559,28 @@ class ABIType(Enum):
     RISCV64 = auto()
 
 
+def emit_global_variable(decl, ctx):
+    module = ctx.module
+
+    for ident, init_expr in decl.idents:
+        ty = ctx.get_ir_type(ident.type)
+        if not init_expr:
+            init = get_constant_null_value(ty)
+        else:
+            init = evaluate_constant_expr(ctx, init_expr)
+            assert(ident.type == init_expr.type)
+
+        linkage = GlobalLinkage.Global
+        thread_local = ThreadLocalMode.NotThreadLocal
+
+        if "extern" in decl.storage_class:
+            linkage = GlobalLinkage.External
+            init = None
+
+        ctx.global_named_values[ident.val] = module.add_global(ident.val.name,
+                                                               GlobalVariable(ty, False, linkage, ident.val.name, thread_local, init))
+
+
 def emit_ir(ast, abi, module):
     ctx = Context(module)
     if abi == ABIType.WinX86_64:
@@ -2197,39 +2608,37 @@ def emit_ir(ast, abi, module):
     ctx.global_named_values = global_named_values
     for decl in ast:
         if isinstance(decl, TypedVariable):
-            for ident, init_expr in decl.idents:
-                ty = ctx.get_ir_type(ident.type)
-                if not init_expr:
-                    init = get_constant_null_value(ty)
-                else:
-                    init = evaluate_constant_expr(ctx, init_expr)
-
-                linkage = GlobalLinkage.Global
-                thread_local = ThreadLocalMode.NotThreadLocal
-
-                if "extern" in decl.storage_class:
-                    linkage = GlobalLinkage.External
-                    init = None
-
-                global_named_values[ident.val] = module.add_global_variable(
-                    GlobalVariable(ty, False, linkage, ident.val.name, thread_local, init))
+            emit_global_variable(decl, ctx)
 
         if isinstance(decl, TypedFunctionProto):
-            func_ty = ctx.get_ir_type(decl.ident.ty)
+            func_decl = decl.ident
+
+            func_ty = ctx.get_ir_type(func_decl.ty.elem_ty)
+            func_name = str(func_decl.name)
+
             func = module.add_func(
-                Function(module, func_ty, str(decl.ident.name)))
-            ctx.funcs[decl.ident.name] = func
+                func_name, Function(module, func_ty, func_name))
+
+            assert(isinstance(func_decl, FunctionSymbol))
+            ctx.funcs[func_decl.name] = func
+            ctx.global_named_values[func_decl] = func
 
             build_ir_func_header(decl, func, ctx)
 
         if isinstance(decl, TypedFunction):
-            func_ty = ctx.get_ir_type(decl.proto.ident.ty)
-            func_name = str(decl.proto.ident.name)
+            func_decl = decl.proto.ident
+
+            func_ty = ctx.get_ir_type(func_decl.ty.elem_ty)
+            func_name = str(func_decl.name)
 
             func = module.add_func(
-                Function(module, func_ty, func_name))
+                func_name, Function(module, func_ty, func_name))
 
-            if "inline" in decl.proto.specs:
+            assert(isinstance(func_decl, FunctionSymbol))
+            ctx.funcs[func_decl.name] = func
+            ctx.global_named_values[func_decl] = func
+
+            if decl.proto.specs.func_spec_inline:
                 comdat = module.add_comdat(func_name, ComdatKind.Any)
                 func.comdat = comdat
 
@@ -2237,7 +2646,6 @@ def emit_ir(ast, abi, module):
                 ctx.begin_func()
                 ctx.ast_func = decl
                 ctx.function = func
-                ctx.funcs[func.name] = func
                 ctx.current_block = BasicBlock(func)
 
                 ctx.named_values.update(global_named_values)
@@ -2246,9 +2654,9 @@ def emit_ir(ast, abi, module):
 
                 ctx.end_func()
             else:
-                if decl.proto.ident.name not in ctx.funcs:
+                if func_decl.name not in ctx.funcs:
                     build_ir_func_header(decl.proto, func, ctx)
 
-                ctx.funcs[decl.proto.ident.name] = func
+                ctx.funcs[func_decl.name] = func
 
     return module

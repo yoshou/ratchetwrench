@@ -8,10 +8,10 @@ from codegen.mc import *
 from codegen.asm_emitter import *
 from codegen.assembler import *
 from ir.values import *
-from codegen.arm_gen import ARMMachineOps
+from codegen.aarch64_gen import AArch64MachineOps
 import zlib
 import io
-from codegen.arm_def import *
+from codegen.aarch64_def import *
 
 
 def get_bb_symbol(bb: BasicBlock, ctx: MCContext):
@@ -32,13 +32,13 @@ def get_pic_label(label_id, func_number, ctx: MCContext):
     return ctx.get_or_create_symbol(f"PC{func_number}_{label_id}")
 
 
-class ARMMCExprVarKind(Enum):
+class AArch64MCExprVarKind(Enum):
     Non = auto()
     Lo = auto()
     Hi = auto()
 
 
-class ARMMCExpr(MCTargetExpr):
+class AArch64MCExpr(MCTargetExpr):
     def __init__(self, kind, expr):
         super().__init__()
 
@@ -46,7 +46,7 @@ class ARMMCExpr(MCTargetExpr):
         self.expr = expr
 
 
-class ARMMCInstLower:
+class AArch64MCInstLower:
     def __init__(self, ctx: MCContext, func, asm_printer):
         self.ctx = ctx
         self.func = func
@@ -65,14 +65,14 @@ class ARMMCInstLower:
         raise NotImplementedError()
 
     def lower_symbol_operand(self, operand: MachineOperand, symbol: MCSymbol):
-        from codegen.arm_gen import ARMOperandFlag
+        from codegen.aarch64_gen import AArch64OperandFlag
 
         expr = MCSymbolRefExpr(symbol)
 
-        if operand.target_flags & ARMOperandFlag.MO_LO16.value:
-            expr = ARMMCExpr(ARMMCExprVarKind.Lo, expr)
-        elif operand.target_flags & ARMOperandFlag.MO_HI16.value:
-            expr = ARMMCExpr(ARMMCExprVarKind.Hi, expr)
+        if operand.target_flags & AArch64OperandFlag.MO_LO16.value:
+            expr = AArch64MCExpr(AArch64MCExprVarKind.Lo, expr)
+        elif operand.target_flags & AArch64OperandFlag.MO_HI16.value:
+            expr = AArch64MCExpr(AArch64MCExprVarKind.Hi, expr)
 
         if not operand.is_jti and not operand.is_mbb and operand.offset != 0:
             expr = MCBinaryExpr(MCBinaryOpcode.Add, expr,
@@ -110,7 +110,7 @@ class ARMMCInstLower:
         return mc_inst
 
 
-class ARMAsmInfo(MCAsmInfo):
+class AArch64AsmInfo(MCAsmInfo):
     def __init__(self):
         super().__init__()
         self._has_dot_type_dot_size_directive = True
@@ -141,7 +141,7 @@ class AsmPrinter(MachineFunctionPass):
         self.asm_info = self.ctx.asm_info
 
 
-class ARMAsmPrinter(AsmPrinter):
+class AArch64AsmPrinter(AsmPrinter):
     def __init__(self, stream: MCStream):
         super().__init__(stream)
 
@@ -247,7 +247,7 @@ class ARMAsmPrinter(AsmPrinter):
     def emit_instruction(self, inst: MachineInstruction):
         data_layout = self.func.module.data_layout
 
-        if inst.opcode == ARMMachineOps.CPEntry:
+        if inst.opcode == AArch64MachineOps.CPEntry:
             label_id = inst.operands[0].val
             cp_idx = inst.operands[1].index
 
@@ -261,20 +261,20 @@ class ARMAsmPrinter(AsmPrinter):
                 self.emit_global_constant(data_layout, cp_entry.value)
             return
 
-        if inst.opcode == ARMMachineOps.PIC_ADD:
+        if inst.opcode == AArch64MachineOps.PIC_ADD:
             pic_label_id = inst.operands[2].val
             func_number = self.func.module.funcs.index(self.func)
             self.stream.emit_label(get_pic_label(
                 pic_label_id, func_number, self.ctx))
 
-            mc_inst = MCInst(ARMMachineOps.ADDrr)
+            mc_inst = MCInst(AArch64MachineOps.ADDrr)
             mc_inst.add_operand(MCOperandReg(inst.operands[0].reg))
             mc_inst.add_operand(MCOperandReg(MachineRegister(PC)))
             mc_inst.add_operand(MCOperandReg(inst.operands[1].reg))
             self.emit_mc_inst(mc_inst)
             return
 
-        mc_inst_lower = ARMMCInstLower(self.ctx, inst.mbb.func, self)
+        mc_inst_lower = AArch64MCInstLower(self.ctx, inst.mbb.func, self)
         mc_inst = mc_inst_lower.lower(inst)
 
         for operand in mc_inst.operands:
@@ -400,16 +400,16 @@ class ARMAsmPrinter(AsmPrinter):
             self.stream.emit_zeros(pad_size)
 
     def emit_machine_cp_value(self, data_layout, value):
-        from codegen.arm_gen import ARMConstantPoolKind, ARMConstantPoolModifier
-        if value.kind == ARMConstantPoolKind.Value:
+        from codegen.aarch64_gen import AArch64ConstantPoolKind, AArch64ConstantPoolModifier
+        if value.kind == AArch64ConstantPoolKind.Value:
             symbol = get_global_symbol(value.value, self.ctx)
         else:
             raise ValueError("Unrecognized constant pool kind.")
 
         def get_variant_kind_from_modifier(modifier):
-            if modifier == ARMConstantPoolModifier.Non:
+            if modifier == AArch64ConstantPoolModifier.Non:
                 return MCVariantKind.Non
-            elif modifier == ARMConstantPoolModifier.TLSGlobalDesc:
+            elif modifier == AArch64ConstantPoolModifier.TLSGlobalDesc:
                 return MCVariantKind.TLSGD
 
             raise ValueError("Unrecognized modifier type.")
@@ -511,17 +511,17 @@ def get_fixup_size_by_kind(kind: MCFixupKind):
     elif kind in [MCFixupKind.PCRel_8, MCFixupKind.SecRel_8, MCFixupKind.Data_8]:
         return 8
     elif kind in [
-            ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH,
-            ARMFixupKind.ARM_UNCOND_BL, ARMFixupKind.ARM_PCREL_10, ARMFixupKind.ARM_LDST_PCREL_12]:
+            AArch64FixupKind.AArch64_COND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BRANCH,
+            AArch64FixupKind.AArch64_UNCOND_BL, AArch64FixupKind.AArch64_PCREL_10, AArch64FixupKind.AArch64_LDST_PCREL_12]:
         return 3
     elif kind in [
-            ARMFixupKind.ARM_MOVW_LO16, ARMFixupKind.ARM_MOVT_HI16]:
+            AArch64FixupKind.AArch64_MOVW_LO16, AArch64FixupKind.AArch64_MOVT_HI16]:
         return 4
 
     raise ValueError("kind")
 
 
-class ARMAsmBackend(MCAsmBackend):
+class AArch64AsmBackend(MCAsmBackend):
     def __init__(self):
         super().__init__()
 
@@ -533,20 +533,20 @@ class ARMAsmBackend(MCAsmBackend):
 
     def get_fixup_kind_info(self, kind):
         table = {
-            ARMFixupKind.ARM_COND_BRANCH: MCFixupKindInfo(
-                "ARM_COND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            ARMFixupKind.ARM_UNCOND_BRANCH: MCFixupKindInfo(
-                "ARM_UNCOND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            ARMFixupKind.ARM_UNCOND_BL: MCFixupKindInfo(
-                "ARM_UNCOND_BL", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            ARMFixupKind.ARM_PCREL_10: MCFixupKindInfo(
-                "ARM_PCREL_10", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            ARMFixupKind.ARM_LDST_PCREL_12: MCFixupKindInfo(
-                "ARM_LDST_PCREL_12", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            ARMFixupKind.ARM_MOVT_HI16: MCFixupKindInfo(
-                "ARM_MOVT_HI16", 0, 20, MCFixupKindInfoFlag.Non),
-            ARMFixupKind.ARM_MOVW_LO16: MCFixupKindInfo(
-                "ARM_MOVW_LO16", 0, 20, MCFixupKindInfoFlag.Non)
+            AArch64FixupKind.AArch64_COND_BRANCH: MCFixupKindInfo(
+                "AArch64_COND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_UNCOND_BRANCH: MCFixupKindInfo(
+                "AArch64_UNCOND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_UNCOND_BL: MCFixupKindInfo(
+                "AArch64_UNCOND_BL", 0, 24, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_10: MCFixupKindInfo(
+                "AArch64_PCREL_10", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_LDST_PCREL_12: MCFixupKindInfo(
+                "AArch64_LDST_PCREL_12", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_MOVT_HI16: MCFixupKindInfo(
+                "AArch64_MOVT_HI16", 0, 20, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_MOVW_LO16: MCFixupKindInfo(
+                "AArch64_MOVW_LO16", 0, 20, MCFixupKindInfoFlag.Non)
 
         }
 
@@ -562,10 +562,10 @@ class ARMAsmBackend(MCAsmBackend):
     def adjust_fixup_value(self, fixup: MCFixup, fixed_value: int):
         kind = fixup.kind
 
-        if kind in [ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH, ARMFixupKind.ARM_UNCOND_BL]:
+        if kind in [AArch64FixupKind.AArch64_COND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BL]:
             return 0xffffff & ((fixed_value - 8) >> 2)
 
-        if kind in [ARMFixupKind.ARM_PCREL_10]:
+        if kind in [AArch64FixupKind.AArch64_PCREL_10]:
             fixed_value = fixed_value - 8
             is_add = 1
             if fixed_value < 0:
@@ -579,7 +579,7 @@ class ARMAsmBackend(MCAsmBackend):
             fixed_value = fixed_value | (is_add << 23)
             return fixed_value
 
-        if kind in [ARMFixupKind.ARM_LDST_PCREL_12]:
+        if kind in [AArch64FixupKind.AArch64_LDST_PCREL_12]:
             fixed_value = fixed_value - 8
             is_add = 1
             if fixed_value < 0:
@@ -593,9 +593,9 @@ class ARMAsmBackend(MCAsmBackend):
             fixed_value = fixed_value | (is_add << 23)
             return fixed_value
 
-        if kind in [ARMFixupKind.ARM_MOVT_HI16]:
+        if kind in [AArch64FixupKind.AArch64_MOVT_HI16]:
             fixed_value = fixed_value >> 16
-        if kind in [ARMFixupKind.ARM_MOVT_HI16, ARMFixupKind.ARM_MOVW_LO16]:
+        if kind in [AArch64FixupKind.AArch64_MOVT_HI16, AArch64FixupKind.AArch64_MOVW_LO16]:
             hi4 = (fixed_value >> 12) & 0xF
             lo12 = fixed_value & 0xFFF
 
@@ -633,24 +633,24 @@ class ARMAsmBackend(MCAsmBackend):
             contents[offset + idx] |= bys[idx]
 
     def should_force_relocation(self, asm, fixup: MCFixup, target):
-        if fixup.kind == ARMFixupKind.ARM_UNCOND_BL:
+        if fixup.kind == AArch64FixupKind.AArch64_UNCOND_BL:
             return True
 
         return False
 
 
-class ARMTSFlags(IntFlag):
+class AArch64TSFlags(IntFlag):
     Pseudo = 0
 
 
-class ARMFixupKind(Enum):
-    ARM_COND_BRANCH = auto()
-    ARM_UNCOND_BRANCH = auto()
-    ARM_UNCOND_BL = auto()
-    ARM_PCREL_10 = auto()
-    ARM_LDST_PCREL_12 = auto()
-    ARM_MOVW_LO16 = auto()
-    ARM_MOVT_HI16 = auto()
+class AArch64FixupKind(Enum):
+    AArch64_COND_BRANCH = auto()
+    AArch64_UNCOND_BRANCH = auto()
+    AArch64_UNCOND_BL = auto()
+    AArch64_PCREL_10 = auto()
+    AArch64_LDST_PCREL_12 = auto()
+    AArch64_MOVW_LO16 = auto()
+    AArch64_MOVT_HI16 = auto()
 
 
 def write_bits(value, bits, offset, count):
@@ -660,19 +660,19 @@ def write_bits(value, bits, offset, count):
 
 def get_binop_opcode(inst: MCInst):
     opcode = inst.opcode
-    if opcode in [ARMMachineOps.MOVr, ARMMachineOps.MOVCCi, ARMMachineOps.MOVCCr]:
+    if opcode in [AArch64MachineOps.MOVr, AArch64MachineOps.MOVCCi, AArch64MachineOps.MOVCCr]:
         return 0b1101
-    if opcode in [ARMMachineOps.ANDri, ARMMachineOps.ANDrr, ARMMachineOps.ANDrsi]:
+    if opcode in [AArch64MachineOps.ANDri, AArch64MachineOps.ANDrr, AArch64MachineOps.ANDrsi]:
         return 0b0000
-    if opcode in [ARMMachineOps.XORri, ARMMachineOps.XORrr, ARMMachineOps.XORrsi]:
+    if opcode in [AArch64MachineOps.XORri, AArch64MachineOps.XORrr, AArch64MachineOps.XORrsi]:
         return 0b0001
-    if opcode in [ARMMachineOps.ORri, ARMMachineOps.ORrr, ARMMachineOps.ORrsi]:
+    if opcode in [AArch64MachineOps.ORri, AArch64MachineOps.ORrr, AArch64MachineOps.ORrsi]:
         return 0b1100
-    if opcode in [ARMMachineOps.ADDri, ARMMachineOps.ADDrr, ARMMachineOps.ADDrsi]:
+    if opcode in [AArch64MachineOps.ADDri, AArch64MachineOps.ADDrr, AArch64MachineOps.ADDrsi]:
         return 0b0100
-    if opcode in [ARMMachineOps.SUBri, ARMMachineOps.SUBrr, ARMMachineOps.SUBrsi]:
+    if opcode in [AArch64MachineOps.SUBri, AArch64MachineOps.SUBrr, AArch64MachineOps.SUBrsi]:
         return 0b0010
-    if opcode in [ARMMachineOps.CMPri, ARMMachineOps.CMPrr, ARMMachineOps.CMPrsi]:
+    if opcode in [AArch64MachineOps.CMPri, AArch64MachineOps.CMPrr, AArch64MachineOps.CMPrsi]:
         return 0b1010
 
     raise NotImplementedError()
@@ -873,10 +873,10 @@ def get_hilo16_imm_code(inst: MCInst, idx, fixups):
         raise NotImplementedError()
 
     assert(isinstance(subexpr, MCExpr))
-    if expr.kind == ARMMCExprVarKind.Lo:
-        fixup_kind = ARMFixupKind.ARM_MOVW_LO16
-    elif expr.kind == ARMMCExprVarKind.Hi:
-        fixup_kind = ARMFixupKind.ARM_MOVT_HI16
+    if expr.kind == AArch64MCExprVarKind.Lo:
+        fixup_kind = AArch64FixupKind.AArch64_MOVW_LO16
+    elif expr.kind == AArch64MCExprVarKind.Hi:
+        fixup_kind = AArch64FixupKind.AArch64_MOVT_HI16
     else:
         assert(0)
 
@@ -925,7 +925,7 @@ def get_addr_mode5_code(inst: MCInst, idx, fixups):
         is_add, imm = 0, 0
 
         expr = op1.expr
-        fixups.append(MCFixup(0, expr, ARMFixupKind.ARM_PCREL_10))
+        fixups.append(MCFixup(0, expr, AArch64FixupKind.AArch64_PCREL_10))
     else:
         imm_op = operands[idx + 1]
 
@@ -945,7 +945,7 @@ def get_addr_mode_imm12_code(inst: MCInst, idx, fixups):
         is_add, imm = 0, 0
 
         expr = op1.expr
-        fixups.append(MCFixup(0, expr, ARMFixupKind.ARM_LDST_PCREL_12))
+        fixups.append(MCFixup(0, expr, AArch64FixupKind.AArch64_LDST_PCREL_12))
     else:
         imm_op = operands[idx + 1]
 
@@ -959,13 +959,13 @@ def get_inst_binary_code(inst: MCInst, fixups):
     opcode = inst.opcode
     num_operands = len(inst.operands)
 
-    if opcode == ARMMachineOps.STRi12:
+    if opcode == AArch64MachineOps.STRi12:
         return get_ldst_inst_code(inst, 0, 0, 1, fixups)
 
-    if opcode == ARMMachineOps.LDRi12:
+    if opcode == AArch64MachineOps.LDRi12:
         return get_ldst_inst_code(inst, 1, 0, 1, fixups)
 
-    if opcode == ARMMachineOps.MOVi:
+    if opcode == AArch64MachineOps.MOVi:
         rd = inst.operands[0]
 
         code = 0
@@ -984,13 +984,13 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode == ARMMachineOps.MOVi16:
+    if opcode == AArch64MachineOps.MOVi16:
         return get_mov_immediate_inst_code(inst, 0b1000, 0, fixups)
 
-    if opcode == ARMMachineOps.MOVTi16:
+    if opcode == AArch64MachineOps.MOVTi16:
         return get_mov_immediate_inst_code(inst, 0b1010, 1, fixups)
 
-    if opcode == ARMMachineOps.MOVsi:
+    if opcode == AArch64MachineOps.MOVsi:
         rd = inst.operands[0]
 
         code = 0
@@ -1012,36 +1012,36 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode == ARMMachineOps.MOVPCLR:
+    if opcode == AArch64MachineOps.MOVPCLR:
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
         code = write_bits(code, 0b0001101000001111000000001110, 0, 28)
         return code
 
-    if opcode == ARMMachineOps.STR_PRE_IMM:
+    if opcode == AArch64MachineOps.STR_PRE_IMM:
         return get_indexed_st_inst_code(inst, 0, 1, 1, inst.operands[1], inst.operands[0], fixups)
 
-    if opcode == ARMMachineOps.LDR_POST_IMM:
+    if opcode == AArch64MachineOps.LDR_POST_IMM:
         return get_indexed_ld_inst_code(inst, 0, 0, 1, inst.operands[1], inst.operands[0], fixups)
 
-    if opcode in [ARMMachineOps.MOVr, ARMMachineOps.ADDrr, ARMMachineOps.ANDrr, ARMMachineOps.ORrr, ARMMachineOps.SUBrr, ARMMachineOps.XORrr]:
+    if opcode in [AArch64MachineOps.MOVr, AArch64MachineOps.ADDrr, AArch64MachineOps.ANDrr, AArch64MachineOps.ORrr, AArch64MachineOps.SUBrr, AArch64MachineOps.XORrr]:
         return get_binop_inst_code(
             inst, 0b1110, 0, 0, inst.operands[1], inst.operands[0])
 
-    if opcode in [ARMMachineOps.CMPrr]:
+    if opcode in [AArch64MachineOps.CMPrr]:
         return get_binop_inst_code(
             inst, 0b1110, 0, 0, inst.operands[0], inst.operands[0])
 
-    if opcode in [ARMMachineOps.ADDri, ARMMachineOps.ANDri, ARMMachineOps.ORri, ARMMachineOps.SUBri, ARMMachineOps.XORri]:
+    if opcode in [AArch64MachineOps.ADDri, AArch64MachineOps.ANDri, AArch64MachineOps.ORri, AArch64MachineOps.SUBri, AArch64MachineOps.XORri]:
         return get_binop_inst_code(
             inst, 0b1110, 1, 0, inst.operands[1], inst.operands[0])
 
-    if opcode in [ARMMachineOps.CMPri]:
+    if opcode in [AArch64MachineOps.CMPri]:
         return get_binop_inst_code(
             inst, 0b1110, 1, 0, inst.operands[0], inst.operands[0])
 
-    # vfp (between ARM core register and single-precision register)
-    if opcode in [ARMMachineOps.VMOVSR]:
+    # vfp (between AArch64 core register and single-precision register)
+    if opcode in [AArch64MachineOps.VMOVSR]:
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
         code = write_bits(code, 0b11100000, 20, 8)  # opc1
@@ -1064,7 +1064,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VLDRS]:
+    if opcode in [AArch64MachineOps.VLDRS]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1088,7 +1088,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VLDRD]:
+    if opcode in [AArch64MachineOps.VLDRD]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1112,7 +1112,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VSTRS]:
+    if opcode in [AArch64MachineOps.VSTRS]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1136,7 +1136,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VSTRD]:
+    if opcode in [AArch64MachineOps.VSTRD]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1160,23 +1160,23 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VADDS, ARMMachineOps.VSUBS, ARMMachineOps.VMULS, ARMMachineOps.VDIVS]:
+    if opcode in [AArch64MachineOps.VADDS, AArch64MachineOps.VSUBS, AArch64MachineOps.VMULS, AArch64MachineOps.VDIVS]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
 
-        if opcode in [ARMMachineOps.VADDS, ARMMachineOps.VSUBS, ARMMachineOps.VMULS]:
+        if opcode in [AArch64MachineOps.VADDS, AArch64MachineOps.VSUBS, AArch64MachineOps.VMULS]:
             code = write_bits(code, 0b11100, 23, 5)  # opc1
-        elif opcode in [ARMMachineOps.VDIVS]:
+        elif opcode in [AArch64MachineOps.VDIVS]:
             code = write_bits(code, 0b11101, 23, 5)  # opc1
 
-        if opcode in [ARMMachineOps.VADDS]:
+        if opcode in [AArch64MachineOps.VADDS]:
             code = write_bits(code, 0b11, 20, 2)  # opc2
-        elif opcode in [ARMMachineOps.VSUBS]:
+        elif opcode in [AArch64MachineOps.VSUBS]:
             code = write_bits(code, 0b11, 20, 2)
-        elif opcode in [ARMMachineOps.VMULS]:
+        elif opcode in [AArch64MachineOps.VMULS]:
             code = write_bits(code, 0b10, 20, 2)
-        elif opcode in [ARMMachineOps.VDIVS]:
+        elif opcode in [AArch64MachineOps.VDIVS]:
             code = write_bits(code, 0b00, 20, 2)
 
         code = write_bits(code, 0b101, 9, 3)
@@ -1184,11 +1184,11 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         code = write_bits(code, 0b0, 4, 1)
 
-        if opcode in [ARMMachineOps.VADDS]:
+        if opcode in [AArch64MachineOps.VADDS]:
             code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [ARMMachineOps.VMULS]:
+        elif opcode in [AArch64MachineOps.VMULS]:
             code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [ARMMachineOps.VSUBS]:
+        elif opcode in [AArch64MachineOps.VSUBS]:
             code = write_bits(code, 0b1, 6, 1)
 
         sd = inst.operands[0]
@@ -1210,7 +1210,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VCMPS]:
+    if opcode in [AArch64MachineOps.VCMPS]:
         code = 0
 
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1236,9 +1236,9 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.Bcc]:
+    if opcode in [AArch64MachineOps.Bcc]:
         target = get_branch_target_code(
-            inst, 0, ARMFixupKind.ARM_COND_BRANCH, fixups)
+            inst, 0, AArch64FixupKind.AArch64_COND_BRANCH, fixups)
 
         code = 0
         code = write_bits(code, inst.operands[1].imm, 28, 4)
@@ -1246,9 +1246,9 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, target, 0, 24)
         return code
 
-    if opcode in [ARMMachineOps.B]:
+    if opcode in [AArch64MachineOps.B]:
         target = get_branch_target_code(
-            inst, 0, ARMFixupKind.ARM_UNCOND_BRANCH, fixups)
+            inst, 0, AArch64FixupKind.AArch64_UNCOND_BRANCH, fixups)
 
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1257,9 +1257,9 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.BL]:
+    if opcode in [AArch64MachineOps.BL]:
         target = get_branch_target_code(
-            inst, 0, ARMFixupKind.ARM_UNCOND_BL, fixups)
+            inst, 0, AArch64FixupKind.AArch64_UNCOND_BL, fixups)
 
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
@@ -1268,7 +1268,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VADDfq]:
+    if opcode in [AArch64MachineOps.VADDfq]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1296,7 +1296,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VORRq]:
+    if opcode in [AArch64MachineOps.VORRq]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1324,7 +1324,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VST1q64]:
+    if opcode in [AArch64MachineOps.VST1q64]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1363,7 +1363,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VLD1q64]:
+    if opcode in [AArch64MachineOps.VLD1q64]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1402,7 +1402,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.FMSTAT]:
+    if opcode in [AArch64MachineOps.FMSTAT]:
         code = 0
         code = write_bits(code, 0b1110, 28, 4)
         code = write_bits(code, 0b111011110001, 16, 12)
@@ -1410,7 +1410,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 0b1111, 12, 4)
         return code
 
-    if opcode in [ARMMachineOps.MOVCCr, ARMMachineOps.MOVCCi]:
+    if opcode in [AArch64MachineOps.MOVCCr, AArch64MachineOps.MOVCCi]:
         cond = inst.operands[3].imm
         rn, rd = inst.operands[1], inst.operands[0]
         imm_op = 1 if inst.operands[2].is_imm else 0
@@ -1444,7 +1444,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VDUPLN32q]:
+    if opcode in [AArch64MachineOps.VDUPLN32q]:
         size = 32
         if size == 32:
             lane = (inst.operands[2].imm << 3) | 0b100
@@ -1479,7 +1479,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VMULfq]:
+    if opcode in [AArch64MachineOps.VMULfq]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1507,7 +1507,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VSUBfq]:
+    if opcode in [AArch64MachineOps.VSUBfq]:
         code = 0
 
         code = write_bits(code, 0b1111, 28, 4)  # neon
@@ -1535,7 +1535,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VMOVS]:
+    if opcode in [AArch64MachineOps.VMOVS]:
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
         code = write_bits(code, 0b11101, 23, 5)  # opc1
@@ -1559,7 +1559,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.VMOVD]:
+    if opcode in [AArch64MachineOps.VMOVD]:
         code = 0
         code = write_bits(code, 0b1110, 28, 4)  # always
         code = write_bits(code, 0b11101, 23, 5)  # opc1
@@ -1583,7 +1583,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.STMDB_UPD]:
+    if opcode in [AArch64MachineOps.STMDB_UPD]:
         rd = inst.operands[0]
 
         code = 0
@@ -1605,7 +1605,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
         return code
 
-    if opcode in [ARMMachineOps.LDMIA_UPD]:
+    if opcode in [AArch64MachineOps.LDMIA_UPD]:
         rd = inst.operands[0]
 
         code = 0
@@ -1631,7 +1631,7 @@ def get_inst_binary_code(inst: MCInst, fixups):
     raise NotImplementedError()
 
 
-class ARMCodeEmitter(MCCodeEmitter):
+class AArch64CodeEmitter(MCCodeEmitter):
     def __init__(self, context: MCContext):
         super().__init__()
         self.context = context

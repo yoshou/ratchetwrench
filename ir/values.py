@@ -31,6 +31,8 @@ def get_return_ty(name):
         return VoidType()
     if name == "llvm.va_end":
         return VoidType()
+    if name == "llvm.returnaddress":
+        return PointerType(PrimitiveType("i8"), 0)
 
     raise Exception("Unreachable")
 
@@ -38,33 +40,28 @@ def get_return_ty(name):
 class Module:
     def __init__(self):
         self._funcs = {}
-        self.global_variables = []
+        self._globals = {}
         self.structs = {}
-        self.declares = {}
         self.data_layout = DataLayout()
         self.comdats = {}
-        self._objs = {}
+
+    def add_func(self, name, func):
+        if name not in self._funcs or not func.is_declaration:
+            self._funcs[name] = func
+        return self._funcs[name]
+
+    def add_global(self, name, variable):
+        if name not in self._globals or variable.linkage != GlobalLinkage.External:
+            self._globals[name] = variable
+        return self._globals[name]
 
     @property
     def funcs(self):
-        return tuple(self._funcs.values())
-
-    def add_func(self, func):
-        if func.name not in self._funcs or not func.is_declaration:
-            self._funcs[func.name] = func
-        return self._funcs[func.name]
-
-    def add_global_variable(self, variable):
-        self.global_variables.append(variable)
-        return variable
+        return dict(self._funcs)
 
     @property
-    def objs(self):
-        return tuple(self._objs.values())
-
-    def add_obj(self, name, obj):
-        self._objs[name] = obj
-        return obj
+    def globals(self):
+        return dict(self._globals)
 
     def add_struct_type(self, name, ty):
         self.structs[name] = ty
@@ -82,20 +79,21 @@ class Module:
             enc_name = encode_intrinsic_func_name(name, arg_tys[:3])
         elif name in ["llvm.va_start", "llvm.va_end"]:
             enc_name = encode_intrinsic_func_name(name, [])
+        elif name == "llvm.returnaddress":
+            enc_name = encode_intrinsic_func_name(name, [])
         else:
             raise ValueError("The intrinsic function name is not supported.")
 
-        if enc_name in self.declares:
-            return self.declares[enc_name]
+        if enc_name in self._funcs:
+            return self._funcs[enc_name]
         else:
             func = Function(
-                self, FunctionType(enc_name, get_return_ty(name), arg_tys), enc_name)
+                self, FunctionType(get_return_ty(name), arg_tys), enc_name)
 
             for arg_ty in arg_tys:
                 func.add_arg(Argument(arg_ty))
 
-            self._funcs[func.name] = func
-            self.declares[enc_name] = func
+            self._funcs[enc_name] = func
 
             return func
 
@@ -228,6 +226,8 @@ class GlobalObject(GlobalValue):
 class GlobalVariable(GlobalObject):
     def __init__(self, ty, is_constant, linkage, name, thread_local=ThreadLocalMode.NotThreadLocal, initializer=None):
         assert(isinstance(linkage, GlobalLinkage))
+        if initializer:
+            assert(ty == initializer.ty)
         super().__init__(ty, linkage, name, thread_local)
         self.is_constant = is_constant
         self.initializer = initializer
@@ -269,6 +269,7 @@ class ConstantInt(Constant):
     def __init__(self, value: int, ty):
         super().__init__(ty)
         assert(isinstance(value, int))
+        assert(isinstance(ty, PrimitiveType))
         self.value = value
 
     def __repr__(self):
@@ -527,6 +528,9 @@ class Instruction(User):
     def __init__(self, block_or_inst: BasicBlock, ty, ops, num_ops, name=""):
         super().__init__(ty, ops, num_ops, name)
 
+        if not block_or_inst:
+            return
+
         if isinstance(block_or_inst, BasicBlock):
             assert(
                 not block_or_inst.insts or not block_or_inst.insts[-1].is_terminator)
@@ -705,14 +709,15 @@ def check_inbounds(ty, idx_list):
 
 
 class GetElementPtrInst(Instruction):
-    def __init__(self, block, rs, ty, *idx):
-        assert(isinstance(rs.ty, (ArrayType, PointerType)))
-        elem_type = get_indexed_type(rs.ty, list(idx))
+    def __init__(self, block, ptr, pointee_ty, *idx):
+        assert(isinstance(ptr.ty, (ArrayType, PointerType)))
+        assert(pointee_ty == ptr.ty)
+        elem_ty = get_indexed_type(pointee_ty, list(idx))
 
         super().__init__(block, PointerType(
-            elem_type, 0), [rs, *idx], 1 + len(idx))
-        self.pointee_ty = ty
-        self.inbounds = check_inbounds(ty, list(idx))
+            elem_ty, 0), [ptr, *idx], 1 + len(idx))
+        self.pointee_ty = pointee_ty
+        self.inbounds = check_inbounds(pointee_ty, list(idx))
 
     @property
     def rs(self):
@@ -792,9 +797,11 @@ class PHINode(Instruction):
 
 
 class CallInst(Instruction):
-    def __init__(self, block, callee, args):
-        super().__init__(block, callee.vty.return_ty,
+    def __init__(self, block, func_ty, callee, args):
+        assert(isinstance(func_ty, FunctionType))
+        super().__init__(block, func_ty.return_ty,
                          [callee, *args], 1 + len(args))
+        self.func_ty = func_ty
 
     @property
     def callee(self):
@@ -911,6 +918,7 @@ class PtrToIntInst(CastInst):
 
 class IntToPtrInst(CastInst):
     def __init__(self, block, rs, ty):
+        assert(isinstance(rs.ty, PrimitiveType))
         super().__init__(block, "inttoptr", rs, ty)
 
     @property
@@ -1205,6 +1213,43 @@ class Comdat:
         self.kind = kind
 
 
+class ConstraintPrefix(Enum):
+    Input = auto()
+    Output = auto()
+    Clobber = auto()
+
+
+class ConstraintInfo:
+    def __init__(self):
+        self.ty = None
+        self.codes = None
+
+    def parse(self, s):
+        i = 0
+
+        self.ty = ConstraintPrefix.Input
+        self.codes = []
+
+        if s.startswith("~", i):
+            self.ty = ConstraintPrefix.Clobber
+            i += 1
+        elif s.startswith("=", i):
+            self.ty = ConstraintPrefix.Output
+            i += 1
+
+        while i < len(s):
+            if s.startswith("{", i):
+                close_brace = s.find("}", i + 1)
+                if close_brace >= len(s):
+                    break
+
+                self.codes.append(s[i:close_brace + 1])
+                i = close_brace + 1
+            else:
+                self.codes.append(s[i:i+1])
+                i += 1
+
+
 class InlineAsm(Value):
     def __init__(self, ty: FunctionType, asm_string: str, constraints: str, has_side_effect):
         super().__init__(PointerType(ty, 0))
@@ -1214,6 +1259,15 @@ class InlineAsm(Value):
         self.has_side_effect = has_side_effect
         self.vty = ty
         self.func_ty = ty
+
+    def parse_constraints(self):
+        infos = []
+        for s in self.constraints.split(","):
+            info = ConstraintInfo()
+            info.parse(s)
+            infos.append(info)
+
+        return infos
 
 
 # scheduling

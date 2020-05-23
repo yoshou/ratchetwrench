@@ -25,13 +25,15 @@ def parse_primary_expression(tokens, pos, ctx):
     if isinstance(tokens[pos], Identifier):
         return (pos + 1, IdentExpr(tokens[pos].value))
 
+    from ast.types import PrimitiveType
+
     # constant
     if isinstance(tokens[pos], FloatingConstant):
         token = tokens[pos]
 
-        t = Type('double', None)
+        t = PrimitiveType('double')
         if "f" in token.suffix or "F" in token.suffix:
-            t = Type('float', None)
+            t = PrimitiveType('float')
         val = float(tokens[pos].value)
         return (pos + 1, FloatingConstantExpr(val, t))
 
@@ -42,17 +44,11 @@ def parse_primary_expression(tokens, pos, ctx):
         if val.startswith('0x'):
             base = 0
 
-        def in_bit_range_signed(value, bits):
-            return -(1 << (bits-1)) <= value < (1 << (bits-1))
-
-        def in_bit_range_unsigned(value, bits):
-            return 0 <= value < (1 << bits)
-
-        value = int(val, 0)
+        value = int(val, base)
         if (value & ((1 << 32) - 1)) == value:
-            t = Type('int', None)
+            t = PrimitiveType('int')
         elif (value & ((1 << 64) - 1)) == value:
-            t = Type('long', None)
+            t = PrimitiveType('long')
         else:
             raise ValueError("The constant isn't representive.")
 
@@ -60,8 +56,18 @@ def parse_primary_expression(tokens, pos, ctx):
 
     if isinstance(tokens[pos], CharacterConstant):
         val = tokens[pos].value
-        val = ord(val)
-        t = Type('char', None)
+        val = val.replace("\\n", "\n")
+        val = val.replace("\\r", "\r")
+        val = val.replace("\\b", "\b")
+        val = val.replace("\\t", "\t")
+        val = val.replace("\\0", "\0")
+        val = val.replace("\\'", "\'")
+        val = val.replace("\\\\", "\\")
+        if val.startswith("\\x"):
+            val = int("0x" + val[2:], 0)
+        else:
+            val = ord(val)
+        t = PrimitiveType('char')
         return (pos + 1, IntegerConstantExpr(val, t))
 
     from ast.types import PointerType, PrimitiveType, ArrayType
@@ -682,6 +688,9 @@ def parse_initializer(tokens, pos, ctx):
             if tokens[pos].value == "}":
                 pos += 1
                 return (pos, expr)
+
+        raise Exception()
+
     pos = save_pos.pop()
 
     return (pos, None)
@@ -726,6 +735,12 @@ def parse_struct_or_union_specifier(tokens, pos, ctx):
     # struct-or-union identifier_opt { struct-declaration-list }
     # struct-or-union identifier
     save_pos.append(pos)
+
+    is_packed = False
+    if tokens[pos].value == "__packed":
+        is_packed = True
+        pos += 1
+
     (pos, struct_or_union) = parse_struct_or_union(tokens, pos, ctx)
     if struct_or_union:
         is_union = struct_or_union == "union"
@@ -738,11 +753,11 @@ def parse_struct_or_union_specifier(tokens, pos, ctx):
             if decls:
                 if tokens[pos].value == "}":
                     pos += 1
-                    return (pos, StructSpecifier(ident, decls, is_union))
+                    return (pos, RecordDecl(ident, decls, is_union, is_packed))
         pos = save_pos.pop()
 
         if ident:
-            return (pos, StructSpecifier(ident, None, is_union))
+            return (pos, RecordDecl(ident, None, is_union, is_packed))
 
     pos = save_pos.pop()
 
@@ -777,7 +792,7 @@ def parse_struct_declaration(tokens, pos, ctx):
 
         if tokens[pos].value == ";":
             pos += 1
-            return (pos, StructDeclaration(spec_quals, decls))
+            return (pos, FieldDecl(spec_quals, decls))
     pos = save_pos.pop()
 
     # static_assert-declaration
@@ -806,11 +821,11 @@ def parse_struct_declarator(tokens, pos, ctx):
         pos += 1
         (pos, const) = parse_constant_expression(tokens, pos, ctx)
         if const:
-            return (pos, StructDeclarator(decl, None))
+            return (pos, decl)
     pos = save_pos.pop()
 
     if decl:
-        return (pos, StructDeclarator(decl, None))
+        return (pos, decl)
 
     return (pos, None)
 
@@ -822,7 +837,7 @@ def parse_static_assert_declaration(tokens, pos, ctx):
     return (pos, None)
 
 
-class Declaration(Node):
+class VarDecl(Node):
     def __init__(self, qual_spec, decls):
         self.qual_spec = qual_spec
         self.decls = decls
@@ -854,7 +869,7 @@ def parse_declaration(tokens, pos, ctx):
 
         if tokens[pos].value == ";":
             pos += 1
-            return (pos, Declaration(qual_spec, decls))
+            return (pos, VarDecl(qual_spec, decls))
     pos = save_pos.pop()
 
     # static_assert-declaration
@@ -959,7 +974,7 @@ def parse_jump_statement(tokens, pos, ctx):
         if ident:
             if tokens[pos].value == ";":
                 pos += 1
-                raise NotImplementedError()
+                return (pos, GotoStmt(ident))
     pos = save_pos.pop()
 
     # continue ;
@@ -1100,13 +1115,17 @@ def parse_labeled_statement(tokens, pos, ctx):
             pos += 1
             (pos, stmt) = parse_statement(tokens, pos, ctx)
             if stmt:
-                raise NotImplementedError()
+                return (pos, LabelStmt(ident, stmt))
     pos = save_pos.pop()
 
     return (pos, None)
 
 
 def parse_asm_output_operand(tokens, pos, ctx):
+    src = tokens[pos:]
+    if tokens[pos].value == ":":
+        return (pos, ("", None))
+
     assert(isinstance(tokens[pos], StringLiteral))
     constraint = tokens[pos]
     pos += 1
@@ -1114,16 +1133,15 @@ def parse_asm_output_operand(tokens, pos, ctx):
     if tokens[pos].value == "(":
         pos += 1
 
-        assert(isinstance(tokens[pos], Identifier))
-        cvariablename = tokens[pos]
-        pos += 1
+        pos, cvariablename = parse_expression(tokens, pos, ctx)
+        assert(cvariablename)
 
         assert(tokens[pos].value == ")")
         pos += 1
 
-        return (pos, (constraint, cvariablename))
+        return (pos, [constraint, cvariablename])
 
-    return (pos, (constraint, None))
+    return (pos, [constraint, None])
 
 
 def parse_asm_statement(tokens, pos, ctx):
@@ -1161,7 +1179,7 @@ def parse_asm_statement(tokens, pos, ctx):
 
                         operands_list.append(operands)
                     else:
-                        break
+                        operands_list.append([])
 
                 if tokens[pos].value == ")":
                     pos += 1
@@ -1265,6 +1283,7 @@ def parse_compound_statement(tokens, pos, ctx):
 
 
 class StorageClass(Enum):
+    Undefined = auto()
     Typedef = "typedef"
     Extern = "extern"
     Static = "static"
@@ -1284,6 +1303,9 @@ def storage_class_from_name(name):
 
 
 def parse_storage_class_specifier(tokens, pos, ctx):
+    if tokens[pos].value == "__thread":
+        return (pos + 1, StorageClass.ThreadLocal)
+
     if tokens[pos].value in storage_class_values:
         value = storage_class_from_name(tokens[pos].value)
         return (pos + 1, value)
@@ -1323,7 +1345,7 @@ def parse_specifier_qualifier_list(tokens, pos, ctx):
 class TypeSpecifierPtr:
     def __init__(self):
         self.qual_spec = None
-        self.pointer = []
+        self.decl = []
 
 
 def parse_type_name(tokens, pos, ctx):
@@ -1334,9 +1356,8 @@ def parse_type_name(tokens, pos, ctx):
 
         qual_spec_ptr = TypeSpecifierPtr()
         qual_spec_ptr.qual_spec = spec_qual_list
+        qual_spec_ptr.decl = abs_decl
 
-        if abs_decl:
-            qual_spec_ptr.pointer = abs_decl.pointer
         return (pos, qual_spec_ptr)
 
     return (pos, None)
@@ -1433,7 +1454,7 @@ def parse_enum_specifier(tokens, pos, ctx):
         pos = save_pos.pop()
 
         if ident:
-            raise NotImplementedError()
+            return (pos, EnumDecl(ident, None))
 
     pos = save_pos.pop()
 
@@ -1455,6 +1476,7 @@ class TypeSpecifierType(Enum):
 
     Struct = "struct"
     Enum = "enum"
+    Typename = "typename"
 
 
 type_specifier_type_values = {member.value: member for name,
@@ -1653,7 +1675,7 @@ patterns = [
     ("double", "_Complex"),
     ("long", "double", "_Complex"),
 
-    ("struct",), ("enum",)
+    ("struct",), ("enum",), ("typename",)
 ]
 
 import collections
@@ -1661,20 +1683,49 @@ import collections
 pattern_counts = [collections.Counter(pattern) for pattern in patterns]
 
 
-def get_type_spec_type(specs):
+class DeclSpec:
+    def __init__(self):
+        self.spec = None
+        self.ident = None
+        self.decls = []
+        self.func_spec_inline = False
+        self._storage_class_spec = StorageClass.Undefined
+
+    def set_func_spec_inline(self):
+        self.func_spec_inline = True
+
+    @property
+    def storage_class_spec(self):
+        return self._storage_class_spec
+
+    @storage_class_spec.setter
+    def storage_class_spec(self, sc):
+        if self._storage_class_spec != StorageClass.Undefined:
+            raise ValueError("Storage class has already specified.")
+
+        self._storage_class_spec = sc
+
+    @property
+    def name(self):
+        return self.spec.ty.value
+
+
+def get_type_spec_type(specs, decl_spec: DeclSpec):
     names = []
 
-    struct_spec = None
-    enum_spec = None
+    decl = None
     for spec in specs:
         if isinstance(spec, TypeSpecifierType):
             names.append(spec.value)
-        elif isinstance(spec, StructSpecifier):
+        elif isinstance(spec, RecordDecl):
             names.append("struct")
-            struct_spec = spec
+            decl = spec
         elif isinstance(spec, EnumDecl):
             names.append("enum")
-            enum_spec = spec
+            decl = spec
+        elif isinstance(spec, Ident):
+            names.append("typename")
+            decl_spec.ident = spec
 
     names_count = collections.Counter(names)
 
@@ -1707,28 +1758,9 @@ def get_type_spec_type(specs):
 
             assert(spec_ty)
 
-            spec = TypeSpecifierInfo(spec_sign, spec_width, spec_ty)
-            spec.struct_spec = struct_spec
-            spec.enum_spec = enum_spec
-            return spec
-
-    return None
-
-
-class TypeSpecifier:
-    def __init__(self, spec, quals, ident, decls, func_spec=None):
-        self.spec = spec
-        self.quals = quals
-        self.ident = ident
-        self.decls = decls
-
-        if not func_spec:
-            func_spec = []
-        self.func_spec = func_spec
-
-    @property
-    def name(self):
-        return self.spec.ty.value
+            decl_spec.spec = TypeSpecifierInfo(spec_sign, spec_width, spec_ty)
+            decl_spec.decl = decl
+            return
 
 
 def parse_declaration_specifiers(tokens, pos, ctx):
@@ -1747,37 +1779,35 @@ def parse_declaration_specifiers(tokens, pos, ctx):
         specs.append(spec)
 
     if len(specs) > 0:
-        type_quals = []
         type_specs = []
-        func_spec = []
-        ident = None
-        decls = None
+
+        decl_spec = DeclSpec()
 
         for spec in specs:
             if isinstance(spec, TypeSpecifierType):
                 type_specs.append(spec)
-            elif isinstance(spec, StructSpecifier):
+            elif isinstance(spec, RecordDecl):
                 type_specs.append(spec)
-                if spec.ident:
-                    ident = spec.ident
-                decls = spec.decls
             elif isinstance(spec, EnumDecl):
                 type_specs.append(spec)
             elif isinstance(spec, Ident):
-                ident = spec
+                type_specs.append(TypeSpecifierType.Typename)
+                decl_spec.ident = spec
             elif spec in ["inline", "__inline"]:
-                func_spec.append("inline")
-            else:
-                type_quals.append(spec)
+                decl_spec.set_func_spec_inline()
+            elif isinstance(spec, StorageClass):
+                if spec == StorageClass.ThreadLocal:
+                    pass
+                else:
+                    decl_spec.storage_class_spec = spec
 
-        type_spec_type = get_type_spec_type(type_specs)
+        if StorageClass.Typedef == decl_spec.storage_class_spec and len(type_specs) > 1 and type_specs[-1] == TypeSpecifierType.Typename:
+            type_specs.pop()
 
-        if not type_spec_type:
-            type_spec_type = ctx.typedefs[ident.val]
-            if not type_spec_type:
-                raise ValueError()
+        get_type_spec_type(type_specs, decl_spec)
+        assert(decl_spec.spec)
 
-        return (pos, TypeSpecifier(type_spec_type, type_quals, ident, decls, func_spec))
+        return (pos, decl_spec)
 
     return (pos, None)
 
@@ -1934,6 +1964,8 @@ def parse_direct_declarator_tail(tokens, pos, ctx):
             return (pos, ArrayDeclaratorChunk(quals, expr, False, False))
     pos = save_pos.pop()
 
+    # direct-declarator ( parameter-type-list )
+    # direct-declarator ( identifier-list_opt )
     save_pos.append(pos)
     if tokens[pos].value == "(":
         pos += 1
@@ -1973,7 +2005,6 @@ class Declarator:
 
     @ident_or_decl.setter
     def ident_or_decl(self, value):
-        # assert(not value or isinstance(value, Ident))
         self._ident_or_decl = value
 
     @property
@@ -1997,10 +2028,17 @@ class Declarator:
 
     @property
     def is_pointer_decl(self):
-        if len(self.pointer) == 0:
+        if isinstance(self.ident_or_decl, Ident):
             return False
 
-        return True
+        decl = self
+        while isinstance(decl, Declarator):
+            if isinstance(decl.ident_or_decl, Ident) and len(decl.pointer) > 0:
+                return True
+
+            decl = decl.ident_or_decl
+
+        return False
 
     @property
     def is_array_decl(self):
@@ -2148,7 +2186,7 @@ def parse_translation_unit(tokens, pos, ctx):
         if not decl:
             break
 
-        is_typedef = StorageClass.Typedef in decl.qual_spec.quals
+        is_typedef = decl.qual_spec.storage_class_spec == StorageClass.Typedef
         if is_typedef:
             if not decl.decls:
                 name = decl.qual_spec.ident.val
@@ -2157,6 +2195,7 @@ def parse_translation_unit(tokens, pos, ctx):
 
                 decl.decls = [(declor, None)]
             else:
+                assert(len(decl.decls) == 1)
                 ident_or_decl = decl.decls[0][0].ident_or_decl
                 while isinstance(ident_or_decl, Declarator):
                     ident_or_decl = ident_or_decl.ident_or_decl
@@ -2174,11 +2213,7 @@ def parse_translation_unit(tokens, pos, ctx):
 
 class Context:
     def __init__(self):
-        self.typenames = []
         self.typedefs = {}
-
-    def is_typename(self, value):
-        return value in self.typenames
 
 
 def parse(tokens):

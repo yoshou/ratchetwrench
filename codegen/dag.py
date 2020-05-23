@@ -124,6 +124,8 @@ class VirtualDagOps(Enum):
 
     TARGET_REGISTER = VirtualDagOp("TargetRegister")
 
+    INLINEASM = VirtualDagOp("inlineasm")
+
 
 class DagNode:
     def __init__(self, opcode, value_types, operands):
@@ -203,8 +205,8 @@ class DagNode:
 
 
 class DagValue:
-    def __init__(self, node: DagNode, index):
-        assert(isinstance(node, DagNode))
+    def __init__(self, node: DagNode = None, index=-1):
+        assert(isinstance(node, DagNode) or not node)
         self._node = node
         self.index = index
 
@@ -226,6 +228,9 @@ class DagValue:
 
     @property
     def valid(self):
+        if not self._node:
+            return False
+
         return self.index < len(self._node.value_types)
 
 
@@ -595,7 +600,8 @@ class Dag:
         return self.mfunc.func_info.func.module.data_layout
 
     def add_node(self, opcode, value_types, *operands):
-        node = DagNode(opcode, value_types, list(operands))
+        operands = [operand for operand in list(operands) if operand.valid]
+        node = DagNode(opcode, value_types, operands)
         node = self.append_node(node)
 
         return node

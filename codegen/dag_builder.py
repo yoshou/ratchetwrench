@@ -74,7 +74,7 @@ def get_copy_to_parts_vector(value, parts, part_vt, value_vt, chain, dag):
     raise NotImplementedError()
 
 
-def get_copy_to_parts(value, parts, part_vt, chain, dag):
+def get_copy_to_parts(value, parts, part_vt, chain, dag, flags=None):
     value_vt = value.ty
 
     if value_vt.is_vector:
@@ -92,8 +92,18 @@ def get_copy_to_parts(value, parts, part_vt, chain, dag):
             value = DagValue(dag.add_node(
                 VirtualDagOps.TRUNCATE, [part.ty], value), 0)
 
-    chain = DagValue(
-        dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER)], chain, parts[0], value), 0)
+    if flags:
+        vts = [MachineValueType(ValueType.OTHER),
+               MachineValueType(ValueType.GLUE)]
+        chain = DagValue(
+            dag.add_node(VirtualDagOps.COPY_TO_REG, vts, chain, parts[0], value, flags), 0)
+        return chain, chain.get_value(1)
+    else:
+        vts = [MachineValueType(ValueType.OTHER),
+               MachineValueType(ValueType.GLUE)]
+        chain = DagValue(
+            dag.add_node(VirtualDagOps.COPY_TO_REG, vts, chain, parts[0], value), 0)
+
     return chain
 
 
@@ -176,7 +186,8 @@ class DagBuilder:
         return value
 
     def get_or_create_constant(self, value: ConstantInt, is_target=False):
-        assert(isinstance(value, (ConstantInt, ConstantFP, ConstantVector)))
+        assert(isinstance(value, (ConstantInt, ConstantFP,
+                                  ConstantVector, ConstantPointerNull)))
 
         vt = compute_value_types(value.ty, self.data_layout)
         assert(len(vt) == 1)
@@ -196,6 +207,13 @@ class DagBuilder:
 
             node = self.g.add_node(
                 VirtualDagOps.BUILD_VECTOR, vt, *elem_values)
+            return DagValue(node, 0)
+
+        if isinstance(value, ConstantPointerNull):
+            if is_target:
+                node = self.g.add_target_constant_node(vt[0], 0)
+            else:
+                node = self.g.add_constant_node(vt[0], 0)
             return DagValue(node, 0)
 
         assert(isinstance(value, ConstantInt))
@@ -262,6 +280,9 @@ class DagBuilder:
         if isinstance(ir_value, ConstantFP):
             return self.get_or_create_constant(ir_value)
 
+        if isinstance(ir_value, ConstantPointerNull):
+            return self.get_or_create_constant(ir_value)
+
         if isinstance(ir_value, ConstantVector):
             return self.get_or_create_constant(ir_value)
 
@@ -270,6 +291,9 @@ class DagBuilder:
 
         if isinstance(ir_value, AllocaInst):
             return self.get_or_create_frame_idx(ir_value)
+
+        if isinstance(ir_value, Function):
+            return self.get_or_create_global_address(ir_value)
 
         raise NotImplementedError()
 
@@ -328,13 +352,19 @@ class DagBuilder:
         rs = self.get_value(inst.rs)
         offsets = []
         vts = compute_value_types(inst.ty, self.data_layout, offsets)
+        ptr_ty = self.target_lowering.get_pointer_type(
+            self.data_layout, inst.rs.ty.addr_space)
 
         values = []
         for i, vt in enumerate(vts):
             offset_val = offsets[i]
 
             offset = self.get_or_create_constant(
-                ConstantInt(offset_val, inst.rs.ty))
+                ConstantInt(offset_val, ptr_ty.get_ir_type()))
+
+            assert(ptr_ty == rs.ty)
+            assert(ptr_ty == offset.ty)
+
             if offset_val != 0:
                 addr = DagValue(self.g.add_node(
                     VirtualDagOps.ADD, [rs.ty], rs, offset), 0)
@@ -353,22 +383,27 @@ class DagBuilder:
         rd = self.get_value(inst.rd)
         offsets = []
         vts = compute_value_types(inst.rs.ty, self.data_layout, offsets)
+        ptr_ty = self.target_lowering.get_pointer_type(
+            self.data_layout, inst.rd.ty.addr_space)
 
         chains = []
         for i, vt in enumerate(vts):
             offset_val = offsets[i]
 
             offset = self.get_or_create_constant(
-                ConstantInt(offset_val, inst.rd.ty))
+                ConstantInt(offset_val, ptr_ty.get_ir_type()))
+
+            assert(ptr_ty == rd.ty)
+            assert(ptr_ty == offset.ty)
 
             if offset_val != 0:
                 addr = DagValue(self.g.add_node(
-                    VirtualDagOps.ADD, [rd.ty], rd, offset), 0)
+                    VirtualDagOps.ADD, [ptr_ty], rd, offset), 0)
             else:
                 addr = rd
 
             value = DagValue(self.g.add_store_node(
-                self.root, addr, DagValue(rs.node, i), mem_value_ty=vt), 0)
+                self.root, addr, DagValue(rs.node, rs.index+i), mem_value_ty=vt), 0)
             chains.append(value)
 
         node = self.g.add_node(VirtualDagOps.TOKEN_FACTOR, [
@@ -463,14 +498,48 @@ class DagBuilder:
 
         self.set_inst_value(inst, value)
 
-    def visit_extract_element(self, inst: InsertElementInst):
+    def compute_linear_index(self, ty, indices, idx=0):
+        if isinstance(ty, StructType):
+            for i, field_ty in enumerate(ty.fields):
+                if indices and i == indices[0]:
+                    return idx
+                idx = self.compute_linear_index(field_ty, indices[1:], idx)
+
+            return idx
+        elif isinstance(ty, ArrayType):
+            size = ty.size
+            elem_size = self.compute_linear_index(ty.elem_ty, None)
+
+            if indices:
+                idx += elem_size * indices[0]
+                idx = self.compute_linear_index(ty.elem_ty, indices[1:], idx)
+                return idx
+
+            idx += size * elem_size
+            return idx
+
+        return idx + 1
+
+    def visit_extract_element(self, inst: ExtractElementInst):
         vec = self.get_value(inst.vec)
         idx = self.get_value(inst.idx)
 
         vts = compute_value_types(inst.ty, self.data_layout)
 
         value = DagValue(self.g.add_node(
-            VirtualDagOps.EXTRACT_VECTOR_ELT, vts, vec, elem, idx), 0)
+            VirtualDagOps.EXTRACT_VECTOR_ELT, vts, vec, idx), 0)
+
+        self.set_inst_value(inst, value)
+
+    def visit_extract_value(self, inst: ExtractValueInst):
+        vec = self.get_value(inst.value)
+        indices = inst.idx
+
+        linear_index = self.compute_linear_index(inst.value.ty, indices)
+
+        vts = compute_value_types(inst.ty, self.data_layout)
+
+        value = vec.get_value(linear_index)
 
         self.set_inst_value(inst, value)
 
@@ -778,8 +847,140 @@ class DagBuilder:
 
         return False
 
+    def visit_inline_asm(self, inst: CallInst):
+        inline_asm = inst.callee
+
+        arg_idx = 0
+        res_idx = 0
+
+        class ConstraintType(Enum):
+            Register = auto()
+            RegisterClass = auto()
+            Memory = auto()
+            Immediate = auto()
+            Other = auto()
+            Unknown = auto()
+
+        def get_constraint_type(code):
+            if code.startswith("{") and code.endswith("}"):
+                if code[1:-1] == "memory":
+                    return ConstraintType.Memory
+
+                return ConstraintType.Register
+
+            return ConstraintType.Unknown
+
+        class AsmOperandInfo:
+            def __init__(self, constraint_info):
+                self.ty = constraint_info.ty
+                self.codes = constraint_info.codes
+                self.operand_value = None
+                self.constraint_vt = MachineValueType(ValueType.OTHER)
+                self.assigned_regs = []
+
+            def compute_constraint(self):
+                if len(self.codes) == 1:
+                    self.constraint_code = self.codes[0]
+                    self.constraint_type = get_constraint_type(
+                        self.constraint_code)
+                else:
+                    raise ValueError("Invalid constraint code.")
+
+        op_infos = []
+
+        vts = compute_value_types(inst.ty, self.data_layout)
+
+        for constraint in inline_asm.parse_constraints():
+            op_info = AsmOperandInfo(constraint)
+            op_infos.append(op_info)
+
+            if constraint.ty == ConstraintPrefix.Output:
+                op_info.constraint_vt = vts[res_idx]
+                res_idx += 1
+            elif constraint.ty == ConstraintPrefix.Input:
+                op_info.operand_value = inst.args[arg_idx]
+                arg_idx += 1
+
+            if op_info.operand_value:
+                op_info.constraint_vt = compute_value_types(
+                    op_info.operand_value.ty, self.data_layout)[0]
+
+            op_info.compute_constraint()
+
+        ptr_ty = self.target_lowering.get_pointer_type(self.data_layout)
+
+        asm_node_operands = []
+        asm_node_operands.append(
+            DagValue(self.g.add_external_symbol_node(ptr_ty, inline_asm.asm_string, True), 0))
+
+        for op_info in op_infos:
+            if op_info.ty in [ConstraintPrefix.Input, ConstraintPrefix.Output]:
+                if op_info.constraint_type == ConstraintType.Register:
+                    reg = self.target_lowering.get_reg_for_inline_asm_constraint(
+                        self.reg_info, op_info.constraint_code, op_info.constraint_vt)
+                    if not reg:
+                        continue
+
+                    op_info.assigned_regs.append(
+                        (MachineRegister(reg), op_info.constraint_vt))
+
+        chain = self.g.root
+        flags = DagValue()
+
+        for op_info in op_infos:
+            if op_info.ty == ConstraintPrefix.Input:
+
+                if op_info.constraint_type == ConstraintType.Register:
+                    regs = []
+                    for reg, vt in op_info.assigned_regs:
+                        reg_val = DagValue(
+                            self.g.add_register_node(vt, reg), 0)
+                        regs.append(reg_val)
+                        asm_node_operands.append(reg_val)
+
+                    chain, flags = get_copy_to_parts(self.get_value(
+                        op_info.operand_value), regs, op_info.constraint_vt, chain, self.g, flags)
+
+        asm_node_operands.append(chain)
+
+        chain = DagValue(self.g.add_node(VirtualDagOps.INLINEASM, [
+                         MachineValueType(ValueType.OTHER)], *asm_node_operands, flags), 0)
+        flags = chain.get_value(1)
+
+        result_values = []
+        for op_info in op_infos:
+            if op_info.ty == ConstraintPrefix.Output:
+                if op_info.constraint_type == ConstraintType.Register:
+                    regs = []
+                    for reg, vt in op_info.assigned_regs:
+                        reg_val = DagValue(
+                            self.g.add_register_node(vt, reg), 0)
+                        regs.append(reg_val)
+                        asm_node_operands.append(reg_val)
+
+                    vts = [op_info.constraint_vt, MachineValueType(
+                        ValueType.OTHER), MachineValueType(ValueType.GLUE)]
+                    value = DagValue(self.g.add_node(
+                        VirtualDagOps.COPY_FROM_REG, vts, chain, regs[0], flags), 0)
+                    chain = value.get_value(1)
+                    flags = value.get_value(2)
+
+                    result_values.append(value)
+
+        result_vts = compute_value_types(inst.ty, self.data_layout)
+
+        if result_values:
+            value = DagValue(self.g.add_node(
+                VirtualDagOps.MERGE_VALUES, result_vts, *result_values), 0)
+
+            self.set_inst_value(inst, value)
+
     def visit_call(self, inst: CallInst):
         callee = inst.callee
+        if isinstance(callee, InlineAsm):
+            self.visit_inline_asm(inst)
+            return
+
         if self.is_intrinsic_func(callee):
             self.visit_memcpy(inst)
             return
@@ -864,6 +1065,8 @@ class DagBuilder:
             self.visit_insert_element(inst)
         elif isinstance(inst, ExtractElementInst):
             self.visit_extract_element(inst)
+        elif isinstance(inst, ExtractValueInst):
+            self.visit_extract_value(inst)
         elif isinstance(inst, TruncInst):
             self.visit_trunc(inst)
         elif isinstance(inst, ZExtInst):

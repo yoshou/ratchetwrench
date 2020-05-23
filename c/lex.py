@@ -10,8 +10,9 @@ whitespace = re.compile(r"[\r\n \t\v\f]",
 
 identifier = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*")
 
-integer_constant = re.compile(r'([1-9]\d*|0)')
+decimal_constant = re.compile(r'[1-9][0-9]*')
 hexadecimal_constant = re.compile(r'0[xX][0-9a-fA-F]+')
+octet_constant = re.compile(r'0[0-7]*')
 
 floating_constant = re.compile(
     r'((?:(?:[-+]?[0-9]*\.[0-9]+(?:[eE][-+]?[0-9]+)?)|(?:[0-9]+[eE][-+]?[0-9]+)))')
@@ -27,7 +28,7 @@ integer_suffix = re.compile(r'(?:([uU])(ll|LL|l|L)?)|(?:(ll|LL|l|L)([uU])?)')
 
 string_literal = re.compile(r'(u8|u|U|L)?"([^"]*)"')
 
-character_constant = re.compile(r'(?:u|U|L)?\'([^\']+)\'')
+character_constant = re.compile(r'(?:u|U|L)?\'(\\.|[^\'])*\'')
 
 
 def escape_str(s):
@@ -152,7 +153,31 @@ def match_identifier(src, pos):
 
 
 def match_integer_constant(src, pos):
-    result = integer_constant.match(src, pos)
+    result = hexadecimal_constant.match(src, pos)
+    if result:
+        match_beg, match_end = result.span()
+        match_len = match_end - match_beg
+
+        suffix = integer_suffix.match(src, match_end)
+        if suffix:
+            match_len += len(suffix.group())
+
+        span = Span(src, match_beg, match_end)
+        return (match_len, IntegerConstant(result.group(), span))
+
+    result = decimal_constant.match(src, pos)
+    if result:
+        match_beg, match_end = result.span()
+        match_len = match_end - match_beg
+
+        suffix = integer_suffix.match(src, match_end)
+        if suffix:
+            match_len += len(suffix.group())
+
+        span = Span(src, match_beg, match_end)
+        return (match_len, IntegerConstant(result.group(), span))
+
+    result = octet_constant.match(src, pos)
     if result:
         match_beg, match_end = result.span()
         match_len = match_end - match_beg
@@ -230,11 +255,6 @@ def peek_token(src, pos, cnt):
     if result:
         return (len(result.group()), None)
 
-    result = hexadecimal_constant.match(src, pos)
-    if result:
-        span = Span(src, result.start(), result.end())
-        return (len(result.group()), IntegerConstant(result.group(), span))
-
     matched = match_floating_constant(src, pos)
     if matched:
         return matched
@@ -252,6 +272,8 @@ def peek_token(src, pos, cnt):
     if result:
         span = Span(src, result.start(), result.end())
         return (len(result.group()), Keyword(result.group(), span))
+
+    a = src[pos:]
 
     raise ValueError("Invalid string")
 

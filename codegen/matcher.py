@@ -349,6 +349,50 @@ anyext_ = NodePatternMatcherGen(VirtualDagOps.ANY_EXTEND)
 trunc_ = NodePatternMatcherGen(VirtualDagOps.TRUNCATE)
 
 
+class ComplexPatternMatcher(PatternMatcher):
+    def __init__(self, value_type, num_operands, fn, roots, name=None):
+        super().__init__(name)
+
+        self.value_type = value_type
+        self.num_operands = num_operands
+        self.fn = fn
+        self.roots = roots
+
+    def __call__(self, *operand_matchers):
+        assert(len(operand_matchers) == self.num_operands)
+
+        class ComplexPatternMatcherDeconstruction(PatternMatcher):
+            def __init__(self, value_type, num_operands, fn, roots, operand_matchers, name=None):
+                super().__init__(name)
+
+                self.value_type = value_type
+                self.num_operands = num_operands
+                self.fn = fn
+                self.roots = roots
+                self.operand_matchers = [create_matcher(
+                    matcher_or_tuple) for matcher_or_tuple in operand_matchers]
+
+                self.matcher = ComplexOperandMatcher(self.fn, name)
+
+            def match(self, node, values, idx, dag):
+                for root_matcher in self.roots:
+                    _, res = root_matcher.match(node)
+                    if not res:
+                        return idx, None
+
+                res_idx, res = self.matcher.match(node, values, idx, dag)
+                if not res:
+                    return idx, None
+
+                results = []
+                for operand, res_value in zip(self.operand_matchers, res.values[0]):
+                    results.append(MatcherResult(operand.name, res_value))
+
+                return res_idx, MatcherResult(self.name, [], results)
+
+        return ComplexPatternMatcherDeconstruction(self.value_type, self.num_operands, self.fn, self.roots, list(operand_matchers), self.name)
+
+
 class NodeValuePatternMatcher(PatternMatcher):
     def __init__(self, name):
         super().__init__(name)
@@ -394,9 +438,14 @@ class ValueTypeMatcherGen:
         self.value_type = value_type
         self.props = dict(props)
 
-    def __call__(self, *operands):
-        from codegen.spec import MachineRegisterDef
+        self.matcher = ValueTypeMatcher(self.value_type)
 
+    def match(self, node, values, idx, dag):
+        from codegen.dag import DagValue
+
+        return self.matcher.match(None, [DagValue(node, 0)], 0, dag)
+
+    def __call__(self, *operands):
         opcode_matcher = NodeOpcodePatternMatcher(None)
         value_matchers = []
         operand_matchers = []

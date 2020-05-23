@@ -39,6 +39,10 @@ class PointerType(Type):
 
         return self.elem_ty == other.elem_ty
 
+    @property
+    def name(self):
+        return f"{self.elem_ty.name}*"
+
 
 class PrimitiveType(Type):
     def __init__(self, name):
@@ -111,12 +115,25 @@ class ArrayType(Type):
 
 
 class CompositeType(Type):
-    def __init__(self, name, fields):
+    def __init__(self, name, fields, is_union=False):
         super().__init__()
         self.name = name
+        self._fields = None
         self.fields = fields
-        self.fields_index = {name: i for i,
-                             (ty, name, arr) in enumerate(self.fields)}
+        self.is_union = is_union
+        self.fields_index = []
+
+    @property
+    def fields(self):
+        return self._fields
+
+    @fields.setter
+    def fields(self, value):
+        self._fields = value
+
+        if value:
+            self.fields_index = {name: i for i,
+                                 (ty, name, arr) in enumerate(value)}
 
     def get_field_by_idx(self, idx):
         return self.fields[idx]
@@ -150,12 +167,26 @@ class CompositeType(Type):
 
 
 class EnumType(Type):
-    def __init__(self, name, values):
-        self.name = name
+    def __init__(self, values=None):
+        self._values = None
         self.values = values
 
-        for val_name, value in values.items():
-            assert(isinstance(val_name, str))
+    @property
+    def values(self):
+        return self._values
+
+    @values.setter
+    def values(self, vals):
+        self._values = vals
+        if vals:
+            for val_name, value in vals.items():
+                assert(isinstance(val_name, str))
+
+    def __eq__(self, other):
+        if not isinstance(other, EnumType):
+            return False
+
+        return self._values == other._values
 
 
 class FunctionType(Type):
@@ -164,6 +195,12 @@ class FunctionType(Type):
         self.return_ty = return_ty
         self.params = params
         self.is_variadic = is_variadic
+
+    def __eq__(self, other):
+        if not isinstance(other, FunctionType):
+            return False
+
+        return self.return_ty == other.return_ty and [param for param, _, _ in self.params] == [param for param, _, _ in other.params]
 
 
 buildin_type_reg_size = {

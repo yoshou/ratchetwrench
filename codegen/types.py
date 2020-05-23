@@ -153,6 +153,8 @@ class MachineValueType:
             return f32
         if self.value_type == ValueType.F64:
             return f64
+        if self.value_type == ValueType.V2F32:
+            return VectorType("", f32, 2)
         if self.value_type == ValueType.V4F32:
             return VectorType("", f32, 4)
 

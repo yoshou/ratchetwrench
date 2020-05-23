@@ -125,6 +125,13 @@ XLenVT = ValueTypeByHWMode({
     RV128: ValueType.I128,
 })
 
+
+def sequence(format_str, start, end):
+    seq = [globals()[format_str.format(i)]
+           for i in range(start, (end - start))]
+    return seq
+
+
 GPR = def_riscv_regclass("GPR", [XLenVT], 32, [
                          globals()[f"X{idx}"] for idx in range(32)])
 

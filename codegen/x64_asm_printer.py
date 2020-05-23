@@ -734,12 +734,19 @@ class X64AsmPrinter(AsmPrinter):
             self.stream.emit_int_value(constant.value, int(size / 8))
         elif isinstance(constant, ConstantFP):
             self.emit_global_constant_fp(constant)
+        elif isinstance(constant, ConstantPointerNull):
+            self.stream.emit_int_value(0, int(size / 8))
         elif isinstance(constant, ConstantVector):
             self.emit_global_constant_vector(data_layout, constant, offset)
         elif isinstance(constant, ConstantArray):
             self.emit_global_constant_array(data_layout, constant, offset)
         elif isinstance(constant, ConstantStruct):
             self.emit_global_constant_struct(data_layout, constant, offset)
+        elif isinstance(constant, TruncInst):
+            if isinstance(constant.rs, ConstantInt):
+                self.stream.emit_int_value(constant.rs.value, int(size / 8))
+            else:
+                raise ValueError("Invalid constant type")
         else:
             raise ValueError("Invalid constant type")
 

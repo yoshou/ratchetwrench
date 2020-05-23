@@ -609,7 +609,7 @@ def parse_struct_specifier(tokens, pos, ctx):
             (pos, decls) = parse_struct_declaration_list(tokens, pos, ctx)
             if decls is not None:
                 if str(tokens[pos]) == "}":
-                    return (pos + 1, StructSpecifier(ident, decls))
+                    return (pos + 1, StructSpecifier(ident, decls, False))
     pos = save_pos.pop()
 
     return (pos, None)

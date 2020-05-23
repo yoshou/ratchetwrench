@@ -834,6 +834,12 @@ class ARMMachineOps:
         patterns=[arm_cmpfp_(("src1", SPR), ("src2", SPR))]
     )
 
+    VMOVD = def_inst(
+        "vmovd",
+        outs=[("dst", DPR)],
+        ins=[("src", DPR)]
+    )
+
     VLDRD = def_inst(
         "vldrd",
         outs=[("dst", DPR)],
@@ -969,7 +975,7 @@ class ARMMachineOps:
     )
 
     VDUPLN32q = def_inst(
-        "udup_ln32q",
+        "vdup_ln32q",
         outs=[("dst", QPR)],
         ins=[("src", SPR), ("lane", VectorIndex32)]
     )

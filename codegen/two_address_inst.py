@@ -62,8 +62,7 @@ class TwoAddressInst(MachineFunctionPass):
                 if inst.opcode == TargetDagOps.INSERT_SUBREG:
                     # From % reg = INSERT_SUBREG % reg, % subreg, subidx
                     # To % reg: subidx = COPY % subreg
-                    subreg_idx = inst.operands[4]
-                    inst.remove_operand(4)
+                    subreg_idx = inst.operands[3]
                     inst.remove_operand(3)
                     inst.remove_operand(1)
                     inst.operands[0].subreg = subreg_idx.val

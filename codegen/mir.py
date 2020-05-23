@@ -17,6 +17,7 @@ class TargetDagOps(Enum):
     COPY = TargetDagOp("COPY")
     COPY_TO_REGCLASS = TargetDagOp("COPY_TO_REGCLASS")
     SUBREG_TO_REG = TargetDagOp("SUBREG_TO_REG")
+    INLINEASM = TargetDagOp("INLINEASM")
 
 
 class MachineConstantPoolValue:
@@ -374,6 +375,8 @@ class MachineFunction:
                 f.write('insert_subreg')
             elif inst.opcode == TargetDagOps.SUBREG_TO_REG:
                 f.write('subreg_to_reg')
+            elif inst.opcode == TargetDagOps.INLINEASM:
+                f.write('asm')
             else:
                 raise NotImplementedError()
         else:

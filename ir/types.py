@@ -66,7 +66,7 @@ class PointerType(Type):
     @property
     def name(self):
         if self.addr_space != 0:
-            return f"{self.elem_ty.name} ({self.addr_space})*"
+            return f"{self.elem_ty.name} addrspace({self.addr_space})*"
         return f"{self.elem_ty.name}*"
 
 
@@ -74,6 +74,25 @@ class PrimitiveType(Type):
     def __init__(self, name):
         super().__init__()
         self.name = name
+
+    def __hash__(self):
+        return hash(tuple([self.name]))
+
+    def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return False
+
+        return self.name == other.name
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+
+class IntegerType(PrimitiveType):
+    def __init__(self, width):
+        super().__init__()
+        self.width = width
+        self.name = f"i{width}"
 
     def __hash__(self):
         return hash(tuple([self.name]))
@@ -97,18 +116,17 @@ class CompositeType(Type):
 
 
 class StructType(CompositeType):
-    def __init__(self, name, fields):
-        for field in fields:
-            assert(isinstance(field, Type))
+    def __init__(self, name=None, fields=None, is_packed=False):
         super().__init__()
-        self.name = name
+        self.name = name if name else ""
         self.fields = fields
+        self.is_packed = is_packed
 
     def get_elem_type(self, idx):
         return self.fields[idx]
 
     def __hash__(self):
-        return hash(tuple([self.name, frozenset(self.fields.items())]))
+        return hash(tuple([self.name]))
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
@@ -121,9 +139,8 @@ class StructType(CompositeType):
 
 
 class SequentialType(CompositeType):
-    def __init__(self, name, elem_ty, size):
+    def __init__(self, elem_ty, size):
         super().__init__()
-        self.name = name
         self.elem_ty = elem_ty
         self.size = size
 
@@ -131,34 +148,37 @@ class SequentialType(CompositeType):
         return self.elem_ty
 
     def __hash__(self):
-        return hash(tuple([self.name, self.elem_ty, self.size]))
+        return hash(tuple([self.elem_ty, self.size]))
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
             return False
 
-        return self.name == other.name and self.elem_ty == other.elem_ty and self.size == other.size
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
+        return self.elem_ty == other.elem_ty and self.size == other.size
 
 
 class ArrayType(SequentialType):
     def __init__(self, elem_ty, size):
         assert(isinstance(size, int))
-        name = f"[{size} x {elem_ty.name}]"
-        super().__init__(name, elem_ty, size)
+        super().__init__(elem_ty, size)
+
+    @property
+    def name(self):
+        return f"[{self.size} x {self.elem_ty.name}]"
 
 
 class VectorType(SequentialType):
     def __init__(self, name, elem_ty, size):
         assert(isinstance(size, int))
-        name = f"<{size} x {elem_ty.name}>"
-        super().__init__(name, elem_ty, size)
+        super().__init__(elem_ty, size)
+
+    @property
+    def name(self):
+        return f"[{self.size} x {self.elem_ty.name}]"
 
 
 class FunctionType(Type):
-    def __init__(self, name, return_ty, params, is_variadic=False):
+    def __init__(self, return_ty, params, is_variadic=False):
         super().__init__()
         self.return_ty = return_ty
         self.params = params
@@ -172,6 +192,15 @@ class FunctionType(Type):
             param_ty_list += ", ..."
 
         self.name = f"{return_ty_name} ({param_ty_list})"
+
+    def __hash__(self):
+        return hash(tuple([self.return_ty, tuple(self.params)]))
+
+    def __eq__(self, other):
+        if not isinstance(other, FunctionType):
+            return False
+
+        return self.return_ty == other.return_ty and self.params == other.params
 
 
 # Instances

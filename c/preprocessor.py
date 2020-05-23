@@ -67,6 +67,8 @@ identifier = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*")
 
 string_literal = re.compile(r'"(?:\\.|[^"\\]*)*"')
 
+character_constant = re.compile(r"(?:u|U|L)?'(\\.|[^'])*'")
+
 
 def escape_str(s):
     return re.escape(s)
@@ -187,10 +189,11 @@ def evalute_constant_expr(expr):
 
 
 class Preprocessor:
-    def __init__(self, filename, source, include_dirs, eval_masks=None):
+    def __init__(self, filename, source, include_dirs, system_include_dirs, eval_masks=None):
         self.filename = filename
         self.source = source.replace("\\\n", "")
         self.include_dirs = include_dirs
+        self.system_include_dirs = system_include_dirs
         self.pos = 0
         self.groups = []
         self.groups.append(DefineReplacementDirective("_MSC_VER", ["1700"]))
@@ -218,6 +221,10 @@ class Preprocessor:
             "_NO_CRT_STDIO_INLINE", ["1"]))
         self.groups.append(DefineReplacementDirective(
             "_WIN64", ["1"]))
+        self.groups.append(DefineReplacementDirective(
+            "X64", ["1"]))
+        self.groups.append(DefineReplacementDirective(
+            "DEBUG", ["0"]))
 
         if not eval_masks:
             self.eval_masks = [EvalMask(True)]
@@ -275,6 +282,11 @@ class Preprocessor:
         if m:
             self.pos = m.end()
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.StringLiteral)
+
+        m = character_constant.match(self.source, self.pos)
+        if m:
+            self.pos = m.end()
+            return self.create_token(self.source, Span(m.start(), m.end()), TokenType.CharacterConstant)
 
         m = pp_number.match(self.source, self.pos)
         if m:
@@ -679,6 +691,13 @@ class Preprocessor:
                 break
 
         if not fullpath:
+            for incdir in self.system_include_dirs:
+                path = os.path.join(incdir, filename)
+                if os.path.exists(path):
+                    fullpath = path
+                    break
+
+        if not fullpath:
             fullpath = os.path.abspath(filename)
 
         if not os.path.exists(fullpath):
@@ -689,35 +708,35 @@ class Preprocessor:
             source = f.read()
 
         cpp = Preprocessor(
-            fullpath, source, self.include_dirs, self.eval_masks)
+            fullpath, source, self.include_dirs, self.system_include_dirs, self.eval_masks)
 
         cpp.process(self.replacements)
         return cpp
 
-    def do_replacement(self, tokens, defines):
-        pos = 0
+    def do_replacement(self, tokens, pos, defines):
         if str(tokens[pos]) in defines:
             macro = defines[str(tokens[pos])]
-            pos += 1
             if macro.is_func_style:
-                parenthesis_nest = 0
+                a = tokens[pos:]
+                macro_start = pos
+
+                pos += 1
+                parenthesis_nest = 1
                 assert str(tokens[pos]) == "("
                 pos += 1
 
                 new_param_token = True
                 params = []
 
-                tok = tokens[pos:]
                 while True:
                     if str(tokens[pos]) == "(":
                         parenthesis_nest += 1
                     elif str(tokens[pos]) == ")":
-                        if parenthesis_nest == 0:
-                            pos += 1
-                            break
                         parenthesis_nest -= 1
-                    elif str(tokens[pos]) == ",":
                         if parenthesis_nest == 0:
+                            break
+                    elif str(tokens[pos]) == ",":
+                        if parenthesis_nest == 1:
                             new_param_token = True
                             pos += 1
                             continue
@@ -729,7 +748,12 @@ class Preprocessor:
                     params[-1].append(tokens[pos])
                     pos += 1
 
+                assert(str(tokens[pos]) == ")")
                 assert(len(macro.params) == len(params))
+
+                macro_end = pos
+
+                pos += 1
 
                 args = {str(arg): param for arg,
                         param in zip(macro.params, params)}
@@ -742,25 +766,35 @@ class Preprocessor:
                     else:
                         result.append(token)
 
-                result = self.process_replacement(
-                    result, defines)
-            else:
-                if macro.replacements:
-                    result = self.process_replacement(
-                        macro.replacements, defines)
-                else:
-                    result = []
+                while macro_end >= macro_start:
+                    tokens.pop(macro_start)
+                    macro_end -= 1
 
-            return result, pos
-        else:
-            return [tokens[pos]], 1
+                pos = macro_start
+
+                for r in result:
+                    tokens.insert(pos, r)
+                    pos += 1
+            else:
+                tokens.pop(pos)
+                if macro.replacements:
+                    for r in macro.replacements:
+                        tokens.insert(pos, r)
+                        pos += 1
+
+            return True
+
+        return False
 
     def process_replacement(self, tokens, replacements):
-        result = []
         pos = 0
         while pos < len(tokens):
             token = tokens[pos]
+
             if str(token) == "defined":
+                macro_start = pos
+                result = []
+
                 if str(tokens[pos + 1]) == "(":
                     assert(tokens[pos + 2].ty == TokenType.Identifier)
                     if str(tokens[pos + 2]) in replacements:
@@ -770,7 +804,8 @@ class Preprocessor:
                         result.append(
                             self.create_token("0", Span(0, 1), TokenType.Other))
                     assert(str(tokens[pos + 3]) == ")")
-                    pos += 4
+
+                    macro_end = pos + 4
                 else:
                     assert(tokens[pos + 1].ty == TokenType.Identifier)
                     if str(tokens[pos + 1]) in replacements:
@@ -779,28 +814,33 @@ class Preprocessor:
                     else:
                         result.append(
                             self.create_token("0", Span(0, 1), TokenType.Other))
-                    pos += 2
-            else:
-                sub_tokens, cnt = self.do_replacement(
-                    tokens[pos:], replacements)
-                result.extend(sub_tokens)
-                pos += cnt
 
-        pos = 0
-        tokens = list(result)
-        result = []
-        while pos < len(tokens):
-            if str(tokens[pos]) == "#":
+                    macro_end = pos + 2
+
+                while macro_end > macro_start:
+                    tokens.pop(macro_start)
+                    macro_end -= 1
+
+                for r in result:
+                    tokens.insert(macro_start, r)
+                    macro_start += 1
+
+                continue
+            elif str(tokens[pos]) == "#":
+                lhs_token = tokens[pos - 1]
+                rhs_token = tokens[pos + 1]
                 pos += 1
                 new_tok_val = f'"{str(tokens[pos])}"'
                 result.append(self.create_token(
                     new_tok_val, Span(0, len(new_tok_val)), TokenType.StringLiteral))
                 pos += 1
             else:
-                result.append(tokens[pos])
-                pos += 1
+                if self.do_replacement(tokens, pos, replacements):
+                    continue
 
-        return result
+            pos += 1
+
+        return tokens
 
     def evalute_if_cond(self, expr_str):
         from c.lex import tokenize
@@ -896,11 +936,10 @@ class Preprocessor:
 
                     pos += 1
                 else:
-                    tokens, cnt = self.do_replacement(
-                        self.groups[pos:], self.replacements)
-                    processed_tokens.extend(tokens)
-
-                    pos += cnt
+                    if not self.do_replacement(
+                            self.groups, pos, self.replacements):
+                        processed_tokens.append(self.groups[pos])
+                        pos += 1
             else:
                 pos += 1
 

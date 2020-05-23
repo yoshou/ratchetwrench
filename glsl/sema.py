@@ -24,7 +24,7 @@ def register_function_proto(node, sym_table, is_constructor=False):
 
     sym = sym_table.register_func(name, ty, params)
 
-    return TypedFunctionProto(ty, sym, params)
+    return TypedFunctionProto(ty, sym, params, [])
 
 
 def evaluate_constant_expr(expr):
@@ -57,7 +57,7 @@ def register_variable(node, sym_table):
         assert(ty2)
         variables.append([TypedIdentExpr(var, ty2), initializer])
 
-    return TypedVariable(ty, variables)
+    return TypedVariable(ty, variables, [])
 
 
 def enter_node(node, depth, sym_table: SymbolTable):
@@ -317,7 +317,7 @@ def exit_node(node, depth, sym_table):
             assert(ty2)
             variables.append([TypedIdentExpr(var, ty2), initializer])
 
-        node = TypedVariable(ty, variables)
+        node = TypedVariable(ty, variables, [])
 
     if isinstance(node, IdentExpr):
         var = sym_table.find_var(node.val)

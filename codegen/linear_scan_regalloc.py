@@ -31,7 +31,7 @@ class Spiller:
                 if operand.reg != vreg:
                     continue
 
-                has_use |= operand.is_use
+                has_use |= (operand.is_use | (operand.subreg is not None))
                 has_def |= operand.is_def
 
             assert(has_use | has_def)
@@ -51,10 +51,8 @@ class Spiller:
             segment = SlotSegment()
             interval.segments.append(segment)
 
-            all_insts = [inst for mbb in func.bbs for inst in mbb.insts]
-
             start_inst = inst.prev_inst if has_use else inst
-            end_inst = inst if has_def else start_inst
+            end_inst = inst.next_inst if has_def else inst
 
             segment.start = start_inst
             segment.end = end_inst
@@ -85,7 +83,7 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
 
     def expire_old_intervals(self, live_range):
         for rnge in list(self.active_regs):
-            if cmp_inst_func(rnge.end, live_range.start) in [0, 1]:
+            if cmp_inst_func(rnge.end, live_range.start) > 0:
                 continue
 
             self.active_regs.remove(rnge)
@@ -133,6 +131,7 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
             return
 
         spill_reg = None
+        phys_reg_to_alloc = None
 
         for active_reg in self.active_regs:
             if isinstance(active_reg.reg, MachineRegister):
@@ -143,42 +142,47 @@ class LinearScanRegisterAllocation(MachineFunctionPass):
                 continue
 
             for reg in live_range.reg.regclass.regs:
-                for super_reg in iter_super_regs(reg):
-                    if phys_reg.spec == super_reg:
-                        spill_reg = active_reg
-                        break
+                if phys_reg.spec in iter_reg_aliases(reg):
+                    spill_reg = active_reg
+                    phys_reg_to_alloc = MachineRegister(reg)
+                    break
 
                 if spill_reg:
                     break
 
         assert(spill_reg)
 
-        phys_reg = self.get_phys_reg(spill_reg)
+        self.set_phys_reg(live_range, phys_reg_to_alloc)
 
-        for subreg, _ in iter_sub_regs(phys_reg.spec):
-            if subreg in live_range.reg.regclass.regs:
-                phys_reg = MachineRegister(subreg)
-                break
+        for active_reg in self.active_regs:
+            if isinstance(active_reg.reg, MachineRegister):
+                continue
 
-        self.set_phys_reg(live_range, phys_reg)
+            phys_reg = self.get_phys_reg(active_reg)
+            if not phys_reg:
+                continue
 
-        regclass = spill_reg.reg.regclass
-        align = int(regclass.align / 8)
+            if set(iter_reg_units(phys_reg.spec)) & set(iter_reg_units(phys_reg_to_alloc.spec)):
+                regclass = active_reg.reg.regclass
+                align = int(regclass.align / 8)
 
-        tys = regclass.get_types(hwmode)
-        size = tys[0].get_size_in_bits()
-        size = int(int((size + 7) / 8))
+                tys = regclass.get_types(hwmode)
+                size = tys[0].get_size_in_bits()
+                size = int(int((size + 7) / 8))
 
-        stack_slot = self.get_stack(spill_reg)
-        if stack_slot == -1:
-            stack_slot = self.mfunc.create_stack_object(size, align)
-            self.set_stack(spill_reg, stack_slot)
+                stack_slot = self.get_stack(active_reg)
+                if stack_slot == -1:
+                    stack_slot = self.mfunc.create_stack_object(size, align)
+                    self.set_stack(active_reg, stack_slot)
 
-        self.set_phys_reg(spill_reg, None)
-        self.spills.append(spill_reg)
+                self.active_regs.remove(active_reg)
+                reg_units = set(iter_reg_units(phys_reg.spec))
+                self.used_reg_units -= reg_units
+                self.set_phys_reg(active_reg, None)
+                self.spills.append(active_reg)
 
-        self.active_regs.remove(spill_reg)
         self.active_regs.append(live_range)
+        self.used_reg_units |= set(iter_reg_units(phys_reg_to_alloc.spec))
 
     def allocate(self):
         alloc = True

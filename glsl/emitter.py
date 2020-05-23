@@ -585,30 +585,30 @@ def build_ir_expr_func_call(node, block, ctx):
     if node.ident.name == "memoryBarrier":
         return block, FenceInst(block, AtomicOrdering.AcquireRelease, SyncScope.SingleThread)
 
-    if ctx.funcs[node.ident.name].name == "vec3_1":
-        result_ty = ctx.get_ir_type(node.type)
+    # if ctx.funcs[node.ident.name].name == "vec3_1":
+    #     result_ty = ctx.get_ir_type(node.type)
 
-        block, elem = build_ir_expr(node.params[0], block, ctx)
-        vec = InsertElementInst(block, get_constant_null_value(
-            result_ty), elem, ConstantInt(0, i32))
+    #     block, elem = build_ir_expr(node.params[0], block, ctx)
+    #     vec = InsertElementInst(block, get_constant_null_value(
+    #         result_ty), elem, ConstantInt(0, i32))
 
-        for i in range(1, 3):
-            vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
+    #     for i in range(1, 3):
+    #         vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
 
-        return block, vec
+    #     return block, vec
 
-    if ctx.funcs[node.ident.name].name == "vec3_3":
-        result_ty = ctx.get_ir_type(node.type)
+    # if ctx.funcs[node.ident.name].name == "vec3_3":
+    #     result_ty = ctx.get_ir_type(node.type)
 
-        block, elem = build_ir_expr(node.params[0], block, ctx)
-        vec = InsertElementInst(block, get_constant_null_value(
-            result_ty), elem, ConstantInt(0, i32))
+    #     block, elem = build_ir_expr(node.params[0], block, ctx)
+    #     vec = InsertElementInst(block, get_constant_null_value(
+    #         result_ty), elem, ConstantInt(0, i32))
 
-        for i in range(1, 3):
-            block, elem = build_ir_expr(node.params[i], block, ctx)
-            vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
+    #     for i in range(1, 3):
+    #         block, elem = build_ir_expr(node.params[i], block, ctx)
+    #         vec = InsertElementInst(block, vec, elem, ConstantInt(i, i32))
 
-        return block, vec
+    #     return block, vec
 
     params = []
 
@@ -957,9 +957,13 @@ if TARGET_GPU == 1:
         return block
 else:
     def build_ir_return_stmt(node, block, ctx):
-        return_ty = ctx.get_ir_type(node.expr.type)
-
         func_info = ctx.func_info
+        if func_info.return_info.kind == ABIArgKind.Ignore:
+            JumpInst(block, ctx.get_return_target())
+
+            block = BasicBlock(block.func, block)
+            return block
+
         if func_info.return_info.kind == ABIArgKind.Indirect:
             rhs = get_lvalue(node.expr, block, ctx)
             lhs = ctx.return_value
@@ -984,7 +988,7 @@ else:
                 dst_size = ctx.module.data_layout.get_type_alloc_size(
                     lhs.ty.elem_ty)
                 if src_size <= dst_size:
-                    lhs = BitCastInst(block, lhs, PointerType(rhs.ty))
+                    lhs = BitCastInst(block, lhs, PointerType(rhs.ty, 0))
                 else:
                     raise NotImplementedError()
 
@@ -1643,24 +1647,26 @@ def emit_ir(ast, abi, module):
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
 
-                # thread_local = ThreadLocalMode.NotThreadLocal
+                thread_local = ThreadLocalMode.NotThreadLocal
 
                 global_named_values[ident.val] = module.add_global_variable(
-                    GlobalVariable(ty, linkage, ident.val.name, thread_local, init))
+                    GlobalVariable(ty, False, linkage, ident.val.name, thread_local, init))
 
         if isinstance(decl, TypedFunctionProto):
             func_ty = ctx.get_ir_type(decl.ident.ty)
-            func = module.add_func(
-                Function(module, func_ty, str(decl.ident.name)))
-            ctx.funcs[decl.ident.name] = func
+            func_name = str(decl.ident.name)
+            func = module.add_func(func_name,
+                                   Function(module, func_ty, func_name))
+            ctx.funcs[func_name] = func
 
             build_ir_func_header(decl, func, ctx)
 
         if isinstance(decl, TypedFunction):
             func_ty = ctx.get_ir_type(decl.proto.ident.ty)
+            func_name = str(decl.proto.ident.name)
 
-            func = module.add_func(
-                Function(module, func_ty, str(decl.proto.ident.name)))
+            func = module.add_func(func_name,
+                                   Function(module, func_ty, func_name))
 
             ctx.begin_func(func)
 

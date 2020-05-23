@@ -1415,7 +1415,29 @@ class RISCVTargetLowering(TargetLowering):
             if val.node.opcode == VirtualDagOps.COPY_FROM_REG:
                 reg = val.node.operands[1].node.reg
                 if isinstance(reg, MachineVirtualRegister):
-                    mfunc.func_info.reg_value_map[arg] = [reg]
+                    builder.func_info.reg_value_map[arg] = [reg]
+            else:
+                reg_info = builder.reg_info
+
+                for ty, arg_part in zip(vts, arg_parts):
+                    reg_vt = reg_info.get_register_type(ty)
+                    reg_count = reg_info.get_register_count(ty)
+
+                    regs = []
+                    reg_vals = []
+                    for idx in range(reg_count):
+                        vreg = target_lowering.get_machine_vreg(
+                            reg_vt)
+                        reg = builder.mfunc.reg_info.create_virtual_register(
+                            vreg)
+                        regs.append(reg)
+                        reg_vals.append(
+                            DagValue(builder.g.add_register_node(reg_vt, reg), 0))
+
+                    chain = get_copy_to_parts(
+                        arg_part, reg_vals, reg_vt, chain, builder.g)
+
+                builder.func_info.reg_value_map[arg] = regs
 
             builder.set_inst_value(arg, val)
 
@@ -1595,6 +1617,12 @@ class RISCVTargetRegisterInfo(TargetRegisterInfo):
             [F8_F, F9_F, F18_F, F19_F, F20_F, F21_F, F22_F, F23_F, F24_F, F25_F, F26_F, F27_F])
 
         return callee_save_regs
+
+    def get_callee_clobbered_regs(self):
+        regs = [X10, X11, X12, X13, X14, X15, X16, X17,
+                F10_F, F11_F, F12_F, F13_F, F14_F, F15_F, F16_F, F17_F]
+
+        return regs
 
     def get_ordered_regs(self, regclass):
         reserved_regs = self.get_reserved_regs()

@@ -436,6 +436,14 @@ class MachineInstrEmitter:
 
         self.bb.append_inst(minst)
 
+    def emit_inlineasm(self, inst: DagNode, dag):
+        minst = self.create_instruction(TargetDagOps.INLINEASM)
+        asm_str = inst.operands[0].node.symbol
+
+        minst.add_external_symbol(asm_str)
+
+        self.bb.append_inst(minst)
+
     def emit(self, inst: DagNode, dag):
         if isinstance(inst, MachineDagNode):
             self.emit_machine_node(inst, dag)
@@ -489,4 +497,8 @@ class MachineInstrEmitter:
 
         if inst.opcode == TargetDagOps.SUBREG_TO_REG:
             self.emit_subreg_node(inst, dag)
+            return
+
+        if inst.opcode == VirtualDagOps.INLINEASM:
+            self.emit_inlineasm(inst, dag)
             return

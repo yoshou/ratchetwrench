@@ -329,6 +329,65 @@ class ARMELFObjectWriter(ELFObjectTargetWriter):
             raise NotImplementedError()
 
 
+class AArch64ELFObjectWriter(ELFObjectTargetWriter):
+    def __init__(self):
+        super().__init__()
+
+        self.os_abi = ELFOSABI_NONE
+        self.abi_version = 5
+        self.emachine = EM_ARM
+        self.flags = 0x5000000
+        self.is_64bit = False
+        self.has_relocation_addend = False
+
+    def get_reloc_type(self, context: MCContext, target: MCValue, fixup: MCFixup, is_pcrel):
+        modifier = target.access_variant
+        kind = fixup.kind
+
+        from codegen.arm_asm_printer import ARMFixupKind
+
+        if is_pcrel:
+            if kind in [ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH]:
+                return R_ARM_JUMP24
+            elif kind in [ARMFixupKind.ARM_UNCOND_BL]:
+                return R_ARM_CALL
+            elif kind in [ARMFixupKind.ARM_MOVW_LO16]:
+                return R_ARM_MOVW_PREL_NC
+            elif kind in [ARMFixupKind.ARM_MOVT_HI16]:
+                return R_ARM_MOVT_PREL
+            else:
+                raise NotImplementedError()
+
+        # absolute
+        if kind in [ARMFixupKind.ARM_COND_BRANCH, ARMFixupKind.ARM_UNCOND_BRANCH]:
+            return R_ARM_JUMP24
+        elif kind in [ARMFixupKind.ARM_UNCOND_BL]:
+            return R_ARM_CALL
+        elif kind in [ARMFixupKind.ARM_MOVW_LO16]:
+            return R_ARM_MOVW_ABS_NC
+        elif kind in [ARMFixupKind.ARM_MOVT_HI16]:
+            return R_ARM_MOVT_ABS
+        elif kind == MCFixupKind.Data_1:
+            if modifier == MCVariantKind.Non:
+                return R_ARM_ABS8
+            else:
+                raise NotImplementedError()
+        elif kind == MCFixupKind.Data_2:
+            if modifier == MCVariantKind.Non:
+                return R_ARM_ABS16
+            else:
+                raise NotImplementedError()
+        elif kind == MCFixupKind.Data_4:
+            if modifier == MCVariantKind.Non:
+                return R_ARM_NONE
+            elif modifier == MCVariantKind.TLSGD:
+                return R_ARM_TLS_GD32
+            else:
+                raise NotImplementedError()
+        else:
+            raise NotImplementedError()
+
+
 class RISCVELFObjectWriter(ELFObjectTargetWriter):
     def __init__(self):
         super().__init__()
@@ -1580,6 +1639,56 @@ class X64ELFTargetObjectFile(MCObjectFileInfo):
 
 
 class ARMELFTargetObjectFile(MCObjectFileInfo):
+    def __init__(self):
+        super().__init__()
+
+        self._text_section = create_elf_section(
+            ".text", SHT_PROGBITS, SHF_EXECINSTR | SHF_ALLOC)
+        self._bss_section = create_elf_section(
+            ".bss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC)
+        self._data_section = create_elf_section(
+            ".data", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC)
+        self._rodata_section = create_elf_section(
+            ".rodata", SHT_PROGBITS, SHF_ALLOC)
+
+        self._tls_bss_section = create_elf_section(
+            ".tbss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS)
+        self._tls_data_section = create_elf_section(
+            ".tdata", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS)
+
+    @property
+    def text_section(self) -> MCSection:
+        return self._text_section
+
+    @property
+    def bss_section(self) -> MCSection:
+        return self._bss_section
+
+    @property
+    def data_section(self) -> MCSection:
+        return self._data_section
+
+    @property
+    def rodata_section(self) -> MCSection:
+        return self._rodata_section
+
+    @property
+    def tls_data_section(self) -> MCSection:
+        return self._tls_data_section
+
+    def get_section_for_const(self, section_kind: SectionKind, value, align):
+        return self._text_section
+
+    @property
+    def is_elf(self):
+        return True
+
+    @property
+    def is_coff(self):
+        return False
+
+
+class AArch64ELFTargetObjectFile(MCObjectFileInfo):
     def __init__(self):
         super().__init__()
 

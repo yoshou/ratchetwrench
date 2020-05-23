@@ -13,7 +13,7 @@ class DomTreeNode:
 
 def get_value_successors(value):
     if isinstance(value, User):
-        return value.operands
+        return [operand for operand in value.operands if operand]
 
     return []
 

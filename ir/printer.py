@@ -102,6 +102,8 @@ def get_type_name2(ty, module):
 
         field_ty_names = ", ".join([get_type_name2(field_ty, module)
                                     for field_ty in ty.fields])
+        if ty.is_packed:
+            return f"<{{{field_ty_names}}}>"
         return f"{{{field_ty_names}}}"
     if isinstance(ty, PointerType):
         return f"{get_type_name(ty.elem_ty)}*"
@@ -148,22 +150,24 @@ def get_value_name(value):
         return ""
 
     if isinstance(value, ConstantInt):
-        return value
+        return str(value)
     elif isinstance(value, ConstantFP):
         if value.ty == f32:
             return float_to_hex(value.value)
         elif value.ty == f64:
             return double_to_hex(value.value)
         raise NotImplementedError()
+    elif isinstance(value, ConstantPointerNull):
+        return "null"
     elif isinstance(value, ConstantVector):
         elem_ty_name = get_type_name(value.ty.elem_ty)
         lst = ', '.join(
             [f"{elem_ty_name} {get_value_name(value)}" for value in value.values])
         return f"<{lst}>"
     elif isinstance(value, ConstantArray):
-        if value.ty.elem_ty == i8:
-            elems = ["\\{:02X}".format(elem.value) for elem in value.values]
-            return f'c"{"".join(elems)}"'
+        # if value.ty.elem_ty == i8:
+        #     elems = [get_value_name(elem) for elem in value.values]
+        #     return f'c"{"".join(elems)}"'
 
         elem_ty_name = get_type_name(value.ty.elem_ty)
         lst = ', '.join(
@@ -175,6 +179,12 @@ def get_value_name(value):
         return f"{{{lst}}}"
     elif isinstance(value, (Function, GlobalVariable)):
         return f"{value.value_name}"
+    elif isinstance(value, IntToPtrInst):
+        return f"inttoptr ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
+    elif isinstance(value, BitCastInst):
+        return f"bitcast ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
+    elif isinstance(value, TruncInst):
+        return f"trunc ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
     else:
         raise ValueError()
 
@@ -207,6 +217,8 @@ def print_inst(inst, slot_id_map):
             elif value.ty == f64:
                 return double_to_hex(value.value)
             raise NotImplementedError()
+        elif isinstance(value, ConstantPointerNull):
+            return "null"
         elif isinstance(value, ConstantArray):
             elem_ty_name = get_type_name(value.ty.elem_ty)
             lst = ', '.join(
@@ -255,8 +267,9 @@ def print_inst(inst, slot_id_map):
 
         cases = "\n".join(case_lines)
 
-        if inst.default:
-            return f"switch {get_value_type(inst.value)} {get_value_name(inst.value)}, label {get_value_name(inst.default)} [\n{cases}\n\t]"
+        assert(inst.default)
+
+        return f"switch {get_value_type(inst.value)} {get_value_name(inst.value)}, label {get_value_name(inst.default)} [\n{cases}\n\t]"
 
     if isinstance(inst, LoadInst):
         return f"{get_value_name(inst)} = load {get_value_type(inst)}, {get_value_type(inst.rs)} {get_value_name(inst.rs)}"
@@ -295,14 +308,13 @@ def print_inst(inst, slot_id_map):
         arg_list = ", ".join(
             [f"{get_value_type(arg)} {get_value_name(arg)}" for arg in inst.args])
         return_ty_name = get_type_name2(
-            inst.callee.func_ty.return_ty, module)
+            inst.func_ty.return_ty, module)
 
         if isinstance(inst.callee, Function):
-            func_ty_name = get_type_name(inst.callee.func_ty)
+            func_ty_name = get_type_name(inst.func_ty)
 
             ty_or_fnty = func_ty_name if inst.callee.is_variadic else return_ty_name
         else:
-            assert(isinstance(inst.callee, InlineAsm))
             ty_or_fnty = return_ty_name
 
         if isinstance(inst.ty, VoidType):
@@ -421,12 +433,16 @@ def print_module(module):
     for comdat_name, comdat in module.comdats.items():
         lines.append(f"${comdat_name} = comdat {get_comdat_kind(comdat)}")
 
-    for struct_name, struct_ty in module.structs.items():
+    for name, struct_ty in module.structs.items():
         field_ty_list = ", ".join(
             [get_type_name(ty) for ty in struct_ty.fields])
-        lines.append(f"%{struct_name} = type {{ {field_ty_list} }}")
 
-    for global_var in module.global_variables:
+        if struct_ty.is_packed:
+            lines.append(f"%{name} = type <{{ {field_ty_list} }}>")
+        else:
+            lines.append(f"%{name} = type {{ {field_ty_list} }}")
+
+    for name, global_var in module.globals.items():
         init = "" if global_var.initializer is None else get_value_name(
             global_var.initializer)
 
@@ -445,8 +461,8 @@ def print_module(module):
             obj = "constant"
 
         lines.append(
-            f"@{global_var.name} = {linkage} {decorations} {obj} {get_type_name(global_var.ty.elem_ty)} {init}, align 4")
+            f"@{name} = {linkage} {decorations} {obj} {get_type_name(global_var.ty.elem_ty)} {init}, align 4")
 
-    lines.extend([print_function(func) for func in module.funcs])
+    lines.extend([print_function(func) for func in module.funcs.values()])
 
     return "\n".join(lines)
