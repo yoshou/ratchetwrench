@@ -37,6 +37,83 @@ def get_return_ty(name):
     raise Exception("Unreachable")
 
 
+class AttributeKind(Enum):
+    Non = auto()
+    Alignment = "align"
+    AllocSize = "allocsize"
+    AlwaysInline = "alwaysinline"
+    ArgMemOnly = "argmemonly"
+    Builtin = "builtin"
+    ByVal = "byval"
+    Cold = "cold"
+    Convergent = "convergent"
+    Dereferenceable = "dereferenceable"
+    DereferenceableOrNull = "dereferenceable_or_null"
+    InAlloca = "inalloca"
+    InReg = "inreg"
+    InaccessibleMemOnly = "inaccessiblememonly"
+    InaccessibleMemOrArgMemOnly = "inaccessiblemem_or_argmemonly"
+    InlineHint = "inlinehint"
+    JumpTable = "jumptable"
+    MinSize = "minsize"
+    Naked = "naked"
+    Nest = "nest"
+    NoAlias = "noalias"
+    NoBuiltin = "nobuiltin"
+    NoCapture = "nocapture"
+    NoCfCheck = "nocf_check"
+    NoDuplicate = "noduplicate"
+    NoImplicitFloat = "noimplicitfloat"
+    NoInline = "noinline"
+    NoRecurse = "norecurse"
+    NoRedZone = "noredzone"
+    NoReturn = "noreturn"
+    NoUnwind = "nounwind"
+    NonLazyBind = "nonlazybind"
+    NonNull = "nonnull"
+    OptForFuzzing = "optforfuzzing"
+    OptimizeForSize = "optsize"
+    OptimizeNone = "optnone"
+    ReadNone = "readnone"
+    ReadOnly = "readonly"
+    Returned = "returned"
+    ReturnsTwice = "returns_twice"
+    SExt = "signext"
+    SafeStack = "safestack"
+    SanitizeAddress = "sanitize_address"
+    SanitizeHWAddress = "sanitize_hwaddress"
+    SanitizeMemory = "sanitize_memory"
+    SanitizeThread = "sanitize_thread"
+    ShadowCallStack = "shadowcallstack"
+    Speculatable = "speculatable"
+    StackAlignment = "alignstack"
+    StackProtect = "ssp"
+    StackProtectReq = "sspreq"
+    StackProtectStrong = "sspstrong"
+    StrictFP = "strictfp"
+    StructRet = "sret"
+    SwiftError = "swifterror"
+    SwiftSelf = "swiftself"
+    UWTable = "uwtable"
+    WriteOnly = "writeonly"
+    ZExt = "zeroext"
+
+
+class Attribute:
+    def __init__(self, kind, value=None):
+        self.kind = kind
+        self.value = value
+
+    def __hash__(self):
+        return hash((self.kind, self.value))
+
+    def __eq__(self, other):
+        if not isinstance(other, Attribute):
+            return False
+
+        return self.kind == other.kind and self.value == other.value
+
+
 class Module:
     def __init__(self):
         self._funcs = {}
@@ -88,7 +165,7 @@ class Module:
             return self._funcs[enc_name]
         else:
             func = Function(
-                self, FunctionType(get_return_ty(name), arg_tys), enc_name)
+                self, FunctionType(get_return_ty(name), arg_tys), GlobalLinkage.Global, enc_name)
 
             for arg_ty in arg_tys:
                 func.add_arg(Argument(arg_ty))
@@ -182,6 +259,7 @@ class GlobalLinkage(Enum):
     Weak = auto()
     External = auto()
     Internal = auto()
+    Private = auto()
 
 
 class GlobalVisibility(Enum):
@@ -235,16 +313,6 @@ class GlobalVariable(GlobalObject):
     @property
     def is_declaration(self):
         return not self.initializer
-
-
-class AttributeKind(Enum):
-    StructRet = "sret"
-
-
-class Attribute:
-    def __init__(self, kind, value=None):
-        self.kind = kind
-        self.value = value
 
 
 class Argument(Value):
@@ -357,9 +425,11 @@ class ConstantStruct(Constant):
 
 
 class ConstantArray(Constant):
-    def __init__(self, values: int, ty):
+    def __init__(self, values, ty):
         super().__init__(ty)
         assert(isinstance(ty, ArrayType))
+        if values:
+            assert(ty.elem_ty == values[0].ty)
         self.values = values
 
     def __repr__(self):
@@ -393,13 +463,22 @@ class ConstantPointerNull(Constant):
 
 
 class Function(GlobalObject):
-    def __init__(self, module, ty, name):
+    def __init__(self, module, ty, linkage, name):
         assert(isinstance(ty, FunctionType))
-        super().__init__(ty, GlobalLinkage.Global, name)
+        super().__init__(ty, linkage, name)
         self.module = module
         self.return_ty = ty.return_ty
         self.bbs = []
         self.args = []
+        self._attributes = set()
+
+    @property
+    def attributes(self):
+        return self._attributes
+
+    @attributes.setter
+    def attributes(self, value: set):
+        self._attributes = value
 
     @property
     def func_ty(self):
@@ -653,6 +732,8 @@ class LoadInst(UnaryInst):
         assert(isinstance(rs.ty, PointerType))
         super().__init__(block, rs.ty.elem_ty, rs)
 
+        self.is_volatile = is_volatile
+
     @property
     def is_terminator(self):
         return False
@@ -663,6 +744,8 @@ class StoreInst(Instruction):
         assert(isinstance(rd.ty, PointerType))
         assert(rd.ty.elem_ty == rs.ty)
         super().__init__(block, VoidType(), [rs, rd], 2)
+
+        self.is_volatile = is_volatile
 
     @property
     def rs(self):
@@ -710,7 +793,7 @@ def check_inbounds(ty, idx_list):
 
 class GetElementPtrInst(Instruction):
     def __init__(self, block, ptr, pointee_ty, *idx):
-        assert(isinstance(ptr.ty, (ArrayType, PointerType)))
+        assert(isinstance(ptr.ty, PointerType))
         assert(pointee_ty == ptr.ty)
         elem_ty = get_indexed_type(pointee_ty, list(idx))
 
@@ -828,6 +911,7 @@ class CastInst(UnaryInst):
 
 class TruncInst(CastInst):
     def __init__(self, block, rs, ty):
+        assert(rs.ty.name != "i1")
         super().__init__(block, "trunc", rs, ty)
 
     @property
@@ -999,6 +1083,20 @@ class IntrinsicInst(CallInst):
 
 class MemcpyInst(IntrinsicInst):
     pass
+
+
+class VAArgInst(Instruction):
+    def __init__(self, block, va_list, ty):
+        super().__init__(block, ty, [va_list], 1)
+
+    @property
+    def va_list(self):
+        return self.operands[0]
+
+    @property
+    def is_terminator(self):
+        return False
+
 
 # terminator
 

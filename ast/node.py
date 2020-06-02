@@ -100,6 +100,8 @@ RecordDecl = define_node(
     'RecordDecl', ('ident', 'decls', 'is_union', 'is_packed'))
 StructDeclaration = define_node('StructDeclaration', ('type', 'declarators'))
 FieldDecl = define_node('FieldDecl', ('type', 'declarators'))
+StructDecl = define_node('StructDecl', ('decl', 'bit'))
+
 StructDeclarator = define_node('StructDeclarator', ('ident', 'arrspec'))
 
 ArraySpecifier = define_node('ArraySpecifier', ('sizes',))
@@ -178,6 +180,7 @@ TypedFunction = define_node('TypedFunction', ('proto', 'params', 'stmts'))
 
 TypedVariable = define_node(
     'TypedVariable', ('type', 'idents', 'storage_class'))
+TypedCastExpr = define_node('TypedCastExpr', ('expr', 'type'))
 
 
 def ident_func(node, *data):

@@ -1,13 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from ast.node import Ident
+from ast.types import *
+from c.symtab import FunctionSymbol, VariableSymbol
+from c.symtab import Symbol
 from ast.node import *
 from c.symtab import SymbolTable
 from c.parse import *
 
+import ast
+
 
 anonymous_id = 0
-from c.symtab import Symbol
 
 
 def get_type(sym_table, decl_spec, ctx):
@@ -52,15 +57,19 @@ def get_type(sym_table, decl_spec, ctx):
                     value_val = val
                     val += 1
                 else:
-                    raise NotImplementedError()
+                    assert(isinstance(const_decl.value, IntegerConstantExpr))
+                    value_val = const_decl.value.val
+                    val += 1
+
+                assert(isinstance(value_val, int))
 
                 values[value_name] = value_val
 
             for const_decl in enum_decl.const_decls:
                 value_name = const_decl.ident.val
 
-                var = VariableSymbol(value_name, enum_ty, [])
-                sym_table.register_object(value_name, var)
+                var = VariableSymbol(value_name, enum_ty)
+                var = sym_table.register_object(value_name, var)
 
             enum_ty.values = values
 
@@ -85,20 +94,22 @@ def get_type(sym_table, decl_spec, ctx):
             else:
                 global anonymous_id
                 anonymous_id += 1
-                name = f"struct.anon{anonymous_id}"
+                name = f"anon{anonymous_id}"
 
             record_ty = CompositeType(name, None, is_union)
             record_ty.is_packed = struct_decl.is_packed
             sym_table.register(name, record_ty)
 
-        def get_struct_type(type_spec, type_quals, decls):
+        def get_struct_type(type_spec, type_quals, declors):
             fields = []
-            for decl in decls:
+            for declor in declors:
+                decl = declor.decl
+
                 name, ty = get_decl_name_and_type(
                     type_spec, decl, sym_table, ctx)
                 arrspec = None
 
-                fields.append((ty, name, arrspec))
+                fields.append((ty, name, declor.bit))
             return fields
 
         if field_decls:
@@ -142,6 +153,21 @@ def get_type(sym_table, decl_spec, ctx):
     return sym_table.find_type(Symbol(ty_name, scope))
 
 
+def get_type_qual(ty, decl_spec, ctx):
+    quals = Qualifier.Undefined
+    if decl_spec.type_quals & TypeQualifier.Volatile:
+        quals = Qualifier.Volatile | quals
+    if decl_spec.type_quals & TypeQualifier.Const:
+        quals = Qualifier.Const | quals
+    if decl_spec.type_quals & TypeQualifier.Restrict:
+        quals = Qualifier.Restrict | quals
+
+    if quals != Qualifier.Undefined:
+        return QualType(ty, quals)
+
+    return ty
+
+
 def get_decl_name_and_type(ty, decl, sym_table, ctx):
     name = None
 
@@ -163,11 +189,11 @@ def get_decl_name_and_type(ty, decl, sym_table, ctx):
 
         if decl.is_array_decl:
             assert(not decl.is_function_decl)
-
-            if isinstance(decl.chunks[0].num_elems, IntegerConstantExpr):
-                ty = ArrayType(ty, decl.chunks[0].num_elems.val)
+            if not decl.chunks[0].num_elems:
+                ty = ArrayType(ty, 0)
             else:
-                ty = PointerType(ty)
+                ty = ArrayType(ty, evaluate_constant_expr(
+                    decl.chunks[0].num_elems, ctx))
 
         if decl.is_function_decl:
             assert(not decl.is_array_decl)
@@ -184,45 +210,71 @@ def get_decl_name_and_type(ty, decl, sym_table, ctx):
                 param_name, param_ty = get_decl_name_and_type(
                     param_ty, param_decl, sym_table, ctx)
 
+                if isinstance(param_ty, ArrayType):
+                    param_ty = PointerType(param_ty.elem_ty)
+
                 params.append([param_ty, param_quals, param_name])
 
-                param = params[-1]
-                if not param_ty:
-                    def f():
-                        param[0] = get_type(sym_table, param_ty, ctx)
-                    ctx.assignments.append(f)
+                # param = params[-1]
+                # if not param_ty:
+                #     def f():
+                #         param[0] = get_type(sym_table, param_ty, ctx)
+                #     ctx.assignments.append(f)
 
             ty = FunctionType(ty, params, decl.function_is_variadic)
 
     return name, ty
 
 
-from c.symtab import FunctionSymbol, VariableSymbol
-
-
 def register_function(qual_spec, declarator, sym_table, ctx):
     ty = get_type(sym_table, qual_spec, ctx)
     name, ty = get_decl_name_and_type(ty, declarator, sym_table, ctx)
 
-    if isinstance(ty, FunctionType):
-        for param_ty, _, _ in ty.params:
-            assert(isinstance(param_ty, Type))
+    if is_func_type(ty):
+        params = []
+        for param_ty, param_name, param_quals in ty.params:
+            assert(isinstance(param_ty, ast.types.Type))
+            if isinstance(param_ty, ast.types.ArrayType):
+                param_ty = PointerType(param_ty.elem_ty)
+            assert(not isinstance(param_ty, ast.types.ArrayType))
+
+            params.append((param_ty, param_name, param_quals))
 
         func = FunctionSymbol(name, PointerType(ty))
 
-        sym = sym_table.register_object(name, func)
+        func = sym_table.register_object(name, func)
 
-        return TypedFunctionProto(ty.return_ty, func, ty.params, qual_spec)
+        return TypedFunctionProto(ty.return_ty, func, params, qual_spec)
 
-    assert(isinstance(ty, PointerType))
+    assert(is_pointer_type(ty))
     sym_table.register(name, ty)
 
     return None
 
 
-def evaluate_constant_expr(expr):
+def is_enum_type(ty):
+    return isinstance(ty, EnumType)
+
+
+def evaluate_constant_expr(expr, ctx):
+    sym_table = ctx.sym_table
+    scope = ctx.scope_map[ctx.top_scope]
+
     if isinstance(expr, IntegerConstantExpr):
         return expr.val
+
+    if isinstance(expr, BinaryOp):
+        op = expr.op
+
+        lhs = evaluate_constant_expr(expr.lhs, ctx)
+        rhs = evaluate_constant_expr(expr.rhs, ctx)
+
+        if op == "+":
+            return lhs + rhs
+
+    if isinstance(expr, TypedIdentExpr):
+        if is_enum_type(expr.type):
+            return expr.type.values[expr.val.name]
 
     raise ValueError()
 
@@ -230,7 +282,7 @@ def evaluate_constant_expr(expr):
 def enter_node(node, depth, ctx):
     sym_table = ctx.sym_table
 
-    if isinstance(node, CompoundStmt):
+    if isinstance(node, (CompoundStmt, VarDecl)):
         ctx.push_scope(node)
 
     type_scope = ctx.scope_map[ctx.top_scope]
@@ -246,17 +298,20 @@ def enter_node(node, depth, ctx):
                     if not decl_params:
                         decl_params = []
 
-                    params = []
                     for param_ty, param_decl in decl_params:
                         ty = get_type(sym_table, param_ty, ctx)
 
                         param_name, var_ty = get_decl_name_and_type(
                             ty, param_decl, sym_table, ctx)
 
+                        if isinstance(var_ty, ArrayType):
+                            var_ty = PointerType(var_ty.elem_ty)
+
                         assert(var_ty)
-                        var = VariableSymbol(param_name, var_ty, None)
-                        sym_table.register_object(param_name, var)
-                        params.append(var)
+
+                        if param_name:
+                            var = VariableSymbol(param_name, var_ty)
+                            var = sym_table.register_object(param_name, var)
 
                     func_decl = register_function(
                         node.qual_spec, decl, sym_table, ctx)
@@ -278,6 +333,8 @@ def enter_node(node, depth, ctx):
 
     if isinstance(node, FunctionDecl):
         decl_params = node.declarator.function_params
+        decl_params = decl_params if decl_params else []
+
         decl = register_function(
             node.qual_spec, node.declarator, sym_table, ctx)
 
@@ -299,9 +356,12 @@ def enter_node(node, depth, ctx):
                     param_name, var_ty = get_decl_name_and_type(
                         ty, param_decl, sym_table, ctx)
 
+                    if isinstance(var_ty, ArrayType):
+                        var_ty = PointerType(var_ty.elem_ty)
+
                     assert(var_ty)
-                    var = VariableSymbol(param_name, var_ty, None)
-                    sym_table.register_object(param_name, var)
+                    var = VariableSymbol(param_name, var_ty)
+                    var = sym_table.register_object(param_name, var)
                     params.append(var)
 
             assert(decl)
@@ -319,7 +379,7 @@ def is_integer_type(t):
 
 
 def is_incr_func_type(t):
-    if isinstance(t, PointerType):
+    if is_pointer_type(t):
         return True
 
     if not isinstance(t, PrimitiveType):
@@ -327,40 +387,6 @@ def is_incr_func_type(t):
 
     return t.name in ['char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long']
 
-
-scalar_convertable = [
-    # (to, from)
-    ('int', 'uint'),
-    ('int', '_Bool'),
-    ('int', 'float'),
-    ('int', 'double'),
-
-    ('unsigned int', '_Bool'),
-    ('unsigned int', 'char'),
-    ('unsigned int', 'unsigned char'),
-    ('unsigned int', 'short'),
-    ('unsigned int', 'unsigned short'),
-    ('unsigned int', 'int'),
-    ('unsigned int', 'float'),
-    ('unsigned int', 'double'),
-
-    ('_Bool', 'int'),
-    ('_Bool', 'unsigned int'),
-    ('_Bool', 'float'),
-    ('_Bool', 'double'),
-
-    ('float', 'int'),
-    ('float', 'unsigned int'),
-    ('float', '_Bool'),
-    ('float', 'double'),
-
-    ('double', 'int'),
-    ('double', 'unsigned int'),
-    ('double', '_Bool'),
-    ('double', 'float'),
-
-    ('long double', 'double'),
-]
 
 implicit_convertable = [
     # (to, from)
@@ -370,7 +396,6 @@ implicit_convertable = [
     ('int', 'unsigned char'),
     ('int', 'short'),
     ('int', 'unsigned short'),
-    ('int', 'unsigned int'),
 
     ('unsigned char', '_Bool'),
 
@@ -398,17 +423,15 @@ implicit_convertable = [
     ('unsigned int', '_Bool'),
     ('unsigned int', 'unsigned char'),
     ('unsigned int', 'unsigned short'),
-    ('unsigned int', 'unsigned long'),
     ('unsigned int', 'int'),
 
-    ('int', 'unsigned long'),
+    ('long', 'unsigned int'),
 
     ('unsigned long', '_Bool'),
     ('unsigned long', 'short'),
     ('unsigned long', 'unsigned short'),
     ('unsigned long', 'unsigned int'),
-
-    ('long', 'unsigned int'),
+    ('unsigned long', 'long'),
 
     ('float', 'int'),
     ('float', 'unsigned int'),
@@ -438,6 +461,9 @@ def promote_default_type(ty):
     if isinstance(ty, EnumType):
         return PrimitiveType("int")
 
+    if not isinstance(ty, PrimitiveType):
+        return ty
+
     if ty.name in ["_Bool", "char", "unsigned char", "short", "unsigned short"]:
         return PrimitiveType("int")
 
@@ -461,21 +487,21 @@ def promote_by_rank(lhs_ty, rhs_ty):
 
 
 def compute_binary_arith_op_type(op, lhs, rhs, sym_table):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
-    if isinstance(lhs_type, ArrayType):
+    if is_array_type(lhs_type):
         lhs_type = PointerType(lhs_type.elem_ty)
         lhs = cast_if_need(lhs, lhs_type)
 
-    if isinstance(rhs_type, ArrayType):
+    if is_array_type(rhs_type):
         rhs_type = PointerType(rhs_type.elem_ty)
         rhs = cast_if_need(rhs, rhs_type)
 
-    if isinstance(lhs_type, PointerType) and is_integer_type(rhs_type):
-        return lhs_type, lhs, rhs
+    if is_pointer_type(lhs_type) and is_integer_type(rhs_type):
+        return lhs_type, lhs, cast_if_need(rhs, PrimitiveType("long"))
 
-    if isinstance(lhs_type, PointerType) and isinstance(lhs_type, PointerType):
+    if is_pointer_type(lhs_type) and is_pointer_type(lhs_type):
         return PrimitiveType("long"), lhs, rhs
 
     lhs_type = promote_default_type(lhs_type)
@@ -493,21 +519,19 @@ def is_bitwise_op(op):
     return op in ['&', '^', '|']
 
 
-def compute_binary_bitwise_op_type(op, lhs_type, rhs_type, sym_table):
-    # Bitwise operators
-    able_conv_lhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == lhs_type.name] + [lhs_type.name]
+def compute_binary_bitwise_op_type(op, lhs, rhs, sym_table):
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
-    if rhs_type.name in able_conv_lhs:
-        return rhs_type
+    lhs_type = promote_default_type(lhs_type)
+    rhs_type = promote_default_type(rhs_type)
 
-    able_conv_rhs = [to_type for to_type,
-                     from_type in implicit_convertable if from_type == rhs_type.name] + [rhs_type.name]
+    if lhs_type == rhs_type:
+        return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
-    if lhs_type.name in able_conv_rhs:
-        return lhs_type
+    lhs_type, rhs_type = promote_by_rank(lhs_type, rhs_type)
 
-    raise Exception("Unsupporting operation.")
+    return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
 
 def is_compare_op(op):
@@ -515,28 +539,31 @@ def is_compare_op(op):
 
 
 def cast_if_need(node, ty):
-    if node.type != ty:
-        return CastExpr(node, ty)
+    if get_type_of(node) != ty:
+        return TypedCastExpr(node, ty)
 
     return node
 
 
 def is_integer_zero(expr):
-    if not isinstance(expr.type, PrimitiveType):
+    if not isinstance(get_type_of(expr), PrimitiveType):
         return False
 
     return expr.val == 0
 
 
 def compute_binary_compare_op_type(op, lhs, rhs, sym_table):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
     result_ty = PrimitiveType('int')
 
-    if isinstance(lhs_type, PointerType) and isinstance(rhs_type, PointerType):
+    if is_array_type(rhs_type):
+        rhs_type = PointerType(rhs_type.elem_ty)
+
+    if is_pointer_type(lhs_type) and is_pointer_type(rhs_type):
         return result_ty, lhs, rhs
 
-    if isinstance(lhs_type, PointerType) and is_integer_zero(rhs):
+    if is_pointer_type(lhs_type) and is_integer_zero(rhs):
         return result_ty, lhs, rhs
 
     lhs_type = promote_default_type(lhs_type)
@@ -554,11 +581,19 @@ def is_shift_op(op):
     return op in ['<<', '>>']
 
 
-def compute_binary_shift_op_type(op, lhs_type, rhs_type, sym_table):
-    if lhs_type.name in integer_types and rhs_type.name in integer_types:
-        return lhs_type
+def compute_binary_shift_op_type(op, lhs, rhs, sym_table):
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
-    raise Exception("Unsupporting operation.")
+    lhs_type = promote_default_type(lhs_type)
+    rhs_type = promote_default_type(rhs_type)
+
+    if lhs_type == rhs_type:
+        return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
+
+    lhs_type, rhs_type = promote_by_rank(lhs_type, rhs_type)
+
+    return lhs_type, cast_if_need(lhs, lhs_type), cast_if_need(rhs, rhs_type)
 
 
 def is_logical_op(op):
@@ -566,18 +601,18 @@ def is_logical_op(op):
 
 
 def compute_binary_logical_op_type(op, lhs, rhs, sym_table):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
-    if isinstance(rhs_type, PointerType):
+    if is_pointer_type(rhs_type):
         rhs = TypedBinaryOp("!=", rhs, IntegerConstantExpr(
             0, PrimitiveType("int")), PrimitiveType("int"))
-        rhs_type = rhs.type
+        rhs_type = get_type_of(rhs)
 
-    if isinstance(lhs_type, PointerType):
+    if is_pointer_type(lhs_type):
         lhs = TypedBinaryOp("!=", lhs, IntegerConstantExpr(
             0, PrimitiveType("int")), PrimitiveType("int"))
-        lhs_type = lhs.type
+        lhs_type = get_type_of(lhs)
 
     lhs_type = promote_default_type(lhs_type)
     rhs_type = promote_default_type(rhs_type)
@@ -603,39 +638,68 @@ def is_assignment_op(op):
 
 
 def is_void_pointer_type(ty):
-    if not isinstance(ty, PointerType):
+    if not is_pointer_type(ty):
         return False
 
-    return isinstance(ty.elem_ty, VoidType)
+    return is_void_type(ty.elem_ty)
+
+
+def is_void_type(ty):
+    return isinstance(ty, VoidType)
+
+
+def is_pointer_type(ty):
+    if isinstance(ty, QualType):
+        ty = ty.ty
+
+    return isinstance(ty, PointerType)
+
+
+def is_array_type(ty):
+    if isinstance(ty, QualType):
+        ty = ty.ty
+
+    return isinstance(ty, ArrayType)
+
+
+def is_func_type(ty):
+    return isinstance(ty, FunctionType)
+
+
+def get_type_of(value):
+    if isinstance(value.type, QualType):
+        return value.type.ty
+
+    return value.type
 
 
 def compute_binary_assignment_op_type(op, lhs, rhs, sym_table):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
-    if isinstance(rhs_type, ArrayType):
+    if is_array_type(rhs_type):
         rhs_type = PointerType(rhs_type.elem_ty)
 
-    if isinstance(rhs_type, FunctionType):
+    if is_func_type(rhs_type):
         rhs_type = PointerType(rhs_type)
 
-    if isinstance(lhs_type, PointerType) and is_integer_type(rhs_type):
+    if is_pointer_type(lhs_type) and is_integer_type(rhs_type):
         return lhs_type, lhs, rhs
 
-    if isinstance(lhs_type, PointerType) and is_void_pointer_type(rhs_type):
+    if is_pointer_type(lhs_type) and is_void_pointer_type(rhs_type):
         return lhs_type, lhs, cast_if_need(rhs, lhs_type)
 
-    if is_void_pointer_type(lhs_type) and isinstance(rhs_type, PointerType):
+    if is_void_pointer_type(lhs_type) and is_pointer_type(rhs_type):
         return lhs_type, lhs, cast_if_need(rhs, lhs_type)
 
-    if is_integer_type(lhs_type) and isinstance(rhs_type, PointerType):
+    if is_integer_type(lhs_type) and is_pointer_type(rhs_type):
         return lhs_type, lhs, cast_if_need(rhs, lhs_type)
 
     if lhs_type == rhs_type:
         return lhs_type, lhs, rhs
 
     if is_integer_type(lhs_type) and is_integer_type(rhs_type):
-        return lhs_type, lhs, cast_if_need(rhs, lhs_type)
+        return lhs_type, lhs, rhs
 
     able_conv_rhs = [to_type for to_type,
                      from_type in implicit_convertable if from_type == rhs_type.name] + [rhs_type.name]
@@ -646,14 +710,14 @@ def compute_binary_assignment_op_type(op, lhs, rhs, sym_table):
 
 
 def compute_binary_op_type(op, lhs, rhs, sym_table):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
 
     if is_binary_arith_op(op):
         return compute_binary_arith_op_type(op, lhs, rhs, sym_table)
 
     if is_bitwise_op(op):
-        return compute_binary_bitwise_op_type(op, lhs_type, rhs_type, sym_table), lhs, rhs
+        return compute_binary_bitwise_op_type(op, lhs, rhs, sym_table)
 
     if is_compare_op(op):
         return compute_binary_compare_op_type(op, lhs, rhs, sym_table)
@@ -662,16 +726,12 @@ def compute_binary_op_type(op, lhs, rhs, sym_table):
         return compute_binary_logical_op_type(op, lhs, rhs, sym_table)
 
     if is_shift_op(op):
-        return compute_binary_shift_op_type(op, lhs_type, rhs_type, sym_table), lhs, rhs
+        return compute_binary_shift_op_type(op, lhs, rhs, sym_table)
 
     if is_assignment_op(op):
         return compute_binary_assignment_op_type(op, lhs, rhs, sym_table)
 
     raise Exception("Unsupporting operation.")
-
-
-def is_scalar_convertable(from_type: str, to_type: str):
-    return (to_type, from_type) in scalar_convertable
 
 
 def is_implicit_convertable(from_type: str, to_type: str):
@@ -688,7 +748,7 @@ def is_typed_expr(node):
         IntegerConstantExpr,
         StringLiteralExpr,
         FloatingConstantExpr,
-        CastExpr,
+        TypedCastExpr,
         TypedUnaryOp,
         TypedPostOp,
         TypedAccessorOp,
@@ -704,11 +764,7 @@ def is_float_type(ty):
     return ty.name in ["float", "double"]
 
 
-from ast.types import *
-from ast.node import Ident
-
-
-def get_type_initializer(init, ty, idx=0):
+def get_type_initializer(init, ty, ctx, idx=0):
     if isinstance(ty, CompositeType) and ty.is_union:
         ty, _, _ = ty.fields[0]
 
@@ -725,16 +781,16 @@ def get_type_initializer(init, ty, idx=0):
 
                 if isinstance(field_ty, (ArrayType, CompositeType)):
                     if not isinstance(expr, InitializerList):
-                        if expr.type == field_ty:
+                        if get_type_of(expr) == field_ty:
                             expr, _ = get_type_initializer(
-                                expr, field_ty, 0)
+                                expr, field_ty, ctx, 0)
                             expr_idx += 1
                         else:
                             expr, expr_idx = get_type_initializer(
-                                init, field_ty, expr_idx)
+                                init, field_ty, ctx, expr_idx)
                     else:
                         expr, _ = get_type_initializer(
-                            expr, field_ty, 0)
+                            expr, field_ty, ctx, 0)
                         expr_idx += 1
                     exprs.append([None, expr])
                 else:
@@ -747,35 +803,49 @@ def get_type_initializer(init, ty, idx=0):
             return init, idx
     elif isinstance(ty, PrimitiveType):
         return init, idx
-    elif isinstance(ty, ArrayType):
+    elif is_array_type(ty):
         if isinstance(init, InitializerList):
             exprs = []
             expr_idx = idx
             field_ty = ty.elem_ty
-            for i in range(ty.size):
+            size = 0
+            for i in range(len(init.exprs)):
                 if expr_idx >= len(init.exprs):
                     break
 
-                designator, expr = init.exprs[expr_idx]
+                designators, expr = init.exprs[expr_idx]
 
                 if isinstance(field_ty, (ArrayType, CompositeType)):
                     if not isinstance(expr, InitializerList):
                         expr, expr_idx = get_type_initializer(
-                            init, field_ty, expr_idx)
+                            init, field_ty, ctx, expr_idx)
                     else:
                         expr, _ = get_type_initializer(
-                            expr, field_ty, 0)
+                            expr, field_ty, ctx, 0)
                         expr_idx += 1
-                    exprs.append([designator, expr])
                 else:
                     assert(not isinstance(expr, InitializerList))
                     expr_idx += 1
-                    exprs.append([designator, expr])
+
+                if designators:
+                    for designator in designators:
+                        if isinstance(designator, IntegerConstantExpr):
+                            designator_idx = designator.val
+                        else:
+                            assert(isinstance(designator, TypedIdentExpr))
+                            designator_idx = evaluate_constant_expr(
+                                designator, ctx)
+                        size = max(size, designator_idx + 1)
+                else:
+                    size += 1
+                exprs.append((designators, expr))
+
+            ty = ArrayType(ty.elem_ty, size)
 
             return TypedInitializerList(exprs, ty), expr_idx
         else:
             return init, idx
-    elif isinstance(ty, PointerType):
+    elif is_pointer_type(ty):
         if isinstance(init, InitializerList):
             exprs = []
             expr_idx = idx
@@ -789,10 +859,10 @@ def get_type_initializer(init, ty, idx=0):
                 if isinstance(field_ty, (ArrayType, CompositeType)):
                     if not isinstance(expr, InitializerList):
                         expr, expr_idx = get_type_initializer(
-                            init, field_ty, expr_idx)
+                            init, field_ty, ctx, expr_idx)
                     else:
                         expr, _ = get_type_initializer(
-                            expr, field_ty, 0)
+                            expr, field_ty, ctx, 0)
                         expr_idx += 1
                     exprs.append([None, expr])
                 else:
@@ -809,22 +879,51 @@ def get_type_initializer(init, ty, idx=0):
         raise NotImplementedError()
 
 
+def type_check_binary_op(node, sym_table, type_scope, obj_scope, ctx):
+    assert(is_typed_expr(node.lhs))
+    assert(is_typed_expr(node.rhs))
+
+    lhs = node.lhs
+    rhs = node.rhs
+
+    lhs_type = get_type_of(lhs)
+    rhs_type = get_type_of(rhs)
+
+    op = node.op
+
+    if node.op in ['+=', '-=', '*=', '/=', '>>=', '<<=', '&=', '|=', '^=']:
+        rhs = type_check_binary_op(
+            BinaryOp(node.op[:-1], lhs, rhs), sym_table, type_scope, obj_scope, ctx)
+        op = '='
+
+    return_type, lhs, rhs = compute_binary_op_type(
+        op, lhs, rhs, sym_table)
+
+    if return_type is None:
+        raise RuntimeError(
+            f"Error: Undefined operation between types \"{lhs_type.name}\" and \"{rhs_type.name}\" with op \"{node.op}\"")
+
+    ty = return_type
+
+    return TypedBinaryOp(op, lhs, rhs, ty)
+
+
 def exit_node(node, depth, ctx):
     sym_table = ctx.sym_table
 
     type_scope = ctx.scope_map[ctx.top_scope]
     obj_scope = ctx.scope_map[ctx.top_scope]
 
-    if isinstance(node, (CompoundStmt, TypedFunction)):
+    if isinstance(node, (CompoundStmt, TypedFunction, VarDecl)):
         ctx.pop_scope(node)
 
     if isinstance(node, IntegerConstantExpr):
-        ty = node.type
+        ty = get_type_of(node)
         assert(is_integer_type(ty))
         node = IntegerConstantExpr(node.val, ty)
 
     if isinstance(node, FloatingConstantExpr):
-        ty = node.type
+        ty = get_type_of(node)
         assert(is_float_type(ty))
         node = FloatingConstantExpr(node.val, ty)
 
@@ -836,7 +935,6 @@ def exit_node(node, depth, ctx):
         is_static = node.qual_spec.storage_class_spec == StorageClass.Static
 
         ty = get_type(sym_table, node.qual_spec, ctx)
-        quals = []
 
         if node.decls:
             for decl, init in node.decls:
@@ -844,22 +942,24 @@ def exit_node(node, depth, ctx):
                     continue
 
                 name, var_ty = get_decl_name_and_type(ty, decl, sym_table, ctx)
+                var_ty = get_type_qual(var_ty, node.qual_spec, ctx)
 
                 if is_typedef:
                     sym_table.register(name, var_ty)
                 else:
                     if init:
-                        init, _ = get_type_initializer(init, var_ty)
-
-                        if isinstance(var_ty, PointerType) and isinstance(init.type, ArrayType):
-                            var_ty = init.type
+                        init, _ = get_type_initializer(init, var_ty, ctx)
+                        if is_pointer_type(var_ty) and is_array_type(get_type_of(init)):
+                            var_ty = get_type_of(init)
 
                         init = cast_if_need(init, var_ty)
-                        assert(var_ty == init.type)
+                        assert(var_ty == get_type_of(init))
+
+                        var_ty = init.type
 
                     assert(var_ty)
-                    var = VariableSymbol(name, var_ty, quals)
-                    sym_table.register_object(name, var)
+                    var = VariableSymbol(name, var_ty)
+                    var = sym_table.register_object(name, var)
                     variables.append([TypedIdentExpr(var, var_ty), init])
 
         storage_class = []
@@ -867,6 +967,8 @@ def exit_node(node, depth, ctx):
             storage_class.append("extern")
         if is_static:
             storage_class.append("static")
+        if node.qual_spec.thread_storage_class_spec == StorageClass.ThreadLocal:
+            storage_class.append("thread_local")
 
         if not is_typedef:
             node = TypedVariable(ty, variables, storage_class)
@@ -874,15 +976,18 @@ def exit_node(node, depth, ctx):
     if isinstance(node, IdentExpr):
         assert(isinstance(node.val, str))
 
-        var = sym_table.find_object(Symbol(node.val, obj_scope))
-        if var:
-            assert(var.ty)
-            typed_node = TypedIdentExpr(var, var.ty)
+        if node.val in ["__builtin_va_arg"]:
+            pass
+        else:
+            var = sym_table.find_object(Symbol(node.val, obj_scope))
+            if var:
+                assert(var.ty)
+                typed_node = TypedIdentExpr(var, var.ty)
 
-        if not typed_node:
-            raise RuntimeError(f"Error: Undefined identity \"{node.val}\"")
+            if not typed_node:
+                raise RuntimeError(f"Error: Undefined identity \"{node.val}\"")
 
-        node = typed_node
+            node = typed_node
 
     if isinstance(node, CommaOp):
         exprs = node.exprs
@@ -890,7 +995,7 @@ def exit_node(node, depth, ctx):
         for expr in exprs:
             assert(is_typed_expr(expr))
 
-        ty = exprs[-1].type
+        ty = get_type_of(exprs[-1])
 
         assert(ty)
 
@@ -910,10 +1015,10 @@ def exit_node(node, depth, ctx):
 
         name, ty = get_decl_name_and_type(ty, node.type.decl, sym_table, ctx)
 
-        node = CastExpr(expr, ty)
+        node = TypedCastExpr(expr, ty)
 
     if isinstance(node, SizeOfExpr):
-        return_type = PrimitiveType("unsigned int")
+        return_type = PrimitiveType("unsigned long")
 
         if node.type:
             type_spec = DeclSpec()
@@ -930,25 +1035,8 @@ def exit_node(node, depth, ctx):
         node = TypedSizeOfExpr(node.expr, ty, return_type)
 
     if isinstance(node, BinaryOp):
-        assert(is_typed_expr(node.lhs))
-        assert(is_typed_expr(node.rhs))
-
-        lhs = node.lhs
-        rhs = node.rhs
-
-        lhs_type = lhs.type
-        rhs_type = rhs.type
-
-        return_type, lhs, rhs = compute_binary_op_type(
-            node.op, lhs, rhs, sym_table)
-
-        if return_type is None:
-            raise RuntimeError(
-                f"Error: Undefined operation between types \"{lhs_type.name}\" and \"{rhs_type.name}\" with op \"{node.op}\"")
-
-        ty = return_type
-
-        node = TypedBinaryOp(node.op, lhs, rhs, ty)
+        node = type_check_binary_op(
+            node, sym_table, type_scope, obj_scope, ctx)
 
     if isinstance(node, ConditionalExpr):
         assert(is_typed_expr(node.true_expr))
@@ -959,8 +1047,8 @@ def exit_node(node, depth, ctx):
         false_expr = node.false_expr
         cond_expr = node.cond_expr
 
-        true_expr_type = promote_default_type(true_expr.type)
-        false_expr_type = promote_default_type(false_expr.type)
+        true_expr_type = promote_default_type(get_type_of(true_expr))
+        false_expr_type = promote_default_type(get_type_of(false_expr))
 
         result_type = None
 
@@ -984,60 +1072,64 @@ def exit_node(node, depth, ctx):
         assert(is_typed_expr(node.expr))
 
         if node.op in ["++", "--"]:
-            if not is_incr_func_type(node.expr.type):
-                expr_typename = node.expr.type.name
+            if not is_incr_func_type(get_type_of(node.expr)):
+                expr_typename = get_type_of(node.expr).name
                 raise RuntimeError(
                     f"Error: Not supporting types with increment \"{expr_typename}\"")
 
-            return_ty = node.expr.type
+            return_ty = get_type_of(node.expr)
 
         if node.op in ["*"]:
-            if not isinstance(node.expr.type, PointerType):
+            if not is_pointer_type(get_type_of(node.expr)):
                 raise RuntimeError(
                     f"The type is not dereferencable")
 
-            return_ty = node.expr.type.elem_ty
+            return_ty = get_type_of(node.expr).elem_ty
 
         if node.op in ["&"]:
-            return_ty = PointerType(node.expr.type)
+            return_ty = PointerType(get_type_of(node.expr))
 
         if node.op in ["!"]:
             return_ty = PrimitiveType("int")
 
         if node.op in ["~"]:
-            return_ty = node.expr.type
+            return_ty = get_type_of(node.expr)
 
         if node.op in ["+", "-"]:
-            return_ty = node.expr.type
+            return_ty = get_type_of(node.expr)
 
         node = TypedUnaryOp(node.op, node.expr, return_ty)
 
     if isinstance(node, PostOp):
         assert(is_typed_expr(node.expr))
 
-        if not is_incr_func_type(node.expr.type):
+        if not is_incr_func_type(get_type_of(node.expr)):
             expr_typename = node.expr.type.name
             raise RuntimeError(
                 f"Error: Not supporting types with increment \"{expr_typename}\"")
 
-        node = TypedPostOp(node.op, node.expr, node.expr.type)
+        node = TypedPostOp(node.op, node.expr, get_type_of(node.expr))
 
     if isinstance(node, ArrayIndexerOp):
         assert(is_typed_expr(node.arr))
 
-        arr_type = node.arr.type
+        arr_type = get_type_of(node.arr)
+        if isinstance(node.arr.type, QualType):
+            arr_type = QualType(arr_type, node.arr.type.quals)
 
-        assert(isinstance(arr_type, (ArrayType, PointerType)))
+        assert(is_pointer_type(arr_type) or is_array_type(arr_type))
 
-        node = TypedArrayIndexerOp(node.arr, node.idx, arr_type.elem_ty)
+        idx = cast_if_need(node.idx, PrimitiveType("long"))
+
+        node = TypedArrayIndexerOp(node.arr, idx, arr_type.elem_ty)
 
     if isinstance(node, AccessorOp):
         assert(is_typed_expr(node.obj))
 
-        if isinstance(node.obj.type, PointerType):
-            obj_typename = node.obj.type.elem_ty.name
+        if is_pointer_type(get_type_of(node.obj)):
+            obj_typename = get_type_of(node.obj).elem_ty.name
         else:
-            obj_typename = node.obj.type.name
+            obj_typename = get_type_of(node.obj).name
 
         field_type = sym_table.find_type_and_field(
             Symbol(obj_typename, type_scope), node.field.val)
@@ -1051,53 +1143,81 @@ def exit_node(node, depth, ctx):
         node = TypedAccessorOp(node.obj, node.field, field_type)
 
     if isinstance(node, FunctionCall):
-        if isinstance(node.ident, TypedIdentExpr):
-            func_name = node.ident.val.name
-            func_name = mangle_func_name(func_name)
+        if isinstance(node.ident, IdentExpr):
+            if node.ident.val == "__builtin_va_arg":
 
-            func_def = sym_table.find_object(Symbol(func_name, obj_scope))
+                type_spec = DeclSpec()
+                get_type_spec_type(node.params[1].qual_spec, type_spec)
+                return_ty = get_type(sym_table, type_spec, ctx)
+                _, return_ty = get_decl_name_and_type(
+                    return_ty, node.params[1].decl, sym_table, ctx)
 
-            if not func_def:
-                var_def = sym_table.find_object(func_name)
+                if return_ty == PrimitiveType("int"):
+                    func_name = node.ident.val + "_int"
+                elif return_ty == PrimitiveType("char"):
+                    func_name = node.ident.val + "_char"
+                elif return_ty == PrimitiveType("unsigned int"):
+                    func_name = node.ident.val + "_uint"
+                elif return_ty == PrimitiveType("unsigned long"):
+                    func_name = node.ident.val + "_ulong"
+                elif is_pointer_type(return_ty):
+                    func_name = node.ident.val + "_ptr"
+                else:
+                    raise NotImplementedError()
 
-                if not var_def:
-                    raise RuntimeError(
-                        f"Error: The function \"{func_name}\" not defined.")
+                func_def = sym_table.find_object(Symbol(func_name, obj_scope))
 
-                func_type = var_def.ty.elem_ty
-                func_def = node.ident
-            else:
-                func_type = func_def.ty.elem_ty
+                assert(func_def)
+
+                node = TypedFunctionCall(func_def, [node.params[0]], return_ty)
         else:
-            ptr_ty = node.ident.type
-            assert(isinstance(ptr_ty, PointerType))
-            assert(isinstance(ptr_ty.elem_ty, FunctionType))
+            if isinstance(node.ident, TypedIdentExpr):
+                func_name = node.ident.val.name
+                func_name = mangle_func_name(func_name)
 
-            func_def = node.ident
-            func_type = ptr_ty.elem_ty
+                func_def = sym_table.find_object(Symbol(func_name, obj_scope))
 
-        formal_params = func_type.params
-        return_ty = func_type.return_ty
+                if not func_def:
+                    var_def = sym_table.find_object(func_name)
 
-        # check parameter
-        pos = 0
-        for (param_type, param_quals, param_name), arg in zip(formal_params, node.params):
-            if is_integer_type(param_type) == is_integer_type(arg.type):
-                pos += 1
-                continue
+                    if not var_def:
+                        raise RuntimeError(
+                            f"Error: The function \"{func_name}\" not defined.")
 
-            if isinstance(param_type, (PointerType, ArrayType)) and isinstance(arg.type, (PointerType, ArrayType)):
-                pos += 1
-                continue
+                    func_type = var_def.ty.elem_ty
+                    func_def = node.ident
+                else:
+                    func_type = func_def.ty.elem_ty
+            else:
+                ptr_ty = get_type_of(node.ident)
+                assert(is_pointer_type(ptr_ty))
+                assert(is_func_type(ptr_ty.elem_ty))
 
-            if isinstance(param_type, PointerType) and is_integer_zero(arg):
-                pos += 1
-                continue
+                func_def = node.ident
+                func_type = ptr_ty.elem_ty
 
-            raise RuntimeError(
-                f"Error: Invalid type \"{arg.type.name}\" found at position \"{pos}\" must be \"{param_type.name}\".")
+            formal_params = func_type.params
+            return_ty = func_type.return_ty
 
-        node = TypedFunctionCall(func_def, node.params, return_ty)
+            # check parameter
+            pos = 0
+            for (param_type, param_quals, param_name), arg in zip(formal_params, node.params):
+                if is_integer_type(param_type) == is_integer_type(get_type_of(arg)):
+                    pos += 1
+                    continue
+
+                if (is_array_type(param_type) or is_pointer_type(param_type)) and (is_array_type(get_type_of(arg)) or is_pointer_type(get_type_of(arg))):
+                    pos += 1
+                    continue
+
+                if is_pointer_type(param_type) and is_integer_zero(arg):
+                    pos += 1
+                    continue
+
+                raise RuntimeError(
+                    f"Error: Invalid type \"{get_type_of(arg).name}\" found at position \"{pos}\" must be \"{param_type.name}\".")
+
+            node = TypedFunctionCall(func_def, node.params, return_ty)
 
     if isinstance(node, AsmStmt):
         operands_list = []
@@ -1111,30 +1231,6 @@ def exit_node(node, depth, ctx):
         node = AsmStmt(node.template, operands_list)
 
     return node
-
-
-def register_buildin_types(sym_table: SymbolTable):
-    sym_table.register('void', VoidType())
-
-    sym_table.register('char', PrimitiveType('char'))
-    sym_table.register('unsigned char', PrimitiveType('unsigned char'))
-    sym_table.register('short', PrimitiveType('short'))
-    sym_table.register('unsigned short', PrimitiveType('unsigned short'))
-    sym_table.register('int', PrimitiveType('int'))
-    sym_table.register('unsigned int', PrimitiveType('unsigned int'))
-    sym_table.register('long', PrimitiveType('long'))
-    sym_table.register('unsigned long', PrimitiveType('unsigned long'))
-
-    sym_table.register('float', PrimitiveType('float'))
-    sym_table.register('double', PrimitiveType('double'))
-
-    sym_table.register('_Bool', PrimitiveType('_Bool'))
-    sym_table.register('_Complex', PrimitiveType('_Complex'))
-    sym_table.register('long double', PrimitiveType('long double'))
-
-    sym_table.register('__int64', PrimitiveType('__int64'))
-    sym_table.register('unsigned __int64', PrimitiveType('unsigned __int64'))
-    sym_table.register('unsigned', PrimitiveType('unsigned int'))
 
 
 class BlockScope:
@@ -1221,11 +1317,78 @@ def exit_build_type_table(node, depth, ctx):
     return node
 
 
-def register_buildin_funcs(sym_table):
+def register_buildin_types(sym_table: SymbolTable):
+    sym_table.register('void', VoidType())
+
+    sym_table.register('char', PrimitiveType('char'))
+    sym_table.register('unsigned char', PrimitiveType('unsigned char'))
+    sym_table.register('short', PrimitiveType('short'))
+    sym_table.register('unsigned short', PrimitiveType('unsigned short'))
+    sym_table.register('int', PrimitiveType('int'))
+    sym_table.register('unsigned int', PrimitiveType('unsigned int'))
+    sym_table.register('long', PrimitiveType('long'))
+    sym_table.register('unsigned long', PrimitiveType('unsigned long'))
+
+    sym_table.register('float', PrimitiveType('float'))
+    sym_table.register('double', PrimitiveType('double'))
+
+    sym_table.register('_Bool', PrimitiveType('_Bool'))
+    sym_table.register('_Complex', PrimitiveType('_Complex'))
+    sym_table.register('long double', PrimitiveType('long double'))
+
+    sym_table.register('__int64', PrimitiveType('__int64'))
+    sym_table.register('unsigned __int64', PrimitiveType('unsigned __int64'))
+    sym_table.register('unsigned', PrimitiveType('unsigned int'))
+
+    va_list_tag = CompositeType("__va_list_tag", [
+        [PrimitiveType('unsigned int'), None, None],
+        [PrimitiveType('unsigned int'), None, None],
+        [PointerType(PrimitiveType('unsigned char')), None, None],
+        [PointerType(PrimitiveType('unsigned char')), None, None],
+    ])
+    va_list_tag.is_packed = False
+
+    sym_table.register('__builtin_va_list', ArrayType(va_list_tag, 1))
+
+
+def register_buildin_funcs(sym_table: SymbolTable):
     func = FunctionSymbol("__builtin_return_address", PointerType(FunctionType(
         PointerType(VoidType()), [[PrimitiveType("unsigned int"), [], "level"]])))
 
     sym_table.register_object("__builtin_return_address", func)
+
+    va_list_ty = sym_table.find_type(
+        Symbol("__builtin_va_list", sym_table.top_scope))
+
+    func = FunctionSymbol("__builtin_va_arg_int", PointerType(FunctionType(
+        PrimitiveType("int"), [[va_list_ty, [], None]])))
+
+    sym_table.register_object("__builtin_va_arg_int", func)
+
+    func = FunctionSymbol("__builtin_va_arg_uint", PointerType(FunctionType(
+        PrimitiveType("unsigned int"), [[va_list_ty, [], None]])))
+
+    sym_table.register_object("__builtin_va_arg_uint", func)
+
+    func = FunctionSymbol("__builtin_va_arg_ulong", PointerType(FunctionType(
+        PrimitiveType("unsigned long"), [[va_list_ty, [], None]])))
+
+    sym_table.register_object("__builtin_va_arg_ulong", func)
+
+    func = FunctionSymbol("__builtin_va_arg_char", PointerType(FunctionType(
+        PrimitiveType("char"), [[va_list_ty, [], None]])))
+
+    sym_table.register_object("__builtin_va_arg_char", func)
+
+    func = FunctionSymbol("__builtin_va_arg_ptr", PointerType(FunctionType(
+        PointerType(VoidType()), [[va_list_ty, [], None]])))
+
+    sym_table.register_object("__builtin_va_arg_ptr", func)
+
+    func = FunctionSymbol("__builtin_va_start", PointerType(
+        FunctionType(VoidType(), [[va_list_ty, [], None]], True)))
+
+    sym_table.register_object("__builtin_va_start", func)
 
 
 def semantic_analysis(ast):

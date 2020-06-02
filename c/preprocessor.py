@@ -11,11 +11,12 @@ class Span:
 
 
 class Token:
-    def __init__(self, filename, source: str, span, ty):
+    def __init__(self, filename, source: str, span, ty, line_col):
         self.filename = filename
         self.source = source
         self.span = span
         self.ty = ty
+        self.line_col = line_col
 
     @property
     def value(self):
@@ -26,19 +27,6 @@ class Token:
 
     def __repr__(self):
         return self.value
-
-    @property
-    def line_column(self):
-        line = 1
-        col = 0
-        for ch in self.source[:self.span.start]:
-            if ch == "\n":
-                line += 1
-                col = 0
-
-            col += 1
-
-        return (line, col)
 
 
 class TokenType(Enum):
@@ -155,9 +143,14 @@ def evalute_constant_expr(expr):
         expr = expr[0]
 
     if isinstance(expr, BinaryOp):
-        lhs = evalute_constant_expr(expr.lhs)
-        rhs = evalute_constant_expr(expr.rhs)
         op = expr.op
+        lhs = evalute_constant_expr(expr.lhs)
+        if op == "||":
+            if lhs:
+                return 1
+
+        rhs = evalute_constant_expr(expr.rhs)
+
         if op == "||":
             return lhs or rhs
         elif op == "&&":
@@ -176,6 +169,21 @@ def evalute_constant_expr(expr):
             return lhs != rhs
         elif op == "|":
             return lhs | rhs
+        elif op == "+":
+            return lhs + rhs
+        elif op == "-":
+            return lhs - rhs
+        elif op == "*":
+            return lhs * rhs
+        elif op == "/":
+            return lhs / rhs
+        elif op == "%":
+            return lhs % rhs
+    elif isinstance(expr, ConditionalExpr):
+        cond_expr = evalute_constant_expr(expr.cond_expr)
+        true_expr = evalute_constant_expr(expr.true_expr)
+        false_expr = evalute_constant_expr(expr.false_expr)
+        return true_expr if cond_expr != 0 else false_expr
     elif isinstance(expr, UnaryOp):
         value = evalute_constant_expr(expr.expr)
         if expr.op == "!":
@@ -185,6 +193,7 @@ def evalute_constant_expr(expr):
     elif isinstance(expr, FloatingConstantExpr):
         return expr.val
 
+    print(expr)
     raise ValueError()
 
 
@@ -195,6 +204,8 @@ class Preprocessor:
         self.include_dirs = include_dirs
         self.system_include_dirs = system_include_dirs
         self.pos = 0
+        self.line_column = (1, 1)
+        self.context_stack = []
         self.groups = []
         self.groups.append(DefineReplacementDirective("_MSC_VER", ["1700"]))
         self.groups.append(DefineReplacementDirective(
@@ -203,6 +214,8 @@ class Preprocessor:
             "_STL_LANG", ["201402"]))
         self.groups.append(DefineReplacementDirective(
             "_CRT_DECLARE_NONSTDC_NAMES", ["0"]))
+        self.groups.append(DefineReplacementDirective(
+            "__STDC_VERSION__", ["201112L"]))
         self.groups.append(DefineReplacementDirective(
             "__STDC__", ["1"]))
         self.groups.append(DefineReplacementDirective(
@@ -226,18 +239,46 @@ class Preprocessor:
         self.groups.append(DefineReplacementDirective(
             "DEBUG", ["0"]))
 
+        # For linux predefined macros.
+        self.groups.append(DefineReplacementDirective(
+            "_FILE_OFFSET_BITS", ["64"]))
+        self.groups.append(DefineReplacementDirective(
+            "_FORTIFY_SOURCE", ["0"]))
+        self.groups.append(DefineReplacementDirective(
+            "__OPTIMIZE__", ["0"]))
+
         if not eval_masks:
             self.eval_masks = [EvalMask(True)]
         else:
             self.eval_masks = eval_masks
 
+    def save_pos(self):
+        self.context_stack.append((self.pos, self.line_column))
+
+    def restore_pos(self):
+        (self.pos, self.line_column) = self.context_stack.pop()
+
+    def advance(self, count):
+        line, col = self.line_column
+        for ch in self.source[self.pos:(self.pos+count)]:
+            if ch == "\n":
+                line += 1
+                col = 1
+                continue
+
+            col += 1
+
+        self.line_column = (line, col)
+
+        self.pos += count
+
     def create_token(self, source, span, ty):
-        return Token(self.filename, source, span, ty)
+        return Token(self.filename, source, span, ty, self.line_column)
 
     def parse_identifier(self):
         m = identifier.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Identifier)
 
         return None
@@ -252,7 +293,7 @@ class Preprocessor:
             self.skip_whitespaces()
             ident = None
             if self.source[self.pos:].startswith(","):
-                self.pos += 1
+                self.advance(1)
                 self.skip_whitespaces()
                 ident = self.parse_identifier()
                 idents.append(ident)
@@ -267,7 +308,7 @@ class Preprocessor:
         m = header_name_pattern.match(self.source, self.pos)
 
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.HeaderName)
 
         return None
@@ -275,32 +316,32 @@ class Preprocessor:
     def parse_token(self):
         m = identifier.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Identifier)
 
         m = string_literal.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.StringLiteral)
 
         m = character_constant.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.CharacterConstant)
 
         m = pp_number.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.PPNumber)
 
         m = operators.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Punctuator)
 
         m = non_whitespace.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Other)
 
         return None
@@ -310,49 +351,49 @@ class Preprocessor:
             pos = self.pos
             m = whitespace.match(self.source, self.pos)
             if m:
-                self.pos = m.end()
+                self.advance(m.end() - m.start())
             m = comment.match(self.source, self.pos)
             if m:
-                self.pos = m.end()
+                self.advance(m.end() - m.start())
             if pos == self.pos:
                 break
 
     def process_if_group(self):
-        save_pos = self.pos
+        self.save_pos()
 
         if self.source[self.pos].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             src = self.source[self.pos:]
             if src.startswith("ifdef"):
-                self.pos += len("ifdef")
+                self.advance(len("ifdef"))
                 self.skip_whitespaces()
                 ident = self.parse_identifier()
                 if ident:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(IfDefDirective(ident, False))
                         group = self.process_group(True)
                         return group
                 raise ValueError()
             elif src.startswith("ifndef"):
-                self.pos += len("ifndef")
+                self.advance(len("ifndef"))
                 self.skip_whitespaces()
                 ident = self.parse_identifier()
                 if ident:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(IfDefDirective(ident, True))
                         group = self.process_group(True)
                         return group
                 raise ValueError()
             elif src.startswith("if"):
-                self.pos += len("if")
+                self.advance(len("if"))
                 self.skip_whitespaces()
                 src = self.source[self.pos:]
 
@@ -363,41 +404,41 @@ class Preprocessor:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(IfDirective(expr))
                         group = self.process_group(True)
                         return group
 
                 raise ValueError()
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     def process_endif_line(self):
-        save_pos = self.pos
+        self.save_pos()
         self.skip_whitespaces()
 
         length = len(self.source)
         if self.source[self.pos].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             src = self.source[self.pos:]
             if src.startswith("endif"):
-                self.pos += len("endif")
+                self.advance(len("endif"))
                 self.skip_whitespaces()
                 m = newline.match(self.source, self.pos)
                 if m:
-                    self.pos = m.end()
+                    self.advance(m.end() - m.start())
                     self.groups.append(EndIfDirective())
                     return True
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     def process_tokens(self):
         self.skip_whitespaces()
-        pos = self.pos
+
         tokens = []
         while True:
             token = self.parse_token()
@@ -409,16 +450,16 @@ class Preprocessor:
         return tokens
 
     def process_elif_group(self):
-        save_pos = self.pos
+        self.save_pos()
         self.skip_whitespaces()
 
         if self.source[self.pos].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             src = self.source[self.pos:]
             if src.startswith("elif"):
-                self.pos += len("elif")
+                self.advance(len("elif"))
                 self.skip_whitespaces()
                 src = self.source[self.pos:]
 
@@ -429,59 +470,45 @@ class Preprocessor:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(ElIfDirective(expr))
                         group = self.process_group(True)
                         return group
                 raise ValueError()
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     def process_else_group(self):
-        save_pos = self.pos
+        self.save_pos()
         self.skip_whitespaces()
 
         if self.source[self.pos].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             src = self.source[self.pos:]
             if src.startswith("else"):
-                self.pos += len("else")
+                self.advance(len("else"))
                 self.skip_whitespaces()
                 m = newline.match(self.source, self.pos)
                 if m:
-                    self.pos = m.end()
+                    self.advance(m.end() - m.start())
                     self.groups.append(ElseDirective())
                     group = self.process_group(True)
                     return group
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     @property
     def rememaining_source(self):
         return self.source[self.pos:]
 
-    @property
-    def line_column(self):
-        line = 1
-        col = 0
-        for ch in self.source[:self.pos]:
-            if ch == "\n":
-                line += 1
-                col = 0
-
-            col += 1
-
-        return (line, col)
-
     def process_if_section(self):
-        save_pos = self.pos
+        self.save_pos()
         self.skip_whitespaces()
 
-        src = self.rememaining_source
         if self.process_if_group():
             elif_groups = []
             while True:
@@ -496,20 +523,20 @@ class Preprocessor:
 
             raise NotImplementedError()
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     def process_control_line(self):
-        save_pos = self.pos
+        self.save_pos()
         self.skip_whitespaces()
 
         if self.source[self.pos].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             src = self.source[self.pos:]
             if src.startswith("include"):
-                self.pos += len("include")
+                self.advance(len("include"))
                 src2 = self.source[self.pos:]
                 self.skip_whitespaces()
                 src3 = self.source[self.pos:]
@@ -518,14 +545,14 @@ class Preprocessor:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(
                             IncludeDirective(header_name))
                         return True
 
                 raise ValueError()
             elif src.startswith("define"):
-                self.pos += len("define")
+                self.advance(len("define"))
                 self.skip_whitespaces()
                 ident = self.parse_identifier()
                 if ident:
@@ -533,7 +560,7 @@ class Preprocessor:
                     src = self.source[self.pos:]
                     pos = self.pos
                     if src.startswith("("):
-                        self.pos += 1
+                        self.advance(1)
                         self.skip_whitespaces()
 
                         idents = self.parse_identifier_list()
@@ -541,14 +568,14 @@ class Preprocessor:
 
                         src = self.source[self.pos:]
                         if src.startswith(")"):
-                            self.pos += 1
+                            self.advance(1)
                             self.skip_whitespaces()
 
                             replacements = self.process_tokens()
                             self.skip_whitespaces()
                             m = newline.match(self.source, self.pos)
                             if m:
-                                self.pos = m.end()
+                                self.advance(m.end() - m.start())
                                 self.groups.append(
                                     DefineReplacementDirective(ident, replacements, idents))
                                 return True
@@ -559,14 +586,14 @@ class Preprocessor:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - m.start())
                         self.groups.append(
                             DefineReplacementDirective(ident, replacements))
                         return True
 
                 raise NotImplementedError()
             elif src.startswith("undef"):
-                self.pos += len("undef")
+                self.advance(len("undef"))
                 self.skip_whitespaces()
                 ident = self.parse_identifier()
                 if ident:
@@ -579,39 +606,38 @@ class Preprocessor:
                         return True
                 raise NotImplementedError()
             elif src.startswith("line"):
-                self.pos += len("line")
+                self.advance(len("line"))
                 raise NotImplementedError()
             elif src.startswith("error"):
-                self.pos += len("error")
+                self.advance(len("error"))
                 tokens = self.process_tokens()
                 self.skip_whitespaces()
                 m = newline.match(self.source, self.pos)
                 if m:
-                    self.pos = m.end()
+                    self.advance(m.end() - m.start())
                     if tokens:
                         self.groups.extend(tokens)
                     return True
             elif src.startswith("pragma"):
-                self.pos += len("pragma")
+                self.advance(len("pragma"))
                 self.skip_whitespaces()
                 self.process_tokens()
                 self.skip_whitespaces()
                 m = newline.match(self.source, self.pos)
                 if m:
-                    self.pos = m.end()
+                    self.advance(m.end() - m.start())
                     return True
 
-        self.pos = save_pos
+        self.restore_pos()
         return False
 
     def process_text_line(self):
-        src = self.source[self.pos:]
         tokens = self.process_tokens()
 
         self.skip_whitespaces()
         m = newline.match(self.source, self.pos)
         if m:
-            self.pos = m.end()
+            self.advance(m.end() - m.start())
             if tokens:
                 self.groups.extend(tokens)
             return True
@@ -621,26 +647,18 @@ class Preprocessor:
     def process_group_part(self):
         self.skip_whitespaces()
 
-        save_pos = []
-
-        save_pos.append(self.pos)
-
         result = self.process_control_line()
         if result:
             return True
-
-        self.pos = save_pos.pop()
-
-        save_pos.append(self.pos)
 
         result = self.process_if_section()
         if result:
             return True
 
-        self.pos = save_pos.pop()
+        self.save_pos()
 
         if self.source[self.pos:].startswith("#"):
-            self.pos += 1
+            self.advance(1)
             self.skip_whitespaces()
 
             if self.source[self.pos].startswith("error"):
@@ -653,6 +671,7 @@ class Preprocessor:
 
                 raise Exception("")
 
+        self.restore_pos()
         return self.process_text_line()
 
     def process_group(self, in_if_section=False):
@@ -660,17 +679,17 @@ class Preprocessor:
         length = len(self.source)
         while self.pos < length:
             if in_if_section:
-                save_pos = self.pos
+                self.save_pos()
                 self.skip_whitespaces()
                 if self.source[self.pos].startswith("#"):
-                    self.pos += 1
+                    self.advance(1)
                     self.skip_whitespaces()
 
                     src = self.source[self.pos:]
                     if src.startswith("endif") or src.startswith("elif") or src.startswith("else"):
-                        self.pos = save_pos
+                        self.restore_pos()
                         break
-                self.pos = save_pos
+                self.restore_pos()
 
             part = self.process_group_part()
             parts.append(part)

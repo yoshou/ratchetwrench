@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import collections
 import re
 import sys
 import traceback
 import struct
-from enum import Enum, auto
+from enum import Enum, Flag, auto
 
 from c.lex import *
 from ast.node import *
@@ -39,34 +40,99 @@ def parse_primary_expression(tokens, pos, ctx):
 
     if isinstance(tokens[pos], IntegerConstant):
         val = tokens[pos].value
+        suffix = tokens[pos].suffix
 
-        base = 10
         if val.startswith('0x'):
             base = 0
+        elif val.startswith('0'):
+            base = 8
+        else:
+            base = 10
+
+        is_unsigned = "U" in suffix or "u" in suffix
+        is_long = "L" in suffix or "l" in suffix
 
         value = int(val, base)
-        if (value & ((1 << 32) - 1)) == value:
-            t = PrimitiveType('int')
-        elif (value & ((1 << 64) - 1)) == value:
-            t = PrimitiveType('long')
+        if base in [0, 8]:
+            if (value & ((1 << 31) - 1)) == value:
+                t = PrimitiveType('int')
+                bits = 32
+            elif (value & ((1 << 32) - 1)) == value:
+                t = PrimitiveType('unsigned int')
+                bits = 32
+            elif (value & ((1 << 63) - 1)) == value:
+                t = PrimitiveType('long')
+                bits = 64
+            elif (value & ((1 << 64) - 1)) == value:
+                t = PrimitiveType('unsigned long')
+                bits = 64
+            else:
+                raise ValueError("The constant isn't representive.")
         else:
-            raise ValueError("The constant isn't representive.")
+            if (value & ((1 << 32) - 1)) == value:
+                t = PrimitiveType('int')
+                bits = 32
+            elif (value & ((1 << 64) - 1)) == value:
+                t = PrimitiveType('long')
+                bits = 64
+            else:
+                raise ValueError("The constant isn't representive.")
+
+        if is_unsigned:
+            if is_long:
+                t = PrimitiveType("unsigned long")
+            else:
+                t = PrimitiveType("unsigned int")
+        else:
+            if is_long:
+                t = PrimitiveType("long")
+
+        def sign_extend(value, bits):
+            sign_bit = 1 << (bits - 1)
+            return (value & (sign_bit - 1)) - (value & sign_bit)
+
+        if t.name in ["int", "long"]:
+            value = sign_extend(value, bits)
 
         return (pos + 1, IntegerConstantExpr(value, t))
 
-    if isinstance(tokens[pos], CharacterConstant):
-        val = tokens[pos].value
+    def unescape(val: str):
+        val = val.replace("\\'", "\'")
+        val = val.replace("\\\"", "\"")
+        val = val.replace("\\?", "?")
+        val = val.replace("\\\\", "\\")
+        val = val.replace("\\a", "\a")
+        val = val.replace("\\b", "\b")
+        val = val.replace("\\f", "\f")
         val = val.replace("\\n", "\n")
         val = val.replace("\\r", "\r")
-        val = val.replace("\\b", "\b")
         val = val.replace("\\t", "\t")
-        val = val.replace("\\0", "\0")
-        val = val.replace("\\'", "\'")
-        val = val.replace("\\\\", "\\")
-        if val.startswith("\\x"):
-            val = int("0x" + val[2:], 0)
-        else:
-            val = ord(val)
+        val = val.replace("\\v", "\v")
+
+        while True:
+            m = re.search(r"\\(?:(x[0-9A-Fa-f]+)|([0-9]))", val)
+
+            if not m:
+                break
+
+            hex_val, octet_val = m.groups()
+
+            if hex_val:
+                hex_num = int("0" + hex_val, 0)
+                assert(hex_num >= 0 and hex_num < 256)
+                val = val[:m.start()] + chr(hex_num) + val[m.end():]
+
+            if octet_val in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']:
+                octet_num = int(octet_val, 8)
+                assert(octet_num >= 0 and octet_num < 8)
+                val = val[:m.start()] + chr(octet_num) + val[m.end():]
+
+        return val
+
+    if isinstance(tokens[pos], CharacterConstant):
+        val = tokens[pos].value
+        val = unescape(val)
+        val = ord(val)
         t = PrimitiveType('char')
         return (pos + 1, IntegerConstantExpr(val, t))
 
@@ -75,8 +141,7 @@ def parse_primary_expression(tokens, pos, ctx):
     # string-literal
     if isinstance(tokens[pos], StringLiteral):
         val = tokens[pos].value
-        val = val.replace("\\n", "\n")
-        val = val.replace("\\r", "\r")
+        val = unescape(val)
         t = ArrayType(PrimitiveType("char"), len(val) + 1)
         return (pos + 1, StringLiteralExpr(val, t))
 
@@ -99,10 +164,18 @@ def parse_primary_expression(tokens, pos, ctx):
     return (pos, None)
 
 
+def parse_argument_expression(tokens, pos, ctx):
+    (pos, typename) = parse_type_name(tokens, pos, ctx)
+    if typename:
+        return (pos, typename)
+
+    return parse_assignment_expression(tokens, pos, ctx)
+
+
 def parse_argument_expression_list(tokens, pos, ctx):
     # assignment-expression
     # expression , assignment-expression
-    return parse_list(tokens, pos, ctx, parse_assignment_expression)
+    return parse_list(tokens, pos, ctx, parse_argument_expression)
 
 
 def parse_postfix_expression_tail(tokens, pos, ctx, lhs):
@@ -558,20 +631,24 @@ def parse_identifier_list(tokens, pos, ctx):
     return (pos, None)
 
 
-class TypeQualifier(Enum):
-    Const = "const"
-    Restrict = "restrict"
-    Volatile = "volatile"
-    Atomic = "atomic"
-
-
-type_qualifier_values = {member.value: member for name,
-                         member in TypeQualifier.__members__.items()}
+class TypeQualifier(Flag):
+    Unspecified = 0
+    Const = auto()
+    Restrict = auto()
+    Volatile = auto()
+    Atomic = auto()
 
 
 def type_qualifier_from_name(name):
-    if name in type_qualifier_values:
-        return type_qualifier_values[name]
+    if name == "const":
+        return TypeQualifier.Const
+    elif name == "restrict":
+        return TypeQualifier.Restrict
+    elif name == "volatile":
+        return TypeQualifier.Volatile
+    elif name == "_Atomic":
+        return TypeQualifier.Atomic
+
     raise ValueError('{} is not a valid name'.format(name))
 
 
@@ -821,11 +898,11 @@ def parse_struct_declarator(tokens, pos, ctx):
         pos += 1
         (pos, const) = parse_constant_expression(tokens, pos, ctx)
         if const:
-            return (pos, decl)
+            return (pos, StructDecl(decl, const))
     pos = save_pos.pop()
 
     if decl:
-        return (pos, decl)
+        return (pos, StructDecl(decl, None))
 
     return (pos, None)
 
@@ -957,7 +1034,7 @@ def parse_iteration_statement(tokens, pos, ctx):
                         pos += 1
                         (pos, stmt) = parse_statement(tokens, pos, ctx)
                         if stmt:
-                            return (pos, ForStmt(init_expr, cond_expr, cont_expr, stmt))
+                            return (pos, ForStmt(ExprStmt(init_expr), cond_expr, cont_expr, stmt))
     pos = save_pos.pop()
 
     return (pos, None)
@@ -1083,12 +1160,15 @@ def parse_labeled_statement(tokens, pos, ctx):
 
     # case constant-expression : statement
     save_pos.append(pos)
+
+    temp = tokens[pos:]
     if tokens[pos].value == "case":
         pos += 1
         (pos, expr) = parse_constant_expression(tokens, pos, ctx)
         if expr:
             if tokens[pos].value == ":":
                 pos += 1
+                temp2 = tokens[pos:]
                 (pos, stmt) = parse_statement(tokens, pos, ctx)
 
                 if stmt:
@@ -1678,7 +1758,6 @@ patterns = [
     ("struct",), ("enum",), ("typename",)
 ]
 
-import collections
 
 pattern_counts = [collections.Counter(pattern) for pattern in patterns]
 
@@ -1690,6 +1769,8 @@ class DeclSpec:
         self.decls = []
         self.func_spec_inline = False
         self._storage_class_spec = StorageClass.Undefined
+        self._thread_storage_class_spec = StorageClass.Undefined
+        self.type_quals = TypeQualifier.Unspecified
 
     def set_func_spec_inline(self):
         self.func_spec_inline = True
@@ -1703,7 +1784,22 @@ class DeclSpec:
         if self._storage_class_spec != StorageClass.Undefined:
             raise ValueError("Storage class has already specified.")
 
+        assert(isinstance(sc, StorageClass))
+
         self._storage_class_spec = sc
+
+    @property
+    def thread_storage_class_spec(self):
+        return self._thread_storage_class_spec
+
+    @thread_storage_class_spec.setter
+    def thread_storage_class_spec(self, sc):
+        if self._thread_storage_class_spec != StorageClass.Undefined:
+            raise ValueError("Storage class has already specified.")
+
+        assert(isinstance(sc, StorageClass))
+
+        self._thread_storage_class_spec = sc
 
     @property
     def name(self):
@@ -1797,9 +1893,13 @@ def parse_declaration_specifiers(tokens, pos, ctx):
                 decl_spec.set_func_spec_inline()
             elif isinstance(spec, StorageClass):
                 if spec == StorageClass.ThreadLocal:
-                    pass
+                    decl_spec.thread_storage_class_spec = spec
                 else:
                     decl_spec.storage_class_spec = spec
+            elif isinstance(spec, TypeQualifier):
+                decl_spec.type_quals |= spec
+            else:
+                raise NotImplementedError()
 
         if StorageClass.Typedef == decl_spec.storage_class_spec and len(type_specs) > 1 and type_specs[-1] == TypeSpecifierType.Typename:
             type_specs.pop()
@@ -2226,6 +2326,8 @@ def parse(tokens):
         TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Short)
     ctx.typedefs["__int8"] = TypeSpecifierInfo(
         TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Char)
+    ctx.typedefs["__builtin_va_list"] = TypeSpecifierInfo(
+        TypeSpecifierSign.Signed, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Typename)
     # ctx.typedefs["__time64_t"] = TypeSpecifierInfo(
     #     TypeSpecifierSign.Unsigned, TypeSpecifierWidth.Unspecified, TypeSpecifierType.Long)
     pos = 0

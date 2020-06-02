@@ -3,7 +3,7 @@
 
 import re
 import sys
-from enum import Enum
+from enum import Enum, Flag, auto
 
 
 class Type:
@@ -28,7 +28,7 @@ class VoidType(Type):
 
 class PointerType(Type):
     def __init__(self, elem_ty):
-        self.elem_ty = elem_ty
+        self._elem_ty = elem_ty
 
     def __hash__(self):
         return hash(tuple([self.elem_ty]))
@@ -37,7 +37,14 @@ class PointerType(Type):
         if not isinstance(other, PointerType):
             return False
 
-        return self.elem_ty == other.elem_ty
+        return self._elem_ty == other._elem_ty
+
+    @property
+    def elem_ty(self):
+        if isinstance(self._elem_ty, QualType):
+            return self._elem_ty.ty
+
+        return self._elem_ty
 
     @property
     def name(self):
@@ -139,16 +146,38 @@ class CompositeType(Type):
         return self.fields[idx]
 
     def get_field_by_name(self, name):
+        idx = 0
+        bit_pos = 0
+        for ty, field_name, bit in self.fields:
+            if bit is None:
+                if name == field_name:
+                    return self.fields[idx]
+
+                bit_pos = 0
+                idx += 1
+            else:
+                raise NotImplementedError()
+
+                bit_pos += bit
+
+                if bit_pos >= 32:
+                    idx += 1
+                    bit_pos -= 32
+
         idx = self.fields_index[name]
         return self.fields[idx]
 
     def get_field_type_by_name(self, name):
         idx = self.fields_index[name]
-        ty, _, _ = self.fields[idx]
+        ty, _, bit = self.fields[idx]
+        assert(not bit)
         return ty
 
     def get_field_idx(self, name):
-        return self.fields_index[name]
+        idx = self.fields_index[name]
+        _, _, bit = self.fields[idx]
+        assert(not bit)
+        return idx
 
     def contains_field(self, name):
         return name in self.fields_index
@@ -201,6 +230,23 @@ class FunctionType(Type):
             return False
 
         return self.return_ty == other.return_ty and [param for param, _, _ in self.params] == [param for param, _, _ in other.params]
+
+
+class Qualifier(Flag):
+    Undefined = 0
+    Const = auto()
+    Restrict = auto()
+    Volatile = auto()
+
+
+class QualType:
+    def __init__(self, ty, quals):
+        self.ty = ty
+        self.quals = quals
+
+    @property
+    def elem_ty(self):
+        return QualType(self.ty.elem_ty, self.quals)
 
 
 buildin_type_reg_size = {

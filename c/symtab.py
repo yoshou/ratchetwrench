@@ -24,7 +24,7 @@ class Symbol:
         return self.name
 
     def __repr__(self):
-        return f"Symbol(name={self.name})"
+        return f"Symbol(name={self.name}, scope={id(self.scope)})"
 
 
 class SymbolScope:
@@ -42,8 +42,11 @@ class SymbolScope:
         assert(isinstance(obj, (FunctionSymbol, VariableSymbol)))
 
         symbol = Symbol(name, self)
+        if symbol in self.table.objects:
+            return self.table.objects[symbol]
+
         self.table.objects[symbol] = obj
-        return symbol
+        return obj
 
     def register(self, name, value):
         symbol = Symbol(name, self)
@@ -58,20 +61,19 @@ class FunctionSymbol:
 
 
 class VariableSymbol:
-    def __init__(self, name, ty, ty_qual):
+    def __init__(self, name, ty):
         self.name = name
         self.ty = ty
-        self.ty_qual = ty_qual
 
-    def __eq__(self, other):
-        if other is None:
-            return False
-        if not isinstance(other, VariableSymbol):
-            return False
-        return self.name == other.name
+    # def __eq__(self, other):
+    #     if other is None:
+    #         return False
+    #     if not isinstance(other, VariableSymbol):
+    #         return False
+    #     return self.name == other.name
 
-    def __hash__(self):
-        return hash(tuple([self.name]))
+    # def __hash__(self):
+    #     return hash(tuple([self.name]))
 
     def __str__(self):
         return self.name

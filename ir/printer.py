@@ -179,12 +179,14 @@ def get_value_name(value):
         return f"{{{lst}}}"
     elif isinstance(value, (Function, GlobalVariable)):
         return f"{value.value_name}"
-    elif isinstance(value, IntToPtrInst):
-        return f"inttoptr ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
-    elif isinstance(value, BitCastInst):
-        return f"bitcast ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
-    elif isinstance(value, TruncInst):
-        return f"trunc ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
+    elif isinstance(value, CastInst):
+        return f"{value.op} ({get_value_type(value.rs)} {get_value_name(value.rs)} to {get_value_type(value)})"
+
+    elif isinstance(value, GetElementPtrInst):
+        idx_list = ", ".join(
+            [f"{get_value_type(idx)} {get_value_name(idx)}" for idx in value.idx])
+        inbounds = "inbounds " if value.inbounds else ""
+        return f"getelementptr {inbounds}({get_type_name(value.pointee_ty.elem_ty)}, {get_value_type(value.rs)} {get_value_name(value.rs)}, {idx_list})"
     else:
         raise ValueError()
 
@@ -272,9 +274,13 @@ def print_inst(inst, slot_id_map):
         return f"switch {get_value_type(inst.value)} {get_value_name(inst.value)}, label {get_value_name(inst.default)} [\n{cases}\n\t]"
 
     if isinstance(inst, LoadInst):
+        if inst.is_volatile:
+            return f"{get_value_name(inst)} = load volatile {get_value_type(inst)}, {get_value_type(inst.rs)} {get_value_name(inst.rs)}"
         return f"{get_value_name(inst)} = load {get_value_type(inst)}, {get_value_type(inst.rs)} {get_value_name(inst.rs)}"
 
     if isinstance(inst, StoreInst):
+        if inst.is_volatile:
+            return f"store volatile {get_value_type(inst.rs)} {get_value_name(inst.rs)}, {get_value_type(inst.rd)} {get_value_name(inst.rd)}"
         return f"store {get_value_type(inst.rs)} {get_value_name(inst.rs)}, {get_value_type(inst.rd)} {get_value_name(inst.rd)}"
 
     if isinstance(inst, FenceInst):
@@ -342,6 +348,9 @@ def print_inst(inst, slot_id_map):
             f"[{get_value_name(value)}, {get_value_name(block)}]" for block, value in inst.values.items()]
         return f"{get_value_name(inst)} = phi {get_value_type(inst)} {', '.join(values)}"
 
+    if isinstance(inst, VAArgInst):
+        return f"{get_value_name(inst)} = va_arg {get_value_type(inst.va_list)} {get_value_name(inst.va_list)} , {get_value_type(inst)}"
+
     raise Exception
 
 
@@ -359,8 +368,20 @@ def get_arg_string(arg):
     return f"{get_type_name(arg.ty)} {attrs}"
 
 
-def print_function(func, indent=0):
+def print_function(func, attrs_list, indent=0):
     lines = []
+
+    attrs = func.attributes
+
+    if len(attrs) == 0:
+        attrs_idx = -1
+    elif attrs in attrs_list:
+        attrs_idx = attrs_list.index(attrs)
+    else:
+        attrs_idx = len(attrs_list)
+        attrs_list.append(attrs)
+
+    attrs_idx = f"#{attrs_idx}" if attrs_idx >= 0 else ""
 
     slot_id_map = SlotTracker()
     slot_id_map.track(func)
@@ -380,10 +401,10 @@ def print_function(func, indent=0):
 
     if func.is_declaration:
         lines.append(
-            f"declare {get_type_name(func.return_ty)} {func.value_name}({arg_list});")
+            f"declare {get_type_name(func.return_ty)} {func.value_name}({arg_list}) {attrs_idx};")
     else:
         lines.append(
-            f"define {get_type_name(func.return_ty)} {func.value_name}({arg_list}) {comdat} {{")
+            f"define {get_linkage(func)} {get_type_name(func.return_ty)} {func.value_name}({arg_list}) {comdat} {attrs_idx} {{")
         lines.extend([print_block(block, slot_id_map) +
                       "\n" for block in func.blocks])
         lines.append("}")
@@ -417,6 +438,8 @@ def get_linkage(value):
         return "external"
     elif value.linkage == GlobalLinkage.Internal:
         return "internal"
+    elif value.linkage == GlobalLinkage.Private:
+        return "private"
 
     return ""
 
@@ -426,6 +449,17 @@ def get_comdat_kind(value):
         return "any"
 
     return ""
+
+
+def print_attributes(attrs):
+    attr_strs = []
+    for attr in attrs:
+        if attr.value:
+            raise NotImplementedError()
+        else:
+            attr_strs.append(f'{str(attr.kind.value)}')
+
+    return "{" + " ".join(attr_strs) + "}"
 
 
 def print_module(module):
@@ -463,6 +497,12 @@ def print_module(module):
         lines.append(
             f"@{name} = {linkage} {decorations} {obj} {get_type_name(global_var.ty.elem_ty)} {init}, align 4")
 
-    lines.extend([print_function(func) for func in module.funcs.values()])
+    attrs_list = list()
+
+    lines.extend([print_function(func, attrs_list)
+                  for func in module.funcs.values()])
+
+    for i, attrs in enumerate(attrs_list):
+        lines.append(f"attributes #{i} = {print_attributes(attrs)}")
 
     return "\n".join(lines)
