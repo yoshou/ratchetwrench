@@ -662,6 +662,13 @@ def is_array_type(ty):
     return isinstance(ty, ArrayType)
 
 
+def is_composite_type(ty):
+    if isinstance(ty, QualType):
+        ty = ty.ty
+
+    return isinstance(ty, CompositeType)
+
+
 def is_func_type(ty):
     return isinstance(ty, FunctionType)
 
@@ -768,7 +775,7 @@ def get_type_initializer(init, ty, ctx, idx=0):
     if isinstance(ty, CompositeType) and ty.is_union:
         ty, _, _ = ty.fields[0]
 
-    if isinstance(ty, CompositeType):
+    if is_composite_type(ty):
         if isinstance(init, InitializerList):
             exprs = []
             expr_idx = idx
@@ -840,6 +847,8 @@ def get_type_initializer(init, ty, ctx, idx=0):
                     size += 1
                 exprs.append((designators, expr))
 
+            assert(size > 0)
+
             ty = ArrayType(ty.elem_ty, size)
 
             return TypedInitializerList(exprs, ty), expr_idx
@@ -908,6 +917,13 @@ def type_check_binary_op(node, sym_table, type_scope, obj_scope, ctx):
     return TypedBinaryOp(op, lhs, rhs, ty)
 
 
+def get_canonical_type(ty):
+    if isinstance(ty, QualType):
+        return ty.ty
+
+    return ty
+
+
 def exit_node(node, depth, ctx):
     sym_table = ctx.sym_table
 
@@ -948,14 +964,17 @@ def exit_node(node, depth, ctx):
                     sym_table.register(name, var_ty)
                 else:
                     if init:
-                        init, _ = get_type_initializer(init, var_ty, ctx)
-                        if is_pointer_type(var_ty) and is_array_type(get_type_of(init)):
+                        init, _ = get_type_initializer(
+                            init, get_canonical_type(var_ty), ctx)
+                        if is_array_type(get_type_of(init)):
                             var_ty = get_type_of(init)
 
                         init = cast_if_need(init, var_ty)
-                        assert(var_ty == get_type_of(init))
+                        assert(get_canonical_type(var_ty) == get_type_of(init))
 
                         var_ty = init.type
+                        if is_array_type(var_ty):
+                            assert(get_canonical_type(var_ty).size > 0)
 
                     assert(var_ty)
                     var = VariableSymbol(name, var_ty)

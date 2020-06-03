@@ -131,7 +131,7 @@ class StringLiteral:
 
 class Span:
     def __init__(self, src, start, end):
-        self.src = src
+        self.src = src.source
         self.start = start
         self.end = end
 

@@ -185,8 +185,10 @@ def def_x64_regclass(*args, **kwargs):
     return regclass
 
 
+# GR8 = def_x64_regclass("GR8", [ValueType.I8], 8, [
+#     AL, CL, DL, AH, CH, DH, BL, BH, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
 GR8 = def_x64_regclass("GR8", [ValueType.I8], 8, [
-    AL, CL, DL, AH, CH, DH, BL, BH, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
+    AL, CL, DL, BL, SIL, DIL, BPL, SPL, R8B, R9B, R10B, R11B, R14B, R15B, R12B, R13B])
 
 GR16 = def_x64_regclass("GR16", [ValueType.I16], 32, [
     AX, CX, DX, SI, DI, BX, BP, SP, R8W, R9W, R10W, R11W, R14W, R15W, R12W, R13W])
@@ -712,6 +714,9 @@ class X64DagOp(DagOp):
 class X64DagOps(Enum):
     SUB = X64DagOp("sub")
     CMP = X64DagOp("cmp")
+    FCMP = X64DagOp("fcmp")
+    COMI = X64DagOp("comi")
+    UCOMI = X64DagOp("ucomi")
     SETCC = X64DagOp("setcc")
     BRCOND = X64DagOp("brcond")
 
@@ -735,6 +740,8 @@ class X64DagOps(Enum):
 x64brcond_ = NodePatternMatcherGen(X64DagOps.BRCOND)
 x64sub_ = NodePatternMatcherGen(X64DagOps.SUB)
 x64cmp_ = NodePatternMatcherGen(X64DagOps.CMP)
+x64comi_ = NodePatternMatcherGen(X64DagOps.COMI)
+x64ucomi_ = NodePatternMatcherGen(X64DagOps.UCOMI)
 x64setcc_ = NodePatternMatcherGen(X64DagOps.SETCC)
 x64movss_ = NodePatternMatcherGen(X64DagOps.MOVSS)
 x64shufp_ = NodePatternMatcherGen(X64DagOps.SHUFP)
@@ -1968,13 +1975,35 @@ class X64MachineOps:
         is_compare=True
     )
 
+    # comiss
+    COMISSrr = def_inst(
+        "comiss_rr",
+        outs=[],
+        ins=[("src1", FR32), ("src2", FR32)],
+        defs=[EFLAGS],
+        patterns=[set_(EFLAGS, x64comi_(
+            ("src1", FR32), ("src2", FR32)))],
+        is_compare=True
+    )
+
+    # comisd
+    COMISDrr = def_inst(
+        "comisd_rr",
+        outs=[],
+        ins=[("src1", FR64), ("src2", FR64)],
+        defs=[EFLAGS],
+        patterns=[set_(EFLAGS, x64comi_(
+            ("src1", FR64), ("src2", FR64)))],
+        is_compare=True
+    )
+
     # ucomiss
     UCOMISSrr = def_inst(
         "ucomiss_rr",
         outs=[],
         ins=[("src1", FR32), ("src2", FR32)],
         defs=[EFLAGS],
-        patterns=[set_(EFLAGS, x64cmp_(
+        patterns=[set_(EFLAGS, x64ucomi_(
             ("src1", FR32), ("src2", FR32)))],
         is_compare=True
     )
@@ -1985,7 +2014,7 @@ class X64MachineOps:
         outs=[],
         ins=[("src1", FR64), ("src2", FR64)],
         defs=[EFLAGS],
-        patterns=[set_(EFLAGS, x64cmp_(
+        patterns=[set_(EFLAGS, x64ucomi_(
             ("src1", FR64), ("src2", FR64)))],
         is_compare=True
     )

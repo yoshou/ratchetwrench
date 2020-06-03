@@ -1898,6 +1898,8 @@ def parse_declaration_specifiers(tokens, pos, ctx):
                     decl_spec.storage_class_spec = spec
             elif isinstance(spec, TypeQualifier):
                 decl_spec.type_quals |= spec
+            elif spec == "__declspec":
+                pass
             else:
                 raise NotImplementedError()
 

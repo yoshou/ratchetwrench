@@ -133,7 +133,7 @@ class SimpleCompiler:
         pass_manager = PassManager()
 
         module.mfuncs = {}
-        for func in module.funcs:
+        for func in module.funcs.values():
             target_info = self.target_machine.get_target_info(func)
             module.mfuncs[func] = MachineFunction(target_info, func)
 

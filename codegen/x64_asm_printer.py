@@ -15,7 +15,7 @@ import io
 
 def get_bb_symbol(bb: BasicBlock, ctx: MCContext):
     bb_num = bb.number
-    func_num = bb.func.func_info.func.module.funcs.index(
+    func_num = list(bb.func.func_info.func.module.funcs.values()).index(
         bb.func.func_info.func)
     prefix = ".LBB"
     return ctx.get_or_create_symbol(f"{prefix}{str(func_num)}_{str(bb_num)}")
@@ -670,10 +670,10 @@ class X64AsmPrinter(AsmPrinter):
             self.stream.emit_symbol_attrib(symbol, attr)
 
     def finalize(self):
-        for variable in self.module.global_variables:
+        for variable in self.module.globals.values():
             self.emit_global_variable(variable)
 
-        for func in self.module.funcs:
+        for func in self.module.funcs.values():
             if not func.is_declaration:
                 continue
 
@@ -1845,6 +1845,16 @@ class X64CodeEmitter(MCCodeEmitter):
 
             if inst.opcode == X64MachineOps.DIV64r:
                 tsflags |= X64TSFlags.REX_W
+        elif inst.opcode in [X64MachineOps.COMISSrr, X64MachineOps.COMISDrr]:
+            base_opcode = 0x2F
+            form = X64InstForm.MRMSrcReg
+
+            if inst.opcode == X64MachineOps.COMISSrr:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.PS)
+            elif inst.opcode == X64MachineOps.COMISDrr:
+                tsflags |= (X64TSFlags.TB | X64TSFlags.PD)
+            else:
+                raise ValueError()
         elif inst.opcode in [X64MachineOps.UCOMISSrr, X64MachineOps.UCOMISDrr]:
             base_opcode = 0x2E
             form = X64InstForm.MRMSrcReg

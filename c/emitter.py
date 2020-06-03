@@ -214,8 +214,14 @@ def evaluate_constant_expr(ctx, expr):
 
     if isinstance(expr, TypedCastExpr):
         ty = ctx.get_ir_type(expr.type)
-        result = cast(None, evaluate_constant_expr(ctx, expr.expr),
-                      ty, is_signed_type(expr.expr.type), ctx)
+
+        result = evaluate_constant_expr(ctx, expr.expr)
+        if ty != result.ty:
+            if isinstance(result.ty, ArrayType):
+                pass
+            else:
+                result = cast(None, result,
+                              ty, is_signed_type(expr.expr.type), ctx)
 
         if isinstance(result, SExtInst):
             src_size = ctx.module.data_layout.get_type_alloc_size(result.rs.ty)
@@ -246,7 +252,7 @@ def evaluate_constant_expr(ctx, expr):
             assert(src_size == dst_size)
 
             return result
-        elif isinstance(result, ConstantInt):
+        elif isinstance(result, Constant):
             return result
 
     raise NotImplementedError()
@@ -647,12 +653,10 @@ def get_lvalue(node, block, ctx):
         block, ptr = get_lvalue(node.arr, block, ctx)
         if isinstance(ptr.ty.elem_ty, ArrayType):
             block, idx = build_ir_expr(node.idx, block, ctx)
-            assert(idx.ty == i64)
             inst = GetElementPtrInst(
                 block, ptr, ptr.ty, ConstantInt(0, idx.ty), idx)
         elif isinstance(ptr.ty, PointerType):
             block, idx = build_ir_expr(node.idx, block, ctx)
-            assert(idx.ty == i64)
             ptr = LoadInst(block, ptr)
             inst = GetElementPtrInst(
                 block, ptr, ptr.ty, idx)
@@ -731,14 +735,14 @@ def get_lvalue(node, block, ctx):
                 ctx.get_ir_type(node.type), 0))
             return block, mem
 
-    # if isinstance(node, (TypedBinaryOp, TypedFunctionCall, IntegerConstantExpr)):
-    #     alloca_insert_pt = get_alloca_insert_pt(ctx)
+    if isinstance(node, (TypedBinaryOp, TypedFunctionCall, IntegerConstantExpr)):
+        alloca_insert_pt = get_alloca_insert_pt(ctx)
 
-    #     block, rhs = build_ir_expr(node, block, ctx)
-    #     mem = alloca_insert_pt = AllocaInst(
-    #         alloca_insert_pt, ConstantInt(1, i32), rhs.ty, 0)
-    #     StoreInst(block, rhs, mem)
-    #     return block, mem
+        block, rhs = build_ir_expr(node, block, ctx)
+        mem = alloca_insert_pt = AllocaInst(
+            alloca_insert_pt, ConstantInt(1, i32), rhs.ty, 0)
+        StoreInst(block, rhs, mem)
+        return block, mem
 
     print(node)
     raise Exception("Unreachable")
@@ -746,7 +750,7 @@ def get_lvalue(node, block, ctx):
 
 def build_ir_assign_op_init_list(lhs_node, rhs_lst, block, ctx):
     if isinstance(get_type_of(lhs_node), ast.types.CompositeType):
-        lhs_node_ty = lhs_node.type
+        lhs_node_ty = get_type_of(lhs_node)
         if lhs_node_ty.is_union:
             lhs_node_ty, _, _ = lhs_node_ty.fields[0]
 
@@ -1733,6 +1737,9 @@ def build_ir_expr(node, block, ctx):
             return block, BitCastInst(block, val, result_ty)
 
         block, value = build_ir_expr(node.expr, block, ctx)
+        if isinstance(node.expr, TypedInitializerList):
+            return block, value
+
         return block, cast(block, value, result_ty, is_signed_type(node.expr.type), ctx)
 
     print(node)
@@ -3016,7 +3023,7 @@ def emit_ir(ast, abi, module):
             ctx.funcs[func_decl.name] = func
             ctx.global_named_values[func_decl] = func
 
-            no_common = True
+            no_common = False
 
             if not no_common and decl.proto.specs.func_spec_inline:
                 comdat = module.add_comdat(func_name, ComdatKind.Any)

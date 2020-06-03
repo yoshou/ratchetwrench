@@ -954,10 +954,21 @@ class X64InstructionSelector(InstructionSelector):
                 r_node = DagValue(dag.add_node(VirtualDagOps.COPY_FROM_REG, [hi_reg.ty],
                                                dag.entry, hi_reg, divrem_node), 0)
             else:
-                zero_value = DagValue(dag.add_target_constant_node(
-                    MachineValueType(ValueType.I32), 0), 0)
+                zero_value = DagValue(dag.add_target_constant_node(ty, 0), 0)
+
+                if ty == MachineValueType(ValueType.I8):
+                    mov_ri_opcode = X64MachineOps.MOV8ri
+                elif ty == MachineValueType(ValueType.I16):
+                    mov_ri_opcode = X64MachineOps.MOV16ri
+                elif ty == MachineValueType(ValueType.I32):
+                    mov_ri_opcode = X64MachineOps.MOV32ri
+                elif ty == MachineValueType(ValueType.I64):
+                    mov_ri_opcode = X64MachineOps.MOV64ri
+                else:
+                    raise NotImplementedError()
+
                 zero_value = DagValue(
-                    dag.add_machine_dag_node(X64MachineOps.MOV32ri, [MachineValueType(ValueType.I32)], zero_value), 0)
+                    dag.add_machine_dag_node(mov_ri_opcode, [ty], zero_value), 0)
 
                 copy_to_lo_node = DagValue(dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)],
                                                         dag.entry, lo_reg, op1), 1)
@@ -1826,6 +1837,9 @@ class X64TargetInstInfo(TargetInstInfo):
         assert(isinstance(src_reg, MachineRegister))
         assert(isinstance(dst_reg, MachineRegister))
 
+        def is_hreg(reg):
+            return reg in [AH, BH, CH, DH]
+
         opcode = None
         if src_reg.spec in GR64.regs and dst_reg.spec in GR64.regs:
             opcode = X64MachineOps.MOV64rr
@@ -1834,7 +1848,10 @@ class X64TargetInstInfo(TargetInstInfo):
         elif src_reg.spec in GR16.regs and dst_reg.spec in GR16.regs:
             opcode = X64MachineOps.MOV16rr
         elif src_reg.spec in GR8.regs and dst_reg.spec in GR8.regs:
-            opcode = X64MachineOps.MOV8rr
+            if is_hreg(src_reg.spec) or is_hreg(dst_reg.spec):
+                opcode = X64MachineOps.MOV8rr
+            else:
+                opcode = X64MachineOps.MOV8rr
         elif src_reg.spec in VR128.regs and dst_reg.spec in VR128.regs:
             opcode = X64MachineOps.MOVAPSrr
         elif src_reg.spec in FR64.regs and dst_reg.spec in FR64.regs:
@@ -2186,17 +2203,17 @@ class X64TargetLowering(TargetLowering):
             swap = False
             cond = cond.node.cond
 
-            if is_fcmp:
-                if cond in [CondCode.SETOLT, CondCode.SETOLE, CondCode.SETUGT, CondCode.SETUGE]:
-                    swap = True
-                    if cond == CondCode.SETOLT:
-                        cond = CondCode.SETUGE
-                    elif cond == CondCode.SETOLE:
-                        cond = CondCode.SETUGT
-                    elif cond == CondCode.SETUGT:
-                        cond = CondCode.SETOLE
-                    elif cond == CondCode.SETUGE:
-                        cond = CondCode.SETOLT
+            # if is_fcmp:
+            #     if cond in [CondCode.SETOLT, CondCode.SETOLE, CondCode.SETUGT, CondCode.SETUGE]:
+            #         swap = True
+            #         if cond == CondCode.SETOLT:
+            #             cond = CondCode.SETUGE
+            #         elif cond == CondCode.SETOLE:
+            #             cond = CondCode.SETUGT
+            #         elif cond == CondCode.SETUGT:
+            #             cond = CondCode.SETOLE
+            #         elif cond == CondCode.SETUGE:
+            #             cond = CondCode.SETOLT
 
             if cond == CondCode.SETEQ:
                 node = dag.add_target_constant_node(ty, 4)
@@ -2228,7 +2245,10 @@ class X64TargetLowering(TargetLowering):
             op1, op2 = op2, op1
 
         if is_fcmp:
-            op = X64DagOps.CMP
+            if cond in [CondCode.SETULT, CondCode.SETUGT, CondCode.SETULE, CondCode.SETUGE]:
+                op = X64DagOps.UCOMI
+            else:
+                op = X64DagOps.COMI
             cmp_node = DagValue(dag.add_node(op,
                                              [MachineValueType(ValueType.I32), MachineValueType(ValueType.GLUE)], op1, op2), 0)
         else:
@@ -2258,10 +2278,10 @@ class X64TargetLowering(TargetLowering):
                 cond = DagValue(dag.add_node(VirtualDagOps.ZERO_EXTEND, [
                                 MachineValueType(ValueType.I32)], cond), 0)
 
-            one = DagValue(dag.add_constant_node(cond.ty, 1), 0)
-            condcode = DagValue(dag.add_condition_code_node(CondCode.SETEQ), 0)
+            zero = DagValue(dag.add_constant_node(cond.ty, 0), 0)
+            condcode = DagValue(dag.add_condition_code_node(CondCode.SETNE), 0)
             cond = DagValue(dag.add_node(VirtualDagOps.SETCC, [
-                            MachineValueType(ValueType.I1)], cond, one, condcode), 0)
+                            MachineValueType(ValueType.I1)], cond, zero, condcode), 0)
             cond = DagValue(self.lower_setcc(cond.node, dag), 0)
 
             condcode = cond.node.operands[0]
@@ -3052,16 +3072,20 @@ class X64Legalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
-    def promote_integer_result_setcc(self, node, dag, legalized):
-        setcc_ty = MachineValueType(ValueType.I8)
-
-        return dag.add_node(node.opcode, [setcc_ty], *node.operands)
-
     def get_legalized_op(self, operand, legalized):
         if operand.node in legalized:
             return DagValue(legalized[operand.node], operand.index)
 
         return operand
+
+    def promote_integer_result_setcc(self, node, dag, legalized):
+        lhs = self.get_legalized_op(node.operands[0], legalized)
+        rhs = self.get_legalized_op(node.operands[1], legalized)
+        cond = node.operands[2]
+
+        setcc_ty = MachineValueType(ValueType.I8)
+
+        return dag.add_node(node.opcode, [setcc_ty], lhs, rhs, cond)
 
     def promote_integer_result_bin(self, node, dag, legalized):
         lhs = self.get_legalized_op(node.operands[0], legalized)

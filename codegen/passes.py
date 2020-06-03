@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+
 class Pass:
     def __init__(self):
         pass
@@ -20,11 +21,10 @@ class Pass:
         self.initialize()
 
         funcs = module.funcs
-        for func in funcs:
+        for func in funcs.values():
             self.process_function(func)
 
         self.finalize()
-
 
 
 class FunctionPass(Pass):
@@ -51,6 +51,7 @@ class MachineFunctionPass(FunctionPass):
         mfunc = self.module.mfuncs[func]
         self.process_machine_function(mfunc)
 
+
 class PassManager:
     def __init__(self):
         self.passes = []
@@ -58,4 +59,3 @@ class PassManager:
     def run(self, ir):
         for p in self.passes:
             p.process_module(ir)
-

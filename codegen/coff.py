@@ -528,8 +528,8 @@ class WinCOFFObjectStream(MCObjectStream):
     def emit_int_value(self, value: int, size: int):
         order = 'little'
         fragment = self.get_or_create_data_fragment()
-        fragment.contents.extend(value.to_bytes(
-            size, byteorder=order, signed=True))
+        fragment.contents.extend((value & ((1 << (size * 8)) - 1)).to_bytes(
+            size, byteorder=order))
 
     def emit_zeros(self, size):
         fragment = self.get_or_create_data_fragment()
