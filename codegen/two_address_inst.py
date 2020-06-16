@@ -3,6 +3,7 @@
 
 from codegen.passes import *
 from codegen.mir import *
+from codegen.spec import *
 
 
 class TwoAddressInst(MachineFunctionPass):

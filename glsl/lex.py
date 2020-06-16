@@ -15,7 +15,8 @@ keywords = re.compile("^(" + "|".join(keywords_list) + ")$")
 integer_constant = re.compile(r'[-+]?([1-9]\d*|0)')
 hexadecimal_constant = re.compile(r'0[xX][0-9a-fA-F]+')
 
-floating_constant = re.compile(r'[-+]?[0-9]*\.[0-9]+([eE][-+]?[0-9]+)?')
+floating_constant = re.compile(
+    r'([-+]?[0-9]*\.[0-9]+(?:[eE][-+]?[0-9]+)?)((?:f|F|lf|LF)?)')
 
 comment = re.compile(
     r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
@@ -98,8 +99,9 @@ class IntegerConstant:
 
 
 class FloatingConstant:
-    def __init__(self, value, span):
+    def __init__(self, value, suffix, span):
         self.value = value
+        self.suffix = suffix
         self.span = span
 
     def __str__(self):
@@ -142,10 +144,11 @@ def peek_token(src, pos, cnt):
         span = Span(src, pos + result.span()[0], pos + result.span()[1])
         return (len(result.group()), Identifier(result.group(), span))
 
-    result = re.match(floating_constant, string)
+    result = floating_constant.match(src, pos)
     if result:
+        value, suffix = result.groups()
         span = Span(src, pos + result.span()[0], pos + result.span()[1])
-        return (len(result.group()), FloatingConstant(result.group(), span))
+        return (len(result.group()), FloatingConstant(value, suffix, span))
 
     result = re.match(hexadecimal_constant, string)
     if result:

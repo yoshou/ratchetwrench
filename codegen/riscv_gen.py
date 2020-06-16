@@ -142,7 +142,6 @@ class RISCVInstructionSelector(InstructionSelector):
             VirtualDagOps.CALLSEQ_START: self.select_callseq_start,
             VirtualDagOps.CALLSEQ_END: self.select_callseq_end,
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
-            # RISCVDagOps.CALL: self.select_call,
         }
 
         if isinstance(node, MachineDagNode):
@@ -170,8 +169,6 @@ class RISCVInstructionSelector(InstructionSelector):
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == VirtualDagOps.TOKEN_FACTOR:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
-        elif node.opcode == RISCVDagOps.WRAPPER_PIC:
-            return self.lower_wrapper_rip(node, dag)
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
@@ -179,6 +176,8 @@ class RISCVInstructionSelector(InstructionSelector):
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_TLS_ADDRESS:
             return node
         elif node.opcode == VirtualDagOps.TARGET_EXTERNAL_SYMBOL:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_FRAME_INDEX:
             return node
         elif node.opcode in SELECT_TABLE:
             select_func = SELECT_TABLE[node.opcode]
@@ -441,7 +440,7 @@ class RISCVCallingConv(CallingConv):
                         arg_mem_val = DagValue(
                             dag.add_frame_index_node(arg_mem_frame_idx), 0)
 
-                        chain = DagValue(g.add_store_node(
+                        chain = DagValue(dag.add_store_node(
                             chain, arg_mem_val, copy_val), 0)
 
                         copy_val = arg_mem_val
@@ -946,92 +945,6 @@ def get_super_regs(reg):
 
     return supers
 
-
-def get_sub_regs(reg):
-    regs = MachineRegisterDef.regs
-
-    stk = list(reg.subregs)
-    subregs = set()
-    while len(stk) > 0:
-        poped = stk.pop()
-
-        if poped in subregs:
-            continue
-
-        subregs.add(poped)
-
-        for subreg in poped.subregs:
-            stk.append(subreg)
-
-    return subregs
-
-
-def count_if(values, pred):
-    return len([v for v in values if pred(v)])
-
-
-def find_if(values, pred):
-    for i, v in enumerate(values):
-        if pred(v):
-            return i
-
-    return -1
-
-
-RISCVCC_EQ = 0b0000  # Equal                      Equal
-RISCVCC_NE = 0b0001  # Not equal                  Not equal, or unordered
-RISCVCC_HS = 0b0010  # Carry set                  >, ==, or unordered
-RISCVCC_LO = 0b0011  # Carry clear                Less than
-RISCVCC_MI = 0b0100  # Minus, negative            Less than
-RISCVCC_PL = 0b0101  # Plus, positive or zero     >, ==, or unordered
-RISCVCC_VS = 0b0110  # Overflow                   Unordered
-RISCVCC_VC = 0b0111  # No overflow                Not unordered
-RISCVCC_HI = 0b1000  # Unsigned higher            Greater than, or unordered
-RISCVCC_LS = 0b1001  # Unsigned lower or same     Less than or equal
-RISCVCC_GE = 0b1010  # Greater than or equal      Greater than or equal
-RISCVCC_LT = 0b1011  # Less than                  Less than, or unordered
-RISCVCC_GT = 0b1100  # Greater than               Greater than
-RISCVCC_LE = 0b1101  # Less than or equal         <, ==, or unordered
-RISCVCC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
-
-
-class RISCVConstantPoolKind(Enum):
-    Value = auto()
-    ExtSymbol = auto()
-    BlockAddress = auto()
-    BasicBlock = auto()
-
-
-class RISCVConstantPoolModifier(Enum):
-    Non = auto()
-    TLSGlobalDesc = auto()
-
-
-class RISCVConstantPoolConstant(MachineConstantPoolValue):
-    def __init__(self, ty, label_id, value, kind, modifier, pc_offset, relative):
-        super().__init__(ty)
-        self.label_id = label_id
-        self.value = value
-        self.kind = kind
-        self.modifier = modifier
-        self.pc_offset = pc_offset
-        self.relative = relative
-
-    def __hash__(self):
-        return hash((self.value, self.kind, self.modifier, self.pc_offset, self.relative))
-
-    def __eq__(self, other):
-        if not isinstance(other, RISCVConstantPoolConstant):
-            return False
-
-        eq1 = self.value == other.value and self.kind == other.kind and self.modifier == other.modifier
-
-        return eq1 and self.pc_offset == other.pc_offset and self.relative == other.relative
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
-
 class RISCVTargetLowering(TargetLowering):
     def __init__(self, target_machine):
         super().__init__()
@@ -1163,97 +1076,6 @@ class RISCVTargetLowering(TargetLowering):
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
 
-    def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
-        assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
-        vec = node.operands[0]
-        elem = node.operands[1]
-        idx = node.operands[2]
-
-        if isinstance(idx.node, ConstantDagNode):
-            if node.value_types[0].value_type == ValueType.V4F32:
-                if elem.ty in SPR.tys:
-                    return dag.add_machine_dag_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, idx)
-
-        raise ValueError()
-
-    def get_scalar_value_for_vec_elem(self, vec, idx, dag: Dag):
-        if vec.node.opcode == VirtualDagOps.SCALAR_TO_VECTOR and idx == 0:
-            scalar_val = vec.node.operands[idx]
-            return scalar_val
-
-        raise ValueError()
-
-    def lower_shuffle_as_elem_insertion(self, vt, vec1, vec2, mask, dag: Dag):
-        vec2_idx = find_if(mask, lambda m: m >= len(mask))
-
-        elem_vt = vt.get_vector_elem_type()
-        assert(elem_vt.value_type == ValueType.F32)
-
-        vec2_elem = self.get_scalar_value_for_vec_elem(vec2, vec2_idx, dag)
-
-        vec2 = DagValue(dag.add_node(
-            VirtualDagOps.SCALAR_TO_VECTOR, [vt], vec2_elem), 0)
-
-        if elem_vt.value_type == ValueType.F32:
-            opcode = RISCVDagOps.MOVSS
-        else:
-            opcode = RISCVDagOps.MOVSD
-
-        return dag.add_node(opcode, [vt], vec1, vec2)
-
-    def lower_shuffle_shufps(self, vt, vec1, vec2, mask, dag: Dag):
-        assert(len(mask) == 4)
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        new_mask = list(mask)
-        lo_vec, hi_vec = vec1, vec2
-
-        if num_vec2_elems == 1:
-            vec2_idx = find_if(mask, lambda m: m >= 4)
-
-            # Each element of the vector is divided into groups of two elements.
-            # If the index is odd, the index of the other element is even.
-            vec2_idx_adj = vec2_idx ^ 1
-
-            # Merge the vectors.
-            blend_mask = [mask[vec2_idx] - 4, 0, mask[vec2_idx_adj], 0]
-            vec2 = DagValue(dag.add_node(RISCVDagOps.SHUFP, [
-                            vt], vec2, vec1, self.get_x86_shuffle_mask_v4(blend_mask, dag)), 0)
-
-            if vec2_idx < 2:
-                lo_vec = vec2
-                hi_vec = vec1
-            else:
-                lo_vec = vec1
-                hi_vec = vec2
-
-            new_mask[vec2_idx] = 0
-            new_mask[vec2_idx_adj] = 2
-        elif num_vec2_elems == 2:
-            raise NotImplementedError()
-
-        return dag.add_node(RISCVDagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
-
-    def lower_v4f32_shuffle(self, node: DagNode, dag: Dag):
-        vec1 = node.operands[0]
-        vec2 = node.operands[1]
-        mask = node.mask
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        if num_vec2_elems == 1 and mask[0] >= 4:
-            return self.lower_shuffle_as_elem_insertion(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-        return self.lower_shuffle_shufps(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-    def lower_shuffle_vector(self, node: DagNode, dag: Dag):
-        if node.value_types[0] == MachineValueType(ValueType.V4F32):
-            return self.lower_v4f32_shuffle(node, dag)
-
-        raise ValueError()
-
-    def lower_sub(self, node: DagNode, dag: Dag):
-        return dag.add_node(RISCVDagOps.SUB, node.value_types, *node.operands)
-
     def lower_bitcast(self, node: DagNode, dag: Dag):
         if node.operands[0].ty in QPR.tys:
             if node.value_types[0] in QPR.tys:
@@ -1274,10 +1096,6 @@ class RISCVTargetLowering(TargetLowering):
             return self.lower_constant_pool(node, dag)
         elif node.opcode == VirtualDagOps.BUILD_VECTOR:
             return self.lower_build_vector(node, dag)
-        elif node.opcode == VirtualDagOps.SHUFFLE_VECTOR:
-            return self.lower_shuffle_vector(node, dag)
-        # elif node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
-        #     return self.lower_insert_vector_elt(node, dag)
         elif node.opcode == VirtualDagOps.BITCAST:
             return self.lower_bitcast(node, dag)
         elif node.opcode == VirtualDagOps.GLOBAL_TLS_ADDRESS:

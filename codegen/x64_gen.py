@@ -320,341 +320,8 @@ class X64InstructionSelector(InstructionSelector):
             assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
 
             return (base, scale, index, disp, segment)
-        # else:
-        #     base = operand
-        #     scale = DagValue(dag.add_target_constant_node(
-        #         MVT(ValueType.I8), 1), 0)
-        #     index = DagValue(dag.add_register_node(
-        #         MVT(ValueType.I32), noreg), 0)
-        #     disp = DagValue(dag.add_target_constant_node(
-        #         MVT(ValueType.I32), 0), 0)
-        #     segment = DagValue(dag.add_register_node(
-        #         MVT(ValueType.I16), noreg), 0)
-
-        #     assert(base.node.opcode != X64DagOps.WRAPPER_RIP)
-
-        #     return (base, scale, index, disp, segment)
 
         raise ValueError()
-
-    def select_load(self, node: DagNode, dag: Dag, new_ops):
-        chain = new_ops[0]
-        src = new_ops[1]
-
-        base, scale, index, disp, segment = self.get_memory_operands(dag, src)
-
-        if node.mem_operand:
-            if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
-                segment = DagValue(dag.add_register_node(
-                    MVT(ValueType.I16), MachineRegister(GS)), 0)
-
-        ops = [base, scale, index, disp, segment, chain]
-
-        if node.value_types[0] == MachineValueType(ValueType.I64):
-            operand = X64MachineOps.MOV64rm
-        elif node.value_types[0] == MachineValueType(ValueType.I32):
-            operand = X64MachineOps.MOV32rm
-        elif node.value_types[0] == MachineValueType(ValueType.F64):
-            operand = X64MachineOps.MOVSDrm
-        elif node.value_types[0] == MachineValueType(ValueType.F32):
-            operand = X64MachineOps.MOVSSrm
-        elif node.value_types[0] == MachineValueType(ValueType.V4F32):
-            operand = X64MachineOps.MOVAPSrm
-        else:
-            raise ValueError()
-
-        return dag.add_machine_dag_node(operand, node.value_types, *ops)
-
-    def select_store(self, node: DagNode, dag: Dag, new_ops):
-        assert(node.operands[0].ty.value_type == ValueType.OTHER)
-
-        chain = new_ops[0]
-        src = new_ops[1]
-        dst = new_ops[2]
-
-        base, scale, index, disp, segment = self.get_memory_operands(dag, dst)
-
-        if isinstance(src.node, ConstantDagNode):
-            ops = [base, scale, index, disp, segment, src, chain]
-            return dag.add_machine_dag_node(X64MachineOps.MOV32mi, node.value_types, *ops)
-        elif src.node.opcode in [VirtualDagOps.TARGET_FRAME_INDEX, VirtualDagOps.FRAME_INDEX]:
-            lea_ops = self.get_memory_operands(dag, src)
-
-            if src.ty == MachineValueType(ValueType.I64):
-                lea_operand = X64MachineOps.LEA64r
-            elif src.ty == MachineValueType(ValueType.I32):
-                lea_operand = X64MachineOps.LEA32r
-            else:
-                raise ValueError()
-            src = DagValue(dag.add_machine_dag_node(
-                lea_operand, [src.ty], *lea_ops), 0)
-            ops = [base, scale, index, disp, segment, src, chain]
-
-            if src.ty == MachineValueType(ValueType.I64):
-                operand = X64MachineOps.MOV64mr
-            elif src.ty == MachineValueType(ValueType.I32):
-                operand = X64MachineOps.MOV32mr
-            else:
-                raise ValueError()
-            return dag.add_machine_dag_node(operand, node.value_types, *ops)
-        elif isinstance(src.node, DagNode):
-            ops = [base, scale, index, disp, segment, src, chain]
-
-            if src.ty == MachineValueType(ValueType.I64):
-                operand = X64MachineOps.MOV64mr
-            elif src.ty == MachineValueType(ValueType.I32):
-                operand = X64MachineOps.MOV32mr
-            elif src.ty == MachineValueType(ValueType.F64):
-                operand = X64MachineOps.MOVSDmr
-            elif src.ty == MachineValueType(ValueType.F32):
-                operand = X64MachineOps.MOVSSmr
-            elif src.ty == MachineValueType(ValueType.V4F32):
-                operand = X64MachineOps.MOVAPSmr
-            else:
-                raise ValueError()
-            return dag.add_machine_dag_node(operand, node.value_types, *ops)
-
-    def select_add(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            noreg = MachineRegister(NOREG)
-
-            MVT = MachineValueType
-
-            base = op1
-            scale = DagValue(dag.add_target_constant_node(
-                MVT(ValueType.I8), 1), 0)
-            index = DagValue(dag.add_register_node(
-                MVT(ValueType.I32), noreg), 0)
-            disp = op2
-            segment = DagValue(dag.add_register_node(
-                MVT(ValueType.I16), noreg), 0)
-
-            ops = [base, scale, index, disp, segment]
-
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.LEA32r
-            elif node.value_types[0] == MachineValueType(ValueType.I64):
-                opcode = X64MachineOps.LEA64r
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, *ops)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.ADD32ri
-            elif node.value_types[0] == MachineValueType(ValueType.I64):
-                opcode = X64MachineOps.ADD64ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.ADD32rr
-            elif node.value_types[0] == MachineValueType(ValueType.I64):
-                opcode = X64MachineOps.ADD64rr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_add")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_fadd(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                imm_val = DagValue(dag.add_target_constant_node(
-                    ValueType.F32, op2.node.value), 0)
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                imm_val = DagValue(dag.add_target_constant_node(
-                    ValueType.F64, op2.node.value), 0)
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                opcode = X64MachineOps.ADDSSrr
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                opcode = X64MachineOps.ADDSDrr
-            elif node.value_types[0] == MachineValueType(ValueType.V4F32):
-                opcode = X64MachineOps.ADDPSrr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_add")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_fsub(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                imm_val = DagValue(dag.add_target_constant_node(
-                    ValueType.F32, op2.node.value), 0)
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                imm_val = DagValue(dag.add_target_constant_node(
-                    ValueType.F64, op2.node.value), 0)
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                opcode = X64MachineOps.SUBSSrr
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                opcode = X64MachineOps.SUBSDrr
-            elif node.value_types[0] == MachineValueType(ValueType.V4F32):
-                opcode = X64MachineOps.SUBPSrr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_add")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_sub(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32mi
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32rr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_sub")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_fmul(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                opcode = X64MachineOps.MULSSrr
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                opcode = X64MachineOps.MULSDrr
-            elif node.value_types[0] == MachineValueType(ValueType.V4F32):
-                opcode = X64MachineOps.MULPSrr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_add")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_fdiv(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.F32):
-                opcode = X64MachineOps.DIVSSrr
-            elif node.value_types[0] == MachineValueType(ValueType.F64):
-                opcode = X64MachineOps.DIVSDrr
-            elif node.value_types[0] == MachineValueType(ValueType.V4F32):
-                opcode = X64MachineOps.DIVPSrr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_add")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_and(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.AND32ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.AND32ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I8):
-                opcode = X64MachineOps.AND8rr
-            elif node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.AND32rr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_and")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_or(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            return dag.add_machine_dag_node(X64MachineOps.OR32ri, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            return dag.add_machine_dag_node(X64MachineOps.OR32ri, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(X64MachineOps.OR32rr, node.value_types, op1, op2)
-
-        print("select_or")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_xor(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            return dag.add_machine_dag_node(X64MachineOps.XOR32ri, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            return dag.add_machine_dag_node(X64MachineOps.XOR32ri, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(X64MachineOps.XOR32rr, node.value_types, op1, op2)
-
-        print("select_xor")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
 
     def select_srl(self, node: DagNode, dag: Dag, new_ops):
         op1 = new_ops[0]
@@ -749,41 +416,6 @@ class X64InstructionSelector(InstructionSelector):
         print([edge.node for edge in new_ops])
         raise NotImplementedError()
 
-    def select_br(self, node: DagNode, dag: Dag, new_ops):
-        chain = new_ops[0]
-        dest = new_ops[1]
-
-        return dag.add_machine_dag_node(X64MachineOps.JMP_1, node.value_types, dest, chain)
-
-    def select_brcond(self, node: DagNode, dag: Dag, new_ops):
-        chain = node.operands[0]
-        dest = node.operands[1]
-        condcode = node.operands[2]
-        cond = node.operands[3]
-
-        eflags = dag.add_target_register_node(
-            MachineValueType(ValueType.I32), EFLAGS)
-
-        copy_cc_node = dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER), MachineValueType(ValueType.GLUE)],
-                                    chain, DagValue(eflags, 0), cond)
-
-        return dag.add_machine_dag_node(X64MachineOps.JCC_1, node.value_types, dest, condcode, DagValue(copy_cc_node, 0), DagValue(copy_cc_node, 1))
-
-    def select_setcc(self, node: DagNode, dag: Dag, new_ops):
-        condcode = new_ops[0]
-        cond = new_ops[1]
-
-        if isinstance(cond.node, DagNode):
-            eflags = dag.add_target_register_node(
-                MachineValueType(ValueType.I32), EFLAGS)
-
-            copy_cc_node = dag.add_node(VirtualDagOps.COPY_TO_REG, [MachineValueType(ValueType.OTHER)],
-                                        dag.entry, DagValue(eflags, 0), cond)
-
-            return dag.add_machine_dag_node(X64MachineOps.SETCCr, node.value_types, condcode, DagValue(copy_cc_node, 0))
-
-        raise NotImplementedError()
-
     def select_bitcast(self, node: DagNode, dag: Dag, new_ops):
         src = new_ops[0]
 
@@ -852,35 +484,6 @@ class X64InstructionSelector(InstructionSelector):
         chain = new_ops[0]
         ops = new_ops[1:]
         return dag.add_machine_dag_node(X64MachineOps.RET, node.value_types, *ops, chain)
-
-    def select_x64_sub(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32mi
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32ri
-            elif node.value_types[0] == MachineValueType(ValueType.I8):
-                opcode = X64MachineOps.SUB8ri
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            if node.value_types[0] == MachineValueType(ValueType.I32):
-                opcode = X64MachineOps.SUB32rr
-            else:
-                raise NotImplementedError()
-            return dag.add_machine_dag_node(opcode, node.value_types, op1, op2)
-
-        print("select_x64_sub")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
 
     def select_divrem(self, node: DagNode, dag: Dag, new_ops):
         op1 = new_ops[0]
@@ -990,62 +593,6 @@ class X64InstructionSelector(InstructionSelector):
         print([edge.node for edge in new_ops])
         raise NotImplementedError()
 
-    def select_x64_cmp(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            ty = op1.ty
-            if ty == MachineValueType(ValueType.F32):
-                opcode = X64MachineOps.UCOMISSrr
-            elif ty == MachineValueType(ValueType.F64):
-                opcode = X64MachineOps.UCOMISDrr
-            else:
-                raise NotImplementedError()
-
-            return dag.add_machine_dag_node(opcode, [MachineValueType(ValueType.I32)], *new_ops)
-
-        print("select_x64_sub")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_x64_movss(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(X64MachineOps.MOVSSrr, node.value_types, *new_ops)
-
-        print("select_x64_movss")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
-    def select_x64_shufp(self, node: DagNode, dag: Dag, new_ops):
-        op1 = new_ops[0]
-        op2 = new_ops[1]
-        op3 = new_ops[2]
-
-        assert(isinstance(op3.node, ConstantDagNode))
-
-        if isinstance(op1.node, FrameIndexDagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, ConstantDagNode):
-            raise NotImplementedError()
-        elif isinstance(op1.node, DagNode) and isinstance(op2.node, DagNode):
-            return dag.add_machine_dag_node(X64MachineOps.SHUFPSrri, node.value_types, *new_ops)
-
-        print("select_x64_shufp")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
-
     def select_copy_from_reg(self, node: DagNode, dag: Dag, new_ops):
         return node
         # return dag.add_machine_dag_node(VirtualDagOps.COPY_FROM_REG, node.value_types, *new_ops)
@@ -1128,19 +675,6 @@ class X64InstructionSelector(InstructionSelector):
 
         return dag.add_machine_dag_node(operand, node.value_types, *ops)
 
-    def select_build_vector(self, node: DagNode, dag: Dag, new_ops):
-        for operand in node.operands:
-            assert(is_x86_zero(operand))
-
-        ops = []
-
-        if node.value_types[0] == MachineValueType(ValueType.V4F32):
-            operand = X64MachineOps.V_SET0
-        else:
-            raise ValueError()
-
-        return dag.add_machine_dag_node(operand, node.value_types, *ops)
-
     def select_scalar_to_vector(self, node: DagNode, dag: Dag, new_ops):
 
         in_type = node.operands[0].ty
@@ -1157,6 +691,9 @@ class X64InstructionSelector(InstructionSelector):
     def select(self, node: DagNode, dag: Dag):
         new_ops = node.operands
 
+        if isinstance(node.opcode, TargetDagOps):
+            return node
+
         matched = self.select_code(node, dag)
         if matched:
             return matched
@@ -1166,39 +703,19 @@ class X64InstructionSelector(InstructionSelector):
         SELECT_TABLE = {
             VirtualDagOps.COPY_FROM_REG: self.select_copy_from_reg,
             VirtualDagOps.COPY_TO_REG: self.select_copy_to_reg,
-            # VirtualDagOps.LOAD: self.select_load,
-            # VirtualDagOps.STORE: self.select_store,
-            # VirtualDagOps.ADD: self.select_add,
-            # VirtualDagOps.SUB: self.select_sub,
 
-            # VirtualDagOps.AND: self.select_and,
-            # VirtualDagOps.OR: self.select_or,
-            # VirtualDagOps.XOR: self.select_xor,
             VirtualDagOps.SRL: self.select_srl,
             VirtualDagOps.SHL: self.select_shl,
             VirtualDagOps.SRA: self.select_sra,
             VirtualDagOps.SDIVREM: self.select_divrem,
             VirtualDagOps.UDIVREM: self.select_divrem,
 
-            # VirtualDagOps.FADD: self.select_fadd,
-            # VirtualDagOps.FSUB: self.select_fsub,
-            # VirtualDagOps.FMUL: self.select_fmul,
-            # VirtualDagOps.FDIV: self.select_fdiv,
-
             VirtualDagOps.BITCAST: self.select_bitcast,
             VirtualDagOps.TRUNCATE: self.select_trunc,
-            # VirtualDagOps.BR: self.select_br,
             VirtualDagOps.CALLSEQ_START: self.select_callseq_start,
             VirtualDagOps.CALLSEQ_END: self.select_callseq_end,
-            # VirtualDagOps.BUILD_VECTOR: self.select_build_vector,
             VirtualDagOps.SCALAR_TO_VECTOR: self.select_scalar_to_vector,
-            # VirtualDagOps.CONSTANT: self.select_constant,
-            # X64DagOps.SUB: self.select_x64_sub,
-            # X64DagOps.CMP: self.select_x64_cmp,
-            # X64DagOps.MOVSS: self.select_x64_movss,
-            # X64DagOps.SHUFP: self.select_x64_shufp,
-            # X64DagOps.SETCC: self.select_setcc,
-            # X64DagOps.BRCOND: self.select_brcond,
+
             X64DagOps.CALL: self.select_call,
             X64DagOps.RETURN: self.select_return,
         }
@@ -1241,6 +758,8 @@ class X64InstructionSelector(InstructionSelector):
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT:
             return node
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_POOL:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_FRAME_INDEX:
             return node
         elif node.opcode == VirtualDagOps.TARGET_REGISTER:
             return node
@@ -2079,8 +1598,6 @@ def get_super_regs(reg):
 
 
 def get_sub_regs(reg):
-    regs = MachineRegisterDef.regs
-
     stk = list(reg.subregs)
     subregs = set()
     while len(stk) > 0:
@@ -3072,15 +2589,9 @@ class X64Legalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
-    def get_legalized_op(self, operand, legalized):
-        if operand.node in legalized:
-            return DagValue(legalized[operand.node], operand.index)
-
-        return operand
-
     def promote_integer_result_setcc(self, node, dag, legalized):
-        lhs = self.get_legalized_op(node.operands[0], legalized)
-        rhs = self.get_legalized_op(node.operands[1], legalized)
+        lhs = get_legalized_op(node.operands[0], legalized)
+        rhs = get_legalized_op(node.operands[1], legalized)
         cond = node.operands[2]
 
         setcc_ty = MachineValueType(ValueType.I8)
@@ -3088,8 +2599,8 @@ class X64Legalizer(Legalizer):
         return dag.add_node(node.opcode, [setcc_ty], lhs, rhs, cond)
 
     def promote_integer_result_bin(self, node, dag, legalized):
-        lhs = self.get_legalized_op(node.operands[0], legalized)
-        rhs = self.get_legalized_op(node.operands[1], legalized)
+        lhs = get_legalized_op(node.operands[0], legalized)
+        rhs = get_legalized_op(node.operands[1], legalized)
 
         assert(lhs.ty == rhs.ty)
 
@@ -3115,7 +2626,7 @@ class X64Legalizer(Legalizer):
             return self.promote_integer_result_truncate(node, dag, legalized)
         elif node.opcode in [VirtualDagOps.LOAD]:
             chain = node.operands[0]
-            ptr = self.get_legalized_op(node.operands[1], legalized)
+            ptr = get_legalized_op(node.operands[1], legalized)
             return dag.add_load_node(MachineValueType(ValueType.I8), chain, ptr, False, mem_operand=node.mem_operand)
         elif node.opcode == VirtualDagOps.CONSTANT:
             return self.promote_integer_result_constant(node, dag, legalized)
@@ -3131,13 +2642,13 @@ class X64Legalizer(Legalizer):
 
     def promote_integer_operand_brcond(self, node, dag: Dag, legalized):
         chain_op = node.operands[0]
-        cond_op = self.get_legalized_op(node.operands[1], legalized)
+        cond_op = get_legalized_op(node.operands[1], legalized)
         dst_op = node.operands[2]
 
         return dag.add_node(VirtualDagOps.BRCOND, node.value_types, chain_op, cond_op, dst_op)
 
     def promote_integer_operand_zext(self, node, dag: Dag, legalized):
-        src_op = self.get_legalized_op(node.operands[0], legalized)
+        src_op = get_legalized_op(node.operands[0], legalized)
 
         if src_op.ty == node.value_types[0]:
             return src_op.node
@@ -3145,7 +2656,7 @@ class X64Legalizer(Legalizer):
         return dag.add_node(VirtualDagOps.TRUNCATE, node.value_types, src_op)
 
     def promote_integer_operand_uint_to_fp(self, node, dag: Dag, legalized):
-        src_op = self.get_legalized_op(node.operands[0], legalized)
+        src_op = get_legalized_op(node.operands[0], legalized)
 
         if src_op.ty == MachineValueType(ValueType.I16):
             promoted_ty = MachineValueType(ValueType.I32)
@@ -3158,7 +2669,7 @@ class X64Legalizer(Legalizer):
         return dag.add_node(VirtualDagOps.UINT_TO_FP, node.value_types, promoted)
 
     def promote_integer_operand_sint_to_fp(self, node, dag: Dag, legalized):
-        src_op = self.get_legalized_op(node.operands[0], legalized)
+        src_op = get_legalized_op(node.operands[0], legalized)
 
         if src_op.ty == MachineValueType(ValueType.I16):
             promoted_ty = MachineValueType(ValueType.I32)
@@ -3184,7 +2695,7 @@ class X64Legalizer(Legalizer):
 
             if node.opcode == VirtualDagOps.STORE:
                 op_chain = node.operands[0]
-                op_val = self.get_legalized_op(node.operands[1], legalized)
+                op_val = get_legalized_op(node.operands[1], legalized)
                 op_ptr = node.operands[2]
                 return dag.add_store_node(op_chain, op_ptr, op_val, False, mem_operand=node.mem_operand)
 

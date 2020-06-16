@@ -2766,6 +2766,9 @@ class EABIABIInfo(ABIInfo):
         if isinstance(ty, ast.types.PrimitiveType):
             return ABIArgInfo(ABIArgKind.Direct)
 
+        if isinstance(ty, ast.types.PointerType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
         if isinstance(ty, ast.types.VectorType):
             ir_ty = ctx.get_ir_type(ty)
             if is_x86_mmx_type(ir_ty):

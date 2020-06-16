@@ -213,6 +213,9 @@ class ARMInstructionSelector(InstructionSelector):
             ARMDagOps.VDUP: self.select_vdup,
         }
 
+        if isinstance(node.opcode, TargetDagOps):
+            return node
+
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
         elif node.opcode == VirtualDagOps.UNDEF:
@@ -235,11 +238,11 @@ class ARMInstructionSelector(InstructionSelector):
             return dag.add_node(node.opcode, node.value_types, *new_ops)
         elif node.opcode == VirtualDagOps.TOKEN_FACTOR:
             return dag.add_node(node.opcode, node.value_types, *new_ops)
-        elif node.opcode == ARMDagOps.WRAPPER_PIC:
-            return self.lower_wrapper_rip(node, dag)
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_FRAME_INDEX:
             return node
         elif node.opcode in SELECT_TABLE:
             select_func = SELECT_TABLE[node.opcode]
@@ -501,7 +504,7 @@ class ARMCallingConv(CallingConv):
                 arg_mem_val = DagValue(
                     dag.add_frame_index_node(arg_mem_frame_idx), 0)
 
-                chain = DagValue(g.add_store_node(
+                chain = DagValue(dag.add_store_node(
                     chain, arg_mem_val, copy_val), 0)
 
                 copy_val = arg_mem_val
@@ -894,45 +897,9 @@ class ARMTargetInstInfo(TargetInstInfo):
         # Eliminate destination register.
         reginfo = func.reg_info
         if reginfo.is_use_empty(inst.operands[0].reg):
-
-            if inst.opcode == ARMMachineOps.SUB32ri:
-                inst.opcode = ARMMachineOps.CMP32ri
-            elif inst.opcode == ARMMachineOps.SUB32rm:
-                inst.opcode = ARMMachineOps.CMP32rm
-            elif inst.opcode == ARMMachineOps.SUB32rr:
-                inst.opcode = ARMMachineOps.CMP32rr
-            elif inst.opcode == ARMMachineOps.SUB8ri:
-                inst.opcode = ARMMachineOps.CMP8ri
-            else:
-                raise ValueError("Not supporting instruction.")
-
-            remove_op = inst.operands[0]
-            if remove_op.tied_to >= 0:
-                tied = inst.operands[remove_op.tied_to]
-                assert(tied.tied_to == 0)
-                tied.tied_to = -1
-
-            inst.remove_operand(0)
+            pass
 
     def expand_post_ra_pseudo(self, inst: MachineInstruction):
-        # if inst.opcode == ARMMachineOps.LDRLIT_ga_abs:
-        #     # Replace with 'LDR' from constant pool.
-        #     dst = inst.operands[0]
-        #     gv = inst.operands[1]
-        #     opc = ARMMachineOps.LDRi12
-
-        #     cp = inst.mbb.func.constant_pool
-        #     index = cp.get_or_create_index(gv.value, 4)
-
-        #     new_inst = MachineInstruction(opc)
-
-        #     new_inst.add_reg(dst.reg, RegState.Define)
-        #     new_inst.add_constant_pool_index(index)
-        #     new_inst.add_imm(0)
-
-        #     new_inst.insert_after(inst)
-        #     inst.remove()
-
         if inst.opcode == ARMMachineOps.MOVi32imm:
             dst = inst.operands[0]
             src = inst.operands[1]
@@ -1012,25 +979,6 @@ def get_super_regs(reg):
             stk.append(super_reg)
 
     return supers
-
-
-def get_sub_regs(reg):
-    regs = MachineRegisterDef.regs
-
-    stk = list(reg.subregs)
-    subregs = set()
-    while len(stk) > 0:
-        poped = stk.pop()
-
-        if poped in subregs:
-            continue
-
-        subregs.add(poped)
-
-        for subreg in poped.subregs:
-            stk.append(subreg)
-
-    return subregs
 
 
 def count_if(values, pred):
@@ -1320,115 +1268,6 @@ class ARMTargetLowering(TargetLowering):
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
 
-    def shuffle_param(self, fp3, fp2, fp1, fp0):
-        return (fp3 << 6) | (fp2 << 4) | (fp1 << 2) | fp0
-
-    def get_x86_shuffle_mask_v4(self, mask, dag):
-        mask_val = self.shuffle_param(mask[3], mask[2], mask[1], mask[0])
-        return DagValue(dag.add_target_constant_node(MachineValueType(ValueType.I8), mask_val), 0)
-
-    def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
-        assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
-        vec = node.operands[0]
-        elem = node.operands[1]
-        idx = node.operands[2]
-
-        if isinstance(idx.node, ConstantDagNode):
-            if node.value_types[0].value_type == ValueType.V4F32:
-                if elem.ty in SPR.tys:
-                    subreg_idx = idx.node.value.value
-                    if subreg_idx == 0:
-                        subreg = ssub_0
-                    elif subreg_idx == 1:
-                        subreg = ssub_1
-                    elif subreg_idx == 2:
-                        subreg = ssub_2
-                    elif subreg_idx == 3:
-                        subreg = ssub_3
-                    else:
-                        raise ValueError("Invalid index")
-
-                    subreg_id = DagValue(dag.add_target_constant_node(
-                        MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
-                    return dag.add_machine_dag_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, subreg_id)
-
-        raise ValueError()
-
-    def get_scalar_value_for_vec_elem(self, vec, idx, dag: Dag):
-        if vec.node.opcode == VirtualDagOps.SCALAR_TO_VECTOR and idx == 0:
-            scalar_val = vec.node.operands[idx]
-            return scalar_val
-
-        raise ValueError()
-
-    def lower_shuffle_as_elem_insertion(self, vt, vec1, vec2, mask, dag: Dag):
-        vec2_idx = find_if(mask, lambda m: m >= len(mask))
-
-        elem_vt = vt.get_vector_elem_type()
-        assert(elem_vt.value_type == ValueType.F32)
-
-        vec2_elem = self.get_scalar_value_for_vec_elem(vec2, vec2_idx, dag)
-
-        vec2 = DagValue(dag.add_node(
-            VirtualDagOps.SCALAR_TO_VECTOR, [vt], vec2_elem), 0)
-
-        if elem_vt.value_type == ValueType.F32:
-            opcode = ARMDagOps.MOVSS
-        else:
-            opcode = ARMDagOps.MOVSD
-
-        return dag.add_node(opcode, [vt], vec1, vec2)
-
-    def lower_shuffle_shufps(self, vt, vec1, vec2, mask, dag: Dag):
-        assert(len(mask) == 4)
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        new_mask = list(mask)
-        lo_vec, hi_vec = vec1, vec2
-
-        if num_vec2_elems == 1:
-            vec2_idx = find_if(mask, lambda m: m >= 4)
-
-            # Each element of the vector is divided into groups of two elements.
-            # If the index is odd, the index of the other element is even.
-            vec2_idx_adj = vec2_idx ^ 1
-
-            # Merge the vectors.
-            blend_mask = [mask[vec2_idx] - 4, 0, mask[vec2_idx_adj], 0]
-            vec2 = DagValue(dag.add_node(ARMDagOps.SHUFP, [
-                vt], vec2, vec1, self.get_x86_shuffle_mask_v4(blend_mask, dag)), 0)
-
-            if vec2_idx < 2:
-                lo_vec = vec2
-                hi_vec = vec1
-            else:
-                lo_vec = vec1
-                hi_vec = vec2
-
-            new_mask[vec2_idx] = 0
-            new_mask[vec2_idx_adj] = 2
-        elif num_vec2_elems == 2:
-            raise NotImplementedError()
-
-        return dag.add_node(ARMDagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
-
-    def lower_v4f32_shuffle(self, node: DagNode, dag: Dag):
-        vec1 = node.operands[0]
-        vec2 = node.operands[1]
-        mask = node.mask
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        if num_vec2_elems == 1 and mask[0] >= 4:
-            return self.lower_shuffle_as_elem_insertion(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-        return self.lower_shuffle_shufps(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-    def lower_shuffle_vector(self, node: DagNode, dag: Dag):
-        if node.value_types[0] == MachineValueType(ValueType.V4F32):
-            return self.lower_v4f32_shuffle(node, dag)
-
-        raise ValueError()
-
     def lower_sub(self, node: DagNode, dag: Dag):
         return dag.add_node(ARMDagOps.SUB, node.value_types, *node.operands)
 
@@ -1462,10 +1301,6 @@ class ARMTargetLowering(TargetLowering):
             return self.lower_constant_pool(node, dag)
         elif node.opcode == VirtualDagOps.BUILD_VECTOR:
             return self.lower_build_vector(node, dag)
-        elif node.opcode == VirtualDagOps.SHUFFLE_VECTOR:
-            return self.lower_shuffle_vector(node, dag)
-        # elif node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
-        #     return self.lower_insert_vector_elt(node, dag)
         elif node.opcode == VirtualDagOps.BITCAST:
             return self.lower_bitcast(node, dag)
         elif node.opcode == VirtualDagOps.GLOBAL_TLS_ADDRESS:

@@ -749,8 +749,8 @@ FLE_S = def_inst_node_(RISCVMachineOps.FLE_S)
 from codegen.dag import DagValue
 
 
-HI20 = def_node_xform_(I32Imm, lambda node, dag: DagValue(dag.add_target_constant_node(
-    node.value_types[0], ConstantInt(node.value.value >> 12, node.value.ty)), 0))
+HI20 = def_node_xform_(I32Imm, lambda value, dag: DagValue(dag.add_target_constant_node(
+    value.node.value_types[0], ConstantInt(value.node.value.value >> 12, value.node.value.ty)), 0))
 
 
 def get_bits_sext(value, bits):
@@ -765,8 +765,8 @@ def get_bits_sext(value, bits):
     return value
 
 
-LO12Sext = def_node_xform_(I32Imm, lambda node, dag: DagValue(dag.add_target_constant_node(
-    node.value_types[0], ConstantInt(get_bits_sext(node.value.value, 12), node.value.ty)), 0))
+LO12Sext = def_node_xform_(I32Imm, lambda value, dag: DagValue(dag.add_target_constant_node(
+    value.node.value_types[0], ConstantInt(get_bits_sext(value.node.value.value, 12), value.node.value.ty)), 0))
 
 
 riscv_patterns = []

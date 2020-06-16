@@ -16,7 +16,7 @@ from codegen.riscv_def import *
 
 def get_bb_symbol(bb: BasicBlock, ctx: MCContext):
     bb_num = bb.number
-    func_num = bb.func.func_info.func.module.funcs.index(
+    func_num = list(bb.func.func_info.func.module.funcs.values()).index(
         bb.func.func_info.func)
     prefix = f"{get_private_global_prefix()}BB"
     return ctx.get_or_create_symbol(f"{prefix}{str(func_num)}_{str(bb_num)}")
@@ -243,7 +243,7 @@ class RISCVAsmPrinter(AsmPrinter):
                     return sym
 
         func = self.mfunc.func_info.func
-        func_num = func.module.funcs.index(func)
+        func_num = list(func.module.funcs.values()).index(func)
         name = f"{get_private_global_prefix()}CPI{func_num}_{index}"
         return self.ctx.get_or_create_symbol(name)
 
@@ -405,10 +405,10 @@ class RISCVAsmPrinter(AsmPrinter):
             self.stream.emit_symbol_attrib(symbol, attr)
 
     def finalize(self):
-        for variable in self.module.global_variables:
+        for variable in self.module.globals.values():
             self.emit_global_variable(variable)
 
-        for func in self.module.funcs:
+        for func in self.module.funcs.values():
             if not func.is_declaration:
                 continue
 

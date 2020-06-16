@@ -140,7 +140,7 @@ class Context:
             params_ty.extend([self.get_ir_type(ast_param_ty)
                               for (ast_param_ty, _, _) in ast_ty.params])
 
-            return FunctionType(None, return_ty, params_ty)
+            return FunctionType(return_ty, params_ty)
 
         if isinstance(ast_ty, ast.types.VectorType):
             elem_ty = self.get_ir_type(ast_ty.elem_ty)
@@ -645,7 +645,8 @@ def build_ir_expr_func_call(node, block, ctx):
 
         params.append(val)
 
-    call_inst = CallInst(block, ctx.funcs[node.ident.name], params)
+    call_inst = CallInst(block, ctx.funcs[str(
+        node.ident.name)].func_ty, ctx.funcs[str(node.ident.name)], params)
 
     if func_info.return_info.kind == ABIArgKind.Indirect:
         value = LoadInst(block, return_mem)
@@ -975,7 +976,7 @@ else:
             lhs = BitCastInst(block, lhs, PointerType(i8, 0))
 
             memcpy = ctx.get_memcpy_func(lhs, rhs, size)
-            CallInst(block, memcpy, [lhs, rhs, ConstantInt(
+            CallInst(block, memcpy.func_ty, memcpy, [lhs, rhs, ConstantInt(
                 int(size / 8), i32), ConstantInt(int(align / 8), i32), ConstantInt(0, i1)])
 
             JumpInst(block, ctx.get_return_target())
@@ -1649,14 +1650,15 @@ def emit_ir(ast, abi, module):
 
                 thread_local = ThreadLocalMode.NotThreadLocal
 
-                global_named_values[ident.val] = module.add_global_variable(
-                    GlobalVariable(ty, False, linkage, ident.val.name, thread_local, init))
+                name = ident.val.name
+                global_named_values[ident.val] = module.add_global(name,
+                                                                   GlobalVariable(ty, False, linkage, name, thread_local, init))
 
         if isinstance(decl, TypedFunctionProto):
             func_ty = ctx.get_ir_type(decl.ident.ty)
             func_name = str(decl.ident.name)
             func = module.add_func(func_name,
-                                   Function(module, func_ty, func_name))
+                                   Function(module, func_ty, GlobalLinkage.Global, func_name))
             ctx.funcs[func_name] = func
 
             build_ir_func_header(decl, func, ctx)
@@ -1666,7 +1668,7 @@ def emit_ir(ast, abi, module):
             func_name = str(decl.proto.ident.name)
 
             func = module.add_func(func_name,
-                                   Function(module, func_ty, func_name))
+                                   Function(module, func_ty, GlobalLinkage.Global, func_name))
 
             ctx.begin_func(func)
 

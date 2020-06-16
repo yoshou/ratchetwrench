@@ -730,6 +730,10 @@ def parse_primary_expression(tokens, pos, ctx):
 
     if isinstance(tokens[pos], FloatingConstant):
         t = Type('float', None)
+        if tokens[pos].suffix in ["f", "F"]:
+            t = Type('float', None)
+        if tokens[pos].suffix in ["lf", "LF"]:
+            t = Type('double', None)
         val = float(str(tokens[pos]))
         return (pos + 1, FloatingConstantExpr(val, t))
 

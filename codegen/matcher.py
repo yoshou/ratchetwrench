@@ -35,6 +35,9 @@ class MatcherResult:
     @property
     def values_as_dict(self):
         dic = {val.name: val for val in self.sub_values if val.name}
+
+        for sub_value in self.sub_values:
+            dic.update(sub_value.values_as_dict)
         if self.name:
             dic[self.name] = self
         return dic
@@ -243,6 +246,8 @@ def create_matcher(matcher_or_tuple):
             raise ValueError()
     elif isinstance(matcher_or_tuple, MachineRegisterDef):
         return RegValueMatcher(matcher_or_tuple, matcher_or_tuple)
+    elif isinstance(matcher_or_tuple, int):
+        return ConstantValueMatcher(matcher_or_tuple, matcher_or_tuple)
     else:
         assert(isinstance(matcher_or_tuple, PatternMatcher))
         return matcher_or_tuple
@@ -334,6 +339,8 @@ setcc_ = NodePatternMatcherGen(VirtualDagOps.SETCC)
 bitconvert_ = NodePatternMatcherGen(VirtualDagOps.BITCAST)
 scalar_to_vector_ = NodePatternMatcherGen(VirtualDagOps.SCALAR_TO_VECTOR)
 build_vector_ = NodePatternMatcherGen(VirtualDagOps.BUILD_VECTOR)
+vector_insert_ = NodePatternMatcherGen(VirtualDagOps.INSERT_VECTOR_ELT)
+vector_extract_ = NodePatternMatcherGen(VirtualDagOps.EXTRACT_VECTOR_ELT)
 
 fp_to_sint_ = NodePatternMatcherGen(VirtualDagOps.FP_TO_SINT)
 fp_to_uint_ = NodePatternMatcherGen(VirtualDagOps.FP_TO_UINT)
@@ -417,28 +424,57 @@ tglobaltlsaddr_ = NodeOpcodePatternMatcher(
 
 
 class ValueTypeMatcher(NodeValuePatternMatcher):
-    def __init__(self, value_type, name=None):
+    def __init__(self, value_type, sub_matcher, operands, name=None):
         super().__init__(name)
 
+        from codegen.spec import get_builder
+
         self.value_type = value_type
+        self.sub_matcher = sub_matcher
+        self.operands = [get_builder(operand) for operand in operands]
 
     def match(self, node, values, idx, dag):
         if idx >= len(values):
             return idx, None
 
         value = values[idx]
-        if value.ty.value_type != self.value_type:
+        if value.ty != self.value_type:
             return idx, None
 
-        return idx + 1, MatcherResult(self.name, value)
+        sub_result_idx, sub_result = self.sub_matcher.match(
+            node, values, 0, dag)
+
+        if idx == sub_result_idx:
+            return idx, None
+
+        return idx + 1, MatcherResult(self.name, value, [sub_result] if sub_result else [])
+
+    def construct(self, node, dag: Dag, result: MatcherResult):
+        operands = []
+        for operand in self.operands:
+            value = operand.construct(node, dag, result)
+            operands.extend(value)
+
+        assert(len(operands) == 1)
+
+        base_node = operands[0].node
+
+        from codegen.dag import DagNode, DagValue
+
+        if isinstance(base_node, DagNode):
+            return [DagValue(dag.add_node(base_node.opcode, [self.value_type], *base_node.operands), 0)]
+        else:
+            raise NotImplementedError()
 
 
 class ValueTypeMatcherGen:
     def __init__(self, value_type, **props):
-        self.value_type = value_type
+        from codegen.types import MachineValueType
+
+        self.value_type = MachineValueType(value_type)
         self.props = dict(props)
 
-        self.matcher = ValueTypeMatcher(self.value_type)
+        self.matcher = ValueTypeMatcher(self.value_type, None, [])
 
     def match(self, node, values, idx, dag):
         from codegen.dag import DagValue
@@ -453,9 +489,12 @@ class ValueTypeMatcherGen:
         for matcher_or_tuple in operands:
             value_matchers.append(create_matcher(matcher_or_tuple))
 
-        value_matchers.append(ValueTypeMatcher(self.value_type))
+        # value_matchers.append(ValueTypeMatcher(self.value_type))
 
-        return NodePatternMatcher(opcode_matcher, operand_matchers, value_matchers, self.props)
+        sub_matcher = NodePatternMatcher(
+            opcode_matcher, operand_matchers, value_matchers, self.props)
+
+        return ValueTypeMatcher(self.value_type, sub_matcher, list(operands))
 
 
 from codegen.types import ValueType
@@ -467,6 +506,7 @@ i64_ = ValueTypeMatcherGen(ValueType.I64)
 
 f32_ = ValueTypeMatcherGen(ValueType.F32)
 f64_ = ValueTypeMatcherGen(ValueType.F64)
+f128_ = ValueTypeMatcherGen(ValueType.F128)
 
 v4f32_ = ValueTypeMatcherGen(ValueType.V4F32)
 
@@ -597,6 +637,27 @@ class RegValueMatcher(NodeValuePatternMatcher):
         #         return idx, None
 
         #     idx += 1
+
+
+class ConstantValueMatcher(NodeValuePatternMatcher):
+    def __init__(self, value, name=None):
+        super().__init__(name)
+
+        self.value = value
+
+    def match(self, node, values, idx, dag):
+        if idx >= len(values):
+            return idx, None
+
+        value = values[idx]
+
+        if value.node.opcode != VirtualDagOps.CONSTANT:
+            return idx, None
+
+        if value.node.value.value != self.value:
+            return idx, None
+
+        return idx + 1, MatcherResult(self.name, value)
 
 
 class SetPatternMatcherGen(NodePatternMatcherGen):

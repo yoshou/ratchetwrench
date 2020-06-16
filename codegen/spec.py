@@ -42,6 +42,23 @@ class MachineRegisterDef:
         MachineRegisterDef.regs.append(self)
 
 
+def get_sub_regs(reg):
+    stk = list(reg.subregs)
+    subregs = set()
+    while len(stk) > 0:
+        poped = stk.pop()
+
+        if poped in subregs:
+            continue
+
+        subregs.add(poped)
+
+        for subreg in poped.subregs:
+            stk.append(subreg)
+
+    return subregs
+
+
 def dfs(graph, v, visited, action):
     if v in visited:
         return
@@ -390,14 +407,20 @@ def def_node_(opcode):
 
 def def_node_xform_(opcode, func):
     class SDNodeXForm:
-        def __init__(self, opcode, func):
+        def __init__(self, opcode, func, operands):
             self.opcode = opcode
             self.func = func
+            self.operands = [get_builder(operand) for operand in operands]
 
         def construct(self, node, dag, result):
-            return [self.func(node, dag)]
+            operands = []
+            for operand in self.operands:
+                value = operand.construct(node, dag, result)
+                operands.extend(value)
 
-    return lambda operands: SDNodeXForm(opcode, func)
+            return [self.func(*operands, dag)]
+
+    return lambda *operands: SDNodeXForm(opcode, func, list(operands))
 
 
 def get_builder(builder_or_tuple):
@@ -444,12 +467,13 @@ def def_inst_node_(opcode):
         def __init__(self, opcode, operands):
             self.opcode = opcode
             self.operands = [get_builder(operand) for operand in operands]
+            self.temp = operands
 
         def construct(self, node, dag, result):
             from codegen.dag import DagValue
 
             ops = []
-            for operand in self.operands:
+            for operand, operand_name in zip(self.operands, self.opcode.ins):
                 ops.extend(operand.construct(node, dag, result))
 
             inst = self.opcode
@@ -579,11 +603,72 @@ def def_inst(*args, **kwargs):
     return MachineInstructionDef(*args, **kwargs)
 
 
+from enum import Enum
+
+
+class TargetDagOps(Enum):
+    EXTRACT_SUBREG = def_inst(
+        "EXTRACT_SUBREG",
+        outs=[],
+        ins=[]
+    ),
+    INSERT_SUBREG = def_inst(
+        "INSERT_SUBREG",
+        outs=[],
+        ins=[]
+    ),
+    COPY = def_inst(
+        "COPY",
+        outs=[],
+        ins=[]
+    ),
+    COPY_TO_REGCLASS = def_inst(
+        "COPY_TO_REGCLASS",
+        outs=[],
+        ins=[]
+    ),
+    SUBREG_TO_REG = def_inst(
+        "SUBREG_TO_REG",
+        outs=[],
+        ins=[]
+    ),
+    INLINEASM = def_inst(
+        "INLINEASM",
+        outs=[],
+        ins=[]
+    ),
+    IMPLICIT_DEF = def_inst(
+        "IMPLICIT_DEF",
+        outs=[],
+        ins=[]
+    )
+
+
 class CCArgFlags:
     def __init__(self):
         self.val_align = 0
         self.val_size = 0
         self.addr_space = 0
+
+        self.is_zext = False
+        self.is_sext = False
+        self.is_inreg = False
+        self.is_sret = False
+        self.is_byval = False
+        self.is_nest = False
+        self.is_returned = False
+        self.is_split = False
+        self.is_inalloca = False
+        self.is_split_end = False
+        self.is_swift_self = False
+        self.is_cfguard_target = False
+        self.is_hva = False
+        self.is_hva_start = False
+        self.is_sec_arg_pass = False
+        self.is_in_consecutive_regs_last = False
+        self.is_in_consecutive_regs = False
+        self.is_copy_elision_candidate = False
+        self.is_pointer = False
 
 
 class CallingConvArg:
@@ -876,6 +961,14 @@ class InstructionSelector:
 
     def select(self, node, dag):
         raise NotImplementedError()
+
+def get_legalized_op(operand, legalized):
+    from codegen.dag import DagValue
+    
+    if operand.node in legalized:
+        return DagValue(legalized[operand.node], operand.index)
+
+    return operand
 
 
 class Legalizer:

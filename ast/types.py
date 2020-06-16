@@ -126,9 +126,9 @@ class CompositeType(Type):
         super().__init__()
         self.name = name
         self._fields = None
+        self._fields_index = []
         self.fields = fields
         self.is_union = is_union
-        self.fields_index = []
 
     @property
     def fields(self):
@@ -139,8 +139,8 @@ class CompositeType(Type):
         self._fields = value
 
         if value:
-            self.fields_index = {name: i for i,
-                                 (ty, name, arr) in enumerate(value)}
+            self._fields_index = {name: i for i,
+                                  (ty, name, arr) in enumerate(value)}
 
     def get_field_by_idx(self, idx):
         return self.fields[idx]
@@ -164,23 +164,23 @@ class CompositeType(Type):
                     idx += 1
                     bit_pos -= 32
 
-        idx = self.fields_index[name]
+        idx = self._fields_index[name]
         return self.fields[idx]
 
     def get_field_type_by_name(self, name):
-        idx = self.fields_index[name]
+        idx = self._fields_index[name]
         ty, _, bit = self.fields[idx]
         assert(not bit)
         return ty
 
     def get_field_idx(self, name):
-        idx = self.fields_index[name]
+        idx = self._fields_index[name]
         _, _, bit = self.fields[idx]
         assert(not bit)
         return idx
 
     def contains_field(self, name):
-        return name in self.fields_index
+        return name in self._fields_index
 
     def __hash__(self):
         return hash(tuple([self.name, frozenset(self.fields)]))

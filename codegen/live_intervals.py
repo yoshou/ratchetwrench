@@ -112,7 +112,8 @@ class LiveIntervals(MachineFunctionPass):
 
                             if operand.is_phys:
                                 phys_regs.add(operand.reg)
-                        elif operand.is_use or (operand.is_def and operand.subreg):
+
+                        if operand.is_use or (operand.is_def and operand.subreg):
                             gens[inst].add(operand.reg)
 
                 if inst.is_call:
@@ -130,6 +131,7 @@ class LiveIntervals(MachineFunctionPass):
                 if inst == mbb.insts[-1]:
                     for phys_reg in phys_regs:
                         kills[inst].add(phys_reg)
+                        gens[inst].add(phys_reg)
 
         changed = True
         count = 0
@@ -169,10 +171,10 @@ class LiveIntervals(MachineFunctionPass):
                 operand.is_kill = operand.is_use and operand.reg in killed
 
         live_ranges = {}
-        live_regs = set()
+        # live_regs = set()
 
         for live_in, _ in mfunc.reg_info.live_ins:
-            live_regs.add(live_in)
+            # live_regs.add(live_in)
 
             live_ranges[live_in] = LiveRange()
             live_ranges[live_in].reg = live_in
@@ -181,6 +183,19 @@ class LiveIntervals(MachineFunctionPass):
             seg.start = inst
             seg.end = inst.mbb.func.bbs[0].insts[0]
             live_ranges[live_in].segments.append(seg)
+
+        inst = insts[0]
+        new_live_regs = live_ins[inst]
+        for new_live_reg in new_live_regs:
+            # live_regs.add(new_live_reg)
+            if new_live_reg not in live_ranges:
+                live_ranges[new_live_reg] = LiveRange()
+                live_ranges[new_live_reg].reg = new_live_reg
+
+            seg = SlotSegment()
+            seg.start = inst
+            seg.end = inst.mbb.func.bbs[-1].insts[-1]
+            live_ranges[new_live_reg].segments.append(seg)
 
         for inst in insts:
             live_in = live_ins[inst]

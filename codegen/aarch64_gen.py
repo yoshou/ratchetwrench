@@ -10,8 +10,9 @@ from codegen.matcher import *
 
 class AArch64OperandFlag(IntFlag):
     NO_FLAG = auto()
-    MO_LO16 = auto()
-    MO_HI16 = auto()
+    MO_PAGE = auto()
+    MO_PAGEOFF = auto()
+    MO_NC = auto()
 
 
 def is_null_constant(value):
@@ -25,22 +26,6 @@ def is_null_fp_constant(value):
 class AArch64InstructionSelector(InstructionSelector):
     def __init__(self):
         super().__init__()
-
-    def select_setcc(self, node: DagNode, dag: Dag, new_ops):
-        condcode = new_ops[0]
-        cond = new_ops[1]
-
-        if isinstance(cond.node, DagNode):
-            value_ty = node.value_types[0]
-
-            zero = DagValue(dag.add_target_constant_node(value_ty, 0), 0)
-            zero = DagValue(dag.add_machine_dag_node(
-                AArch64MachineOps.MOVi16, [value_ty], zero), 0)
-            one = DagValue(dag.add_target_constant_node(value_ty, 1), 0)
-
-            return dag.add_machine_dag_node(AArch64MachineOps.MOVCCi, node.value_types, zero, one, condcode, cond)
-
-        raise NotImplementedError()
 
     def select_callseq_start(self, node: DagNode, dag: Dag, new_ops):
         chain = new_ops[0]
@@ -81,17 +66,6 @@ class AArch64InstructionSelector(InstructionSelector):
 
     def select_copy_from_reg(self, node: DagNode, dag: Dag, new_ops):
         return node
-        # return dag.add_machine_dag_node(VirtualDagOps.COPY_FROM_REG, node.value_types, *new_ops)
-
-        chain = new_ops[0]
-        src = new_ops[1]
-
-        if isinstance(src.node, RegisterDagNode):
-            return src.node
-
-        print("select_copy_from_reg")
-        print([edge.node for edge in new_ops])
-        raise NotImplementedError()
 
     def select_copy_to_reg(self, node: DagNode, dag: Dag, new_ops):
         chain = node.operands[0]
@@ -112,6 +86,10 @@ class AArch64InstructionSelector(InstructionSelector):
         value = DagValue(node, 0)
 
         def match_node(inst: MachineInstructionDef):
+            if inst.enabled:
+                if not inst.enabled(dag.mfunc.target_info):
+                    return None
+
             for pattern in inst.patterns:
                 _, res = pattern.match(None, [value], 0, dag)
                 if res:
@@ -123,6 +101,11 @@ class AArch64InstructionSelector(InstructionSelector):
             matched = match_node(op)
             if matched:
                 return matched
+
+        for pattern in aarch64_patterns:
+            _, res = pattern.match(node, dag)
+            if res:
+                return pattern.construct(node, dag, res).node
 
         return None
 
@@ -136,17 +119,28 @@ class AArch64InstructionSelector(InstructionSelector):
 
         return dag.add_machine_dag_node(AArch64MachineOps.ADDXri, node.value_types, *ops)
 
-    def select_vdup(self, node: DagNode, dag: Dag, new_ops):
+    def select_dup(self, node: DagNode, dag: Dag, new_ops):
         in_type = node.operands[0].ty
         out_type = node.value_types[0]
 
         hwmode = dag.mfunc.target_info.hwmode
-        tys = DPR.get_types(hwmode)
+        tys = FPR32.get_types(hwmode)
+
+        elem = node.operands[0]
 
         if in_type in tys and out_type.value_type == ValueType.V4F32:
+            value = DagValue(dag.add_node(TargetDagOps.IMPLICIT_DEF,
+                                          [MachineValueType(ValueType.V4I32)]), 0)
+            subreg = ssub
+
+            subreg_id = DagValue(dag.add_target_constant_node(
+                MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
+            vec = DagValue(dag.add_node(TargetDagOps.INSERT_SUBREG,
+                                        node.value_types, value, elem, subreg_id), 0)
+
             lane = DagValue(dag.add_target_constant_node(
-                MachineValueType(ValueType.I32), 0), 0)
-            return dag.add_machine_dag_node(AArch64MachineOps.VDUPLN32q, node.value_types, node.operands[0], lane)
+                MachineValueType(ValueType.I64), 0), 0)
+            return dag.add_machine_dag_node(AArch64MachineOps.DUPv4i32lane, node.value_types, vec, lane)
 
         raise ValueError()
 
@@ -159,25 +153,23 @@ class AArch64InstructionSelector(InstructionSelector):
 
         if isinstance(idx.node, ConstantDagNode):
             if node.value_types[0].value_type in [ValueType.V2F32, ValueType.V4F32]:
-                tys = SPR.get_types(hwmode)
+                tys = FPR32.get_types(hwmode)
                 if elem.ty in tys:
-                    idx = DagValue(dag.add_target_constant_node(
-                        idx.ty, idx.node.value), 0)
-                    subreg_idx = idx.node.value.value
-                    if subreg_idx == 0:
-                        subreg = ssub_0
-                    elif subreg_idx == 1:
-                        subreg = ssub_1
-                    elif subreg_idx == 2:
-                        subreg = ssub_2
-                    elif subreg_idx == 3:
-                        subreg = ssub_3
-                    else:
-                        raise ValueError("Invalid index")
+                    value = DagValue(dag.add_node(TargetDagOps.IMPLICIT_DEF,
+                                                  node.value_types), 0)
+                    subreg = ssub
 
                     subreg_id = DagValue(dag.add_target_constant_node(
                         MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
-                    return dag.add_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, subreg_id)
+                    value = DagValue(dag.add_node(
+                        TargetDagOps.INSERT_SUBREG, node.value_types, value, elem, subreg_id), 0)
+
+                    idx = DagValue(dag.add_target_constant_node(
+                        MachineValueType(ValueType.I32), idx.node.value), 0)
+                    idx2 = DagValue(dag.add_target_constant_node(
+                        MachineValueType(ValueType.I64), 0), 0)
+
+                    return dag.add_machine_dag_node(AArch64MachineOps.INSvi32lane, [MachineValueType(ValueType.V4F32)], vec, idx, value, idx2)
 
         # TODO: Neet to implement indexing with variable. A solution is using memory.
 
@@ -187,9 +179,9 @@ class AArch64InstructionSelector(InstructionSelector):
         elem = node.operands[0]
 
         if node.value_types[0].value_type == ValueType.V2F32:
-            value = DagValue(dag.add_target_constant_node(
-                MachineValueType(ValueType.V2F32), 0), 0)
-            subreg = ssub_0
+            value = DagValue(dag.add_node(TargetDagOps.IMPLICIT_DEF,
+                                          [MachineValueType(ValueType.V2F32)]), 0)
+            subreg = ssub
 
             subreg_id = DagValue(dag.add_target_constant_node(
                 MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
@@ -208,10 +200,12 @@ class AArch64InstructionSelector(InstructionSelector):
             VirtualDagOps.FRAME_INDEX: self.select_frame_index,
             VirtualDagOps.INSERT_VECTOR_ELT: self.select_insert_vector_elt,
             VirtualDagOps.SCALAR_TO_VECTOR: self.select_scalar_to_vector,
-            AArch64DagOps.SETCC: self.select_setcc,
             AArch64DagOps.CALL: self.select_call,
-            AArch64DagOps.VDUP: self.select_vdup,
+            AArch64DagOps.DUP: self.select_dup,
         }
+
+        if isinstance(node.opcode, TargetDagOps):
+            return node
 
         if node.opcode == VirtualDagOps.ENTRY:
             return dag.entry.node
@@ -220,6 +214,8 @@ class AArch64InstructionSelector(InstructionSelector):
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT:
             return node
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_POOL:
+            return node
+        elif node.opcode == VirtualDagOps.TARGET_FRAME_INDEX:
             return node
         elif node.opcode == VirtualDagOps.CONDCODE:
             return node
@@ -256,6 +252,7 @@ class ArgListEntry:
     def __init__(self, node, ty):
         self.node = node
         self.ty = ty
+        self.is_sret = False
 
 
 class CallInfo:
@@ -300,11 +297,11 @@ class AArch64CallingConv(CallingConv):
             offset_in_arg = 0
 
             # Analyze return value
-            for val_idx, vt in enumerate(return_vts):
+            for _, vt in enumerate(return_vts):
                 reg_vt = reg_info.get_register_type(vt)
                 reg_count = reg_info.get_register_count(vt)
 
-                for reg_idx in range(reg_count):
+                for _ in range(reg_count):
                     flags = CCArgFlags()
 
                     returns.append(CallingConvReturn(
@@ -359,7 +356,9 @@ class AArch64CallingConv(CallingConv):
                 builder.g.add_register_node(vts[0], demote_reg[0]), 0)
 
             if ret_val.ty == MachineValueType(ValueType.I32):
-                ret_reg = R0
+                ret_reg = W0
+            elif ret_val.ty == MachineValueType(ValueType.I64):
+                ret_reg = X0
             else:
                 raise NotImplementedError()
 
@@ -392,7 +391,11 @@ class AArch64CallingConv(CallingConv):
 
         arg_list = []
         for arg, param in zip(inst.args, func.args):
-            arg_list.append(ArgListEntry(builder.get_value(arg), param.ty))
+            arg_entry = ArgListEntry(builder.get_value(arg), param.ty)
+            if param.has_attribute(AttributeKind.StructRet):
+                arg_entry.is_sret = True
+
+            arg_list.append(arg_entry)
 
         call_info = CallInfo(g, g.root, inst.ty, func_address, arg_list)
 
@@ -419,12 +422,14 @@ class AArch64CallingConv(CallingConv):
             vts = compute_value_types(arg.ty, data_layout)
             offset_in_arg = 0
 
-            for val_idx, vt in enumerate(vts):
+            for _, vt in enumerate(vts):
                 reg_vt = reg_info.get_register_type(vt)
                 reg_count = reg_info.get_register_count(vt)
 
-                for reg_idx in range(reg_count):
+                for _ in range(reg_count):
                     flags = CCArgFlags()
+
+                    flags.is_sret = arg.is_sret
 
                     args.append(CallingConvArg(
                         vt, reg_vt, i, offset_in_arg, flags))
@@ -499,7 +504,7 @@ class AArch64CallingConv(CallingConv):
                 arg_mem_val = DagValue(
                     dag.add_frame_index_node(arg_mem_frame_idx), 0)
 
-                chain = DagValue(g.add_store_node(
+                chain = DagValue(dag.add_store_node(
                     chain, arg_mem_val, copy_val), 0)
 
                 copy_val = arg_mem_val
@@ -644,6 +649,16 @@ class AArch64CallingConv(CallingConv):
             loc_vt = MachineValueType(ValueType.I32)
             loc_info = CCArgLocInfo.ZExt
 
+        if flags.is_sret:
+            if loc_vt.value_type == ValueType.I64:
+                regs1 = [X8]
+                regs2 = [W8]
+                reg = ccstate.alloc_reg_from_list(regs1, regs2)
+                if reg is not None:
+                    ccstate.assign_reg_value(
+                        idx, vt, loc_vt, loc_info, reg, flags)
+                    return False
+
         if loc_vt.value_type == ValueType.I32:
             regs1 = [W0, W1, W2, W3, W4, W5, W6, W7]
             regs2 = [X0, X1, X2, X3, X4, X5, X6, X7]
@@ -712,6 +727,42 @@ class AArch64CallingConv(CallingConv):
             idx, vt, loc_vt, loc_info, flags, ccstate)
 
 
+class ShiftExtendType(Enum):
+    InvalidShiftExtend = -1
+    LSL = 0
+    LSR = auto()
+    ASR = auto()
+    ROR = auto()
+    MSL = auto()
+
+    UXTB = auto()
+    UXTH = auto()
+    UXTW = auto()
+    UXTX = auto()
+
+    SXTB = auto()
+    SXTH = auto()
+    SXTW = auto()
+    SXTX = auto()
+
+
+def get_shifter_imm(shift_ty, imm):
+    if shift_ty == ShiftExtendType.LSL:
+        enc = 0
+    elif shift_ty == ShiftExtendType.LSR:
+        enc = 1
+    elif shift_ty == ShiftExtendType.ASR:
+        enc = 2
+    elif shift_ty == ShiftExtendType.ROR:
+        enc = 3
+    elif shift_ty == ShiftExtendType.MSL:
+        enc = 4
+    else:
+        raise ValueError("Invalid shift type")
+
+    return (enc << 6) | (imm & 0x3f)
+
+
 class AArch64TargetInstInfo(TargetInstInfo):
     def __init__(self):
         super().__init__()
@@ -720,14 +771,16 @@ class AArch64TargetInstInfo(TargetInstInfo):
         assert(isinstance(src_reg, MachineRegister))
         assert(isinstance(dst_reg, MachineRegister))
 
-        if src_reg.spec in GPR.regs and dst_reg.spec in GPR.regs:
-            opcode = AArch64MachineOps.MOVsi
-        elif src_reg.spec in SPR.regs and dst_reg.spec in SPR.regs:
-            opcode = AArch64MachineOps.VMOVS
-        elif src_reg.spec in DPR.regs and dst_reg.spec in DPR.regs:
-            opcode = AArch64MachineOps.VMOVD
-        elif src_reg.spec in QPR.regs and dst_reg.spec in QPR.regs:
-            opcode = AArch64MachineOps.VORRq
+        if src_reg.spec in GPR32sp.regs and dst_reg.spec in GPR32.regs:
+            opcode = AArch64MachineOps.ADDWri
+        elif src_reg.spec in GPR64sp.regs and dst_reg.spec in GPR64.regs:
+            opcode = AArch64MachineOps.ADDXri
+        elif src_reg.spec in FPR32.regs and dst_reg.spec in FPR32.regs:
+            opcode = AArch64MachineOps.FMOVSr
+        elif src_reg.spec in FPR64.regs and dst_reg.spec in FPR64.regs:
+            opcode = AArch64MachineOps.FMOVDr
+        elif src_reg.spec in FPR128.regs and dst_reg.spec in FPR128.regs:
+            opcode = AArch64MachineOps.ORRv16i8
         else:
             raise NotImplementedError(
                 "Move instructions support GPR, SPR, DPR or QPR at the present time.")
@@ -737,12 +790,14 @@ class AArch64TargetInstInfo(TargetInstInfo):
         copy_inst.add_reg(dst_reg, RegState.Define)
         copy_inst.add_reg(src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == AArch64MachineOps.VORRq:
+        if opcode in [AArch64MachineOps.ORRv16i8]:
             copy_inst.add_reg(
                 src_reg, RegState.Kill if kill_src else RegState.Non)
 
-        if opcode == AArch64MachineOps.MOVsi:
-            copy_inst.add_imm(2)
+        if opcode in [AArch64MachineOps.ADDWri, AArch64MachineOps.ADDXri]:
+            # copy_inst.add_reg(
+            #     src_reg, RegState.Kill if kill_src else RegState.Non)
+            copy_inst.add_imm(get_shifter_imm(ShiftExtendType.LSL, 0))
 
         copy_inst.insert_after(inst)
 
@@ -767,15 +822,15 @@ class AArch64TargetInstInfo(TargetInstInfo):
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if has_reg_regclass(reg, GPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.STRi12)
+            if has_reg_regclass(reg, GPR32sp):
+                copy_inst = MachineInstruction(AArch64MachineOps.STRWui)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif has_reg_regclass(reg, SPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.VSTRS)
+            elif has_reg_regclass(reg, FPR32):
+                copy_inst = MachineInstruction(AArch64MachineOps.STRSui)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -784,8 +839,15 @@ class AArch64TargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if has_reg_regclass(reg, DPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.VSTRD)
+            if has_reg_regclass(reg, GPR64sp):
+                copy_inst = MachineInstruction(AArch64MachineOps.STRXui)
+
+                copy_inst.add_reg(reg, RegState.Non)
+
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
+            elif has_reg_regclass(reg, FPR64):
+                copy_inst = MachineInstruction(AArch64MachineOps.STRDui)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
@@ -794,22 +856,13 @@ class AArch64TargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if has_reg_regclass(reg, QPR):
-                mfunc = inst.mbb.func
-                regclass = GPR  # TODO
-                scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
+            if has_reg_regclass(reg, FPR128):
+                copy_inst = MachineInstruction(AArch64MachineOps.STRQui)
 
-                addr_inst = MachineInstruction(AArch64MachineOps.ADDri)
-                addr_inst.add_reg(scratch_reg, RegState.Define)
-                addr_inst.add_frame_index(stack_slot)
-                addr_inst.add_imm(0)
-
-                addr_inst.insert_before(inst)
-
-                copy_inst = MachineInstruction(AArch64MachineOps.VST1q64)
                 copy_inst.add_reg(reg, RegState.Non)
-                copy_inst.add_reg(scratch_reg, RegState.Kill)
-                copy_inst.add_imm(1)
+
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
             else:
                 raise NotImplementedError()
         else:
@@ -840,14 +893,14 @@ class AArch64TargetInstInfo(TargetInstInfo):
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if has_reg_regclass(reg, GPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.LDRi12)
+            if has_reg_regclass(reg, GPR32sp):
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRWui)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif has_reg_regclass(reg, SPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.VLDRS)
+            elif has_reg_regclass(reg, FPR32):
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRSui)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -855,8 +908,14 @@ class AArch64TargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if has_reg_regclass(reg, DPR):
-                copy_inst = MachineInstruction(AArch64MachineOps.VLDRD)
+            if has_reg_regclass(reg, GPR64sp):
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRXui)
+
+                copy_inst.add_reg(reg, RegState.Define)
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
+            elif has_reg_regclass(reg, FPR64):
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRDui)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
@@ -864,23 +923,12 @@ class AArch64TargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 16:
-            if has_reg_regclass(reg, QPR):
-                mfunc = inst.mbb.func
-                regclass = GPR  # TODO
-                scratch_reg = mfunc.reg_info.create_virtual_register(regclass)
-
-                addr_inst = MachineInstruction(AArch64MachineOps.ADDri)
-                addr_inst.add_reg(scratch_reg, RegState.Define)
-                addr_inst.add_frame_index(stack_slot)
-                addr_inst.add_imm(0)
-
-                addr_inst.insert_before(inst)
-
-                copy_inst = MachineInstruction(AArch64MachineOps.VLD1q64)
+            if has_reg_regclass(reg, FPR128):
+                copy_inst = MachineInstruction(AArch64MachineOps.LDRQui)
 
                 copy_inst.add_reg(reg, RegState.Define)
-                copy_inst.add_reg(scratch_reg, RegState.Kill)
-                copy_inst.add_imm(1)
+                copy_inst.add_frame_index(stack_slot)
+                copy_inst.add_imm(0)
             else:
                 raise NotImplementedError()
         else:
@@ -895,38 +943,67 @@ class AArch64TargetInstInfo(TargetInstInfo):
         frame = func.frame
         stack_obj = frame.get_stack_object(idx)
         frame_lowering = func.target_info.get_frame_lowering()
-        if idx < 0:
-            return stack_obj.offset + frame_lowering.frame_spill_size
 
-        return stack_obj.offset
+        has_fp = False
+        if has_fp:
+            if idx < 0:
+                return FP, stack_obj.offset + frame_lowering.frame_spill_size
+
+            return FP, stack_obj.offset
+            
+        if idx < 0:
+            return SP, stack_obj.offset + frame_lowering.frame_spill_size + func.frame.stack_size
+            
+        return SP, stack_obj.offset + func.frame.stack_size
 
     def eliminate_frame_index(self, func: MachineFunction, inst: MachineInstruction, idx):
         # Analyze the frame index into a base register and a displacement.
+        def get_scale(opc):
+            if opc in [AArch64MachineOps.LDRWui, AArch64MachineOps.STRWui]:
+                return 2
+            elif opc in [AArch64MachineOps.LDRXui, AArch64MachineOps.STRXui]:
+                return 4
+            elif opc in [AArch64MachineOps.LDRHui, AArch64MachineOps.STRHui]:
+                return 2
+            elif opc in [AArch64MachineOps.LDRSui, AArch64MachineOps.STRSui]:
+                return 4
+            elif opc in [AArch64MachineOps.LDRDui, AArch64MachineOps.STRDui]:
+                return 8
+            elif opc in [AArch64MachineOps.LDRQui, AArch64MachineOps.STRQui]:
+                return 16
+                
+
         operand = inst.operands[idx]
         if isinstance(operand, MOFrameIndex):
-            base_reg = MachineRegister(R11)
             stack_obj = func.frame.get_stack_object(operand.index)
-            offset = self.calculate_frame_offset(func, operand.index)
+            frame_reg, offset = self.calculate_frame_offset(func, operand.index)
+            base_reg = MachineRegister(frame_reg)
 
-            if inst.opcode in [AArch64MachineOps.VLDRS, AArch64MachineOps.VSTRS, AArch64MachineOps.VLDRD, AArch64MachineOps.VSTRD]:
-                assert(offset % 4 == 0)
-                offset = offset >> 2
+            if inst.opcode in [AArch64MachineOps.LDRWui, AArch64MachineOps.LDRXui, AArch64MachineOps.LDRSui, AArch64MachineOps.LDRDui, AArch64MachineOps.LDRQui,
+                               AArch64MachineOps.STRWui, AArch64MachineOps.STRXui, AArch64MachineOps.STRSui, AArch64MachineOps.STRDui, AArch64MachineOps.STRQui]:
+                scale = get_scale(inst.opcode)
+                
+                assert(offset & (scale - 1) == 0)
+                offset = offset >> offset
+                assert(0 <= offset and offset <= 4095)
 
-                assert(abs(inst.operands[idx + 1].val + offset) < 256)
+            if inst.opcode in [AArch64MachineOps.STURWi, AArch64MachineOps.STURXi, AArch64MachineOps.STURSi, AArch64MachineOps.STURDi, AArch64MachineOps.STURQi,
+                               AArch64MachineOps.LDURWi, AArch64MachineOps.LDURXi, AArch64MachineOps.LDURSi, AArch64MachineOps.LDURDi, AArch64MachineOps.LDURQi]:
+                new_offset = inst.operands[idx + 1].val + offset
+                assert(new_offset >= -256 and new_offset <= 255)
 
             inst.operands[idx] = MOReg(base_reg, RegState.Non)
             inst.operands[idx + 1] = MOImm(inst.operands[idx + 1].val + offset)
 
             if inst.operands[idx + 1].val < 0:
-                if inst.opcode == AArch64MachineOps.ADDri:
-                    inst.opcode = AArch64MachineOps.SUBri
+                if inst.opcode == AArch64MachineOps.ADDXri:
+                    inst.opcode = AArch64MachineOps.SUBXri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode == AArch64MachineOps.SUBri:
-                    inst.opcode = AArch64MachineOps.ADDri
+                elif inst.opcode == AArch64MachineOps.SUBXri:
+                    inst.opcode = AArch64MachineOps.ADDXri
                     inst.operands[idx + 1] = MOImm(-inst.operands[idx + 1].val)
-                elif inst.opcode in [
-                        AArch64MachineOps.STRi12, AArch64MachineOps.LDRi12, AArch64MachineOps.VSTRS, AArch64MachineOps.VLDRS,
-                        AArch64MachineOps.VSTRD, AArch64MachineOps.VLDRD, AArch64MachineOps.VST1q64, AArch64MachineOps.VLD1q64]:
+                elif inst.opcode in [AArch64MachineOps.STURWi, AArch64MachineOps.STURXi, AArch64MachineOps.STURSi, AArch64MachineOps.STURDi, AArch64MachineOps.STURQi,
+                                     AArch64MachineOps.LDURWi, AArch64MachineOps.LDURXi, AArch64MachineOps.LDURSi, AArch64MachineOps.LDURDi, AArch64MachineOps.LDURQi]:
                     pass
                 else:
                     raise ValueError()
@@ -935,95 +1012,142 @@ class AArch64TargetInstInfo(TargetInstInfo):
         # Eliminate destination register.
         reginfo = func.reg_info
         if reginfo.is_use_empty(inst.operands[0].reg):
-
-            if inst.opcode == AArch64MachineOps.SUB32ri:
-                inst.opcode = AArch64MachineOps.CMP32ri
-            elif inst.opcode == AArch64MachineOps.SUB32rm:
-                inst.opcode = AArch64MachineOps.CMP32rm
-            elif inst.opcode == AArch64MachineOps.SUB32rr:
-                inst.opcode = AArch64MachineOps.CMP32rr
-            elif inst.opcode == AArch64MachineOps.SUB8ri:
-                inst.opcode = AArch64MachineOps.CMP8ri
-            else:
-                raise ValueError("Not supporting instruction.")
-
-            remove_op = inst.operands[0]
-            if remove_op.tied_to >= 0:
-                tied = inst.operands[remove_op.tied_to]
-                assert(tied.tied_to == 0)
-                tied.tied_to = -1
-
-            inst.remove_operand(0)
+            pass
 
     def expand_post_ra_pseudo(self, inst: MachineInstruction):
-        # if inst.opcode == AArch64MachineOps.LDRLIT_ga_abs:
-        #     # Replace with 'LDR' from constant pool.
-        #     dst = inst.operands[0]
-        #     gv = inst.operands[1]
-        #     opc = AArch64MachineOps.LDRi12
+        if inst.opcode == AArch64MachineOps.RET_ReallyLR:
+            new_inst = MachineInstruction(AArch64MachineOps.RET)
+            new_inst.add_reg(MachineRegister(LR), RegState.Non)
 
-        #     cp = inst.mbb.func.constant_pool
-        #     index = cp.get_or_create_index(gv.value, 4)
+            new_inst.insert_after(inst)
+            inst.remove()
 
-        #     new_inst = MachineInstruction(opc)
+        if inst.opcode == AArch64MachineOps.MOVi64imm:
+            dst = inst.operands[0]
+            src = inst.operands[1]
 
-        #     new_inst.add_reg(dst.reg, RegState.Define)
-        #     new_inst.add_constant_pool_index(index)
-        #     new_inst.add_imm(0)
+            if src.val == 0:
+                new_inst = MachineInstruction(AArch64MachineOps.ORRXrr)
+                new_inst.add_reg(dst.reg, RegState.Define)
+                new_inst.add_reg(MachineRegister(XZR), RegState.Non)
+                new_inst.add_reg(MachineRegister(XZR), RegState.Non)
 
-        #     new_inst.insert_after(inst)
-        #     inst.remove()
+                new_inst.insert_after(inst)
+            else:
+                insert_point = inst
+
+                for i in range(0, 64, 16):
+                    if i == 0:
+                        new_inst = MachineInstruction(AArch64MachineOps.MOVKWi)
+                        new_inst.add_reg(dst.reg, RegState.Define)
+                        new_inst.add_reg(MachineRegister(WZR), RegState.Non)
+                    else:
+                        new_inst = MachineInstruction(AArch64MachineOps.MOVKWi)
+                        new_inst.add_reg(dst.reg, RegState.Define)
+                        new_inst.add_reg(dst.reg, RegState.Non)
+
+                    if isinstance(src, MOGlobalAddress):
+                        raise NotImplementedError()
+                    elif isinstance(src, MOImm):
+                        val = (src.val >> i) & 0xFFFF
+                        if val == 0:
+                            continue
+
+                        new_inst.add_imm(val)
+                        new_inst.add_imm(i)
+                    else:
+                        raise ValueError()
+
+                    new_inst.insert_after(insert_point)
+                    insert_point = new_inst
+            inst.remove()
 
         if inst.opcode == AArch64MachineOps.MOVi32imm:
             dst = inst.operands[0]
             src = inst.operands[1]
 
-            lo_opc = AArch64MachineOps.MOVi16
-            hi_opc = AArch64MachineOps.MOVTi16
+            if src.val == 0:
+                new_inst = MachineInstruction(AArch64MachineOps.ORRWrr)
+                new_inst.add_reg(dst.reg, RegState.Define)
+                new_inst.add_reg(MachineRegister(WZR), RegState.Non)
+                new_inst.add_reg(MachineRegister(WZR), RegState.Non)
 
-            lo_inst = MachineInstruction(lo_opc)
-            lo_inst.add_reg(dst.reg, RegState.Define)
-
-            hi_inst = MachineInstruction(hi_opc)
-            hi_inst.add_reg(dst.reg, RegState.Define)
-            hi_inst.add_reg(dst.reg, RegState.Non)
-
-            if isinstance(src, MOGlobalAddress):
-                lo_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | AArch64OperandFlag.MO_LO16.value))
-                hi_inst.add_global_address(
-                    src.value, target_flags=(src.target_flags | AArch64OperandFlag.MO_HI16.value))
+                new_inst.insert_after(inst)
             else:
-                raise ValueError()
+                lo_opc = AArch64MachineOps.MOVKWi
+                hi_opc = AArch64MachineOps.MOVKWi
 
-            hi_inst.insert_after(inst)
-            lo_inst.insert_after(inst)
+                lo_inst = MachineInstruction(lo_opc)
+                lo_inst.add_reg(dst.reg, RegState.Define)
+
+                hi_inst = MachineInstruction(hi_opc)
+                hi_inst.add_reg(dst.reg, RegState.Define)
+                hi_inst.add_reg(dst.reg, RegState.Non)
+
+                if isinstance(src, MOGlobalAddress):
+                    raise NotImplementedError()
+                elif isinstance(src, MOImm):
+                    lo_inst.add_reg(MachineRegister(WZR), RegState.Non)
+                    lo_inst.add_imm((src.val >> 0) & 0xFFFF)
+                    lo_inst.add_imm(0)
+
+                    hi_inst.add_imm((src.val >> 16) & 0xFFFF)
+                    hi_inst.add_imm(16)
+                else:
+                    raise ValueError()
+
+                hi_inst.insert_after(inst)
+                lo_inst.insert_after(inst)
             inst.remove()
 
-        if inst.opcode == AArch64MachineOps.LEApcrel:
+        if inst.opcode == AArch64MachineOps.CMPSWrr:
+            src1 = inst.operands[0]
+            src2 = inst.operands[1]
+
+            new_inst = MachineInstruction(AArch64MachineOps.SUBSWrr)
+            new_inst.add_reg(MachineRegister(WZR), RegState.Define)
+            new_inst.add_reg(
+                src1.reg, RegState.Kill if src1.is_kill else RegState.Non)
+            new_inst.add_reg(
+                src2.reg, RegState.Kill if src2.is_kill else RegState.Non)
+
+            new_inst.insert_after(inst)
+            inst.remove()
+
+        if inst.opcode in [AArch64MachineOps.MOVaddr, AArch64MachineOps.MOVaddrCP]:
             dst = inst.operands[0]
-            src = inst.operands[1]
+            src1 = inst.operands[1]
+            src2 = inst.operands[2]
 
-            lo_opc = AArch64MachineOps.MOVi16
-            hi_opc = AArch64MachineOps.MOVTi16
+            hi_opc = AArch64MachineOps.MOVKWi
 
-            lo_inst = MachineInstruction(lo_opc)
-            lo_inst.add_reg(dst.reg, RegState.Define)
+            new_inst1 = MachineInstruction(AArch64MachineOps.ADRP)
+            new_inst1.add_reg(dst.reg, RegState.Define)
 
-            hi_inst = MachineInstruction(hi_opc)
-            hi_inst.add_reg(dst.reg, RegState.Define)
-            hi_inst.add_reg(dst.reg, RegState.Non)
-
-            if isinstance(src, MOConstantPoolIndex):
-                lo_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | AArch64OperandFlag.MO_LO16.value))
-                hi_inst.add_constant_pool_index(
-                    src.index, target_flags=(src.target_flags | AArch64OperandFlag.MO_HI16.value))
+            if isinstance(src1, MOGlobalAddress):
+                new_inst1.add_global_address(
+                    src1.value, target_flags=src1.target_flags)
+            elif isinstance(src1, MOConstantPoolIndex):
+                new_inst1.add_constant_pool_index(
+                    src1.index, target_flags=src1.target_flags)
             else:
                 raise ValueError()
 
-            hi_inst.insert_after(inst)
-            lo_inst.insert_after(inst)
+            new_inst2 = MachineInstruction(AArch64MachineOps.ADDXri)
+            new_inst2.add_reg(dst.reg, RegState.Define)
+            new_inst2.add_reg(dst.reg, RegState.Non)
+
+            if isinstance(src2, MOGlobalAddress):
+                new_inst2.add_global_address(
+                    src2.value, target_flags=src2.target_flags)
+            elif isinstance(src2, MOConstantPoolIndex):
+                new_inst2.add_constant_pool_index(
+                    src2.index, target_flags=src2.target_flags)
+            else:
+                raise ValueError()
+
+            new_inst1.insert_after(inst)
+            new_inst2.insert_after(new_inst1)
             inst.remove()
 
 
@@ -1055,37 +1179,6 @@ def get_super_regs(reg):
     return supers
 
 
-def get_sub_regs(reg):
-    regs = MachineRegisterDef.regs
-
-    stk = list(reg.subregs)
-    subregs = set()
-    while len(stk) > 0:
-        poped = stk.pop()
-
-        if poped in subregs:
-            continue
-
-        subregs.add(poped)
-
-        for subreg in poped.subregs:
-            stk.append(subreg)
-
-    return subregs
-
-
-def count_if(values, pred):
-    return len([v for v in values if pred(v)])
-
-
-def find_if(values, pred):
-    for i, v in enumerate(values):
-        if pred(v):
-            return i
-
-    return -1
-
-
 AArch64CC_EQ = 0b0000  # Equal                      Equal
 AArch64CC_NE = 0b0001  # Not equal                  Not equal, or unordered
 AArch64CC_HS = 0b0010  # Carry set                  >, ==, or unordered
@@ -1101,44 +1194,11 @@ AArch64CC_LT = 0b1011  # Less than                  Less than, or unordered
 AArch64CC_GT = 0b1100  # Greater than               Greater than
 AArch64CC_LE = 0b1101  # Less than or equal         <, ==, or unordered
 AArch64CC_AL = 0b1110  # Always (unconditional)     Always (unconditional)
+AArch64CC_NV = 0b1111  # Always (unconditional)     Always (unconditional)
 
 
-class AArch64ConstantPoolKind(Enum):
-    Value = auto()
-    ExtSymbol = auto()
-    BlockAddress = auto()
-    BasicBlock = auto()
-
-
-class AArch64ConstantPoolModifier(Enum):
-    Non = auto()
-    TLSGlobalDesc = auto()
-
-
-class AArch64ConstantPoolConstant(MachineConstantPoolValue):
-    def __init__(self, ty, label_id, value, kind, modifier, pc_offset, relative):
-        super().__init__(ty)
-        self.label_id = label_id
-        self.value = value
-        self.kind = kind
-        self.modifier = modifier
-        self.pc_offset = pc_offset
-        self.relative = relative
-
-    def __hash__(self):
-        return hash((self.value, self.kind, self.modifier, self.pc_offset, self.relative))
-
-    def __eq__(self, other):
-        if not isinstance(other, AArch64ConstantPoolConstant):
-            return False
-
-        eq1 = self.value == other.value and self.kind == other.kind and self.modifier == other.modifier
-
-        return eq1 and self.pc_offset == other.pc_offset and self.relative == other.relative
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
+def get_inverted_condcode(code):
+    return code ^ 0x1
 
 class AArch64TargetLowering(TargetLowering):
     def __init__(self):
@@ -1161,32 +1221,35 @@ class AArch64TargetLowering(TargetLowering):
 
         raise NotImplementedError()
 
-    def lower_setcc(self, node: DagNode, dag: Dag):
-        op1 = node.operands[0]
-        op2 = node.operands[1]
-        cond = node.operands[2]
+    def get_aarch64_cmp(self, lhs: DagValue, rhs: DagValue, cond: CondCode, dag: Dag):
 
-        is_fcmp = op1.node.value_types[0].value_type in [
+        is_fcmp = lhs.ty.value_type in [
             ValueType.F32, ValueType.F64]
 
         def compute_condcode(cond):
             ty = MachineValueType(ValueType.I8)
             swap = False
-            cond = cond.node.cond
 
             if is_fcmp:
                 if cond in [CondCode.SETEQ, CondCode.SETOEQ]:
                     node = dag.add_target_constant_node(ty, AArch64CC_EQ)
                 elif cond in [CondCode.SETGT, CondCode.SETOGT]:
                     node = dag.add_target_constant_node(ty, AArch64CC_GT)
-                elif cond in [CondCode.SETLT, CondCode.SETOLT]:
-                    node = dag.add_target_constant_node(ty, AArch64CC_GE)
-                    swap = True
+                elif cond in [CondCode.SETLT]:
+                    node = dag.add_target_constant_node(ty, AArch64CC_LT)
+                elif cond in [CondCode.SETOLT]:
+                    node = dag.add_target_constant_node(ty, AArch64CC_MI)
                 elif cond in [CondCode.SETGE, CondCode.SETOGE]:
                     node = dag.add_target_constant_node(ty, AArch64CC_GE)
+                elif cond in [CondCode.SETLE]:
+                    node = dag.add_target_constant_node(ty, AArch64CC_LE)
+                elif cond in [CondCode.SETOLE]:
+                    node = dag.add_target_constant_node(ty, AArch64CC_LS)
                 else:
                     raise NotImplementedError()
             else:
+                assert(lhs.ty.value_type in [
+                       ValueType.I8, ValueType.I16, ValueType.I32, ValueType.I64])
                 if cond == CondCode.SETEQ:
                     node = dag.add_target_constant_node(ty, AArch64CC_EQ)
                 elif cond == CondCode.SETNE:
@@ -1200,13 +1263,15 @@ class AArch64TargetLowering(TargetLowering):
                 elif cond == CondCode.SETGE:
                     node = dag.add_target_constant_node(ty, AArch64CC_GE)
                 elif cond == CondCode.SETULT:
-                    node = dag.add_target_constant_node(ty, 0b0011)
+                    node = dag.add_target_constant_node(ty, AArch64CC_HI)
+                    swap = True
                 elif cond == CondCode.SETUGT:
-                    node = dag.add_target_constant_node(ty, 0b1000)
+                    node = dag.add_target_constant_node(ty, AArch64CC_HI)
                 elif cond == CondCode.SETULE:
-                    node = dag.add_target_constant_node(ty, 0b1001)
+                    node = dag.add_target_constant_node(ty, AArch64CC_LS)
                 elif cond == CondCode.SETUGE:
-                    node = dag.add_target_constant_node(ty, 0b0010)
+                    node = dag.add_target_constant_node(ty, AArch64CC_LS)
+                    swap = True
                 else:
                     raise NotImplementedError()
 
@@ -1214,22 +1279,37 @@ class AArch64TargetLowering(TargetLowering):
 
         condcode, swap = compute_condcode(cond)
         if swap:
-            op1, op2 = op2, op1
+            lhs, rhs = rhs, lhs
 
         if is_fcmp:
             cmp_node = DagValue(dag.add_node(AArch64DagOps.CMPFP,
-                                             [MachineValueType(ValueType.GLUE)], op1, op2), 0)
-            cmp_node = DagValue(dag.add_node(AArch64DagOps.FMSTAT,
-                                             [MachineValueType(ValueType.GLUE)], cmp_node), 0)
+                                             [MachineValueType(ValueType.GLUE)], lhs, rhs), 0)
         else:
             cmp_node = DagValue(dag.add_node(AArch64DagOps.CMP,
-                                             [MachineValueType(ValueType.GLUE)], op1, op2), 0)
+                                             [MachineValueType(ValueType.GLUE)], lhs, rhs), 0)
 
-        # operand 1 is eflags.
-        setcc_node = dag.add_node(AArch64DagOps.SETCC, node.value_types,
-                                  DagValue(condcode, 0), cmp_node)
+        return cmp_node, condcode
 
-        return setcc_node
+    def lower_setcc(self, node: DagNode, dag: Dag):
+        op1 = node.operands[0]
+        op2 = node.operands[1]
+        cond = node.operands[2]
+
+        cmp_node, condcode = self.get_aarch64_cmp(
+            op1, op2, cond.node.cond, dag)
+
+        vt = node.value_types[0]
+
+        true_val = DagValue(dag.add_constant_node(
+            vt, ConstantInt(1, vt.get_ir_type())), 0)
+
+        false_val = DagValue(dag.add_constant_node(
+            vt, ConstantInt(0, vt.get_ir_type())), 0)
+
+        condcode = DagValue(dag.add_target_constant_node(
+            condcode.value_types[0], get_inverted_condcode(condcode.value.value)), 0)
+
+        return dag.add_node(AArch64DagOps.CSEL, [vt], false_val, true_val, condcode, cmp_node)
 
     def lower_brcond(self, node: DagNode, dag: Dag):
         chain = node.operands[0]
@@ -1237,37 +1317,44 @@ class AArch64TargetLowering(TargetLowering):
         dest = node.operands[2]
 
         if cond.node.opcode == VirtualDagOps.SETCC:
-            cond = DagValue(self.lower_setcc(cond.node, dag), 0)
+            lhs = cond.node.operands[0]
+            rhs = cond.node.operands[1]
+            condcode = cond.node.operands[2]
 
-        if cond.node.opcode == AArch64DagOps.SETCC:
-            condcode = cond.node.operands[0]
-            glue = cond.node.operands[1]
+            cmp_node, condcode = self.get_aarch64_cmp(
+                lhs, rhs, condcode.node.cond, dag)
+            glue = cmp_node
             cond = DagValue(dag.add_target_register_node(
                 MachineValueType(ValueType.I32), NZCV), 0)
 
-            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, DagValue(condcode, 0), cond, glue)
         else:
-            if cond.ty == MachineValueType(ValueType.I1):
-                cond = DagValue(dag.add_node(VirtualDagOps.ZERO_EXTEND, [
-                                MachineValueType(ValueType.I32)], cond), 0)
+            lhs = cond
+            rhs = DagValue(dag.add_constant_node(cond.ty, 0), 0)
+            condcode = DagValue(dag.add_condition_code_node(CondCode.SETNE), 0)
 
-            one = DagValue(dag.add_constant_node(cond.ty, 1), 0)
-            condcode = DagValue(dag.add_condition_code_node(CondCode.SETEQ), 0)
-            cond = DagValue(dag.add_node(VirtualDagOps.SETCC, [
-                            MachineValueType(ValueType.I1)], cond, one, condcode), 0)
-            cond = DagValue(self.lower_setcc(cond.node, dag), 0)
-
-            condcode = cond.node.operands[0]
-            glue = cond.node.operands[1]
+            cmp_node, condcode = self.get_aarch64_cmp(
+                lhs, rhs, condcode.node.cond, dag)
+            glue = cmp_node
             cond = DagValue(dag.add_target_register_node(
-                MachineValueType(ValueType.I32), CPSR), 0)
+                MachineValueType(ValueType.I32), NZCV), 0)
 
-            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, condcode, cond, glue)
+            return dag.add_node(AArch64DagOps.BRCOND, node.value_types, chain, dest, DagValue(condcode, 0), cond, glue)
 
     def lower_global_address(self, node: DagNode, dag: Dag):
-        target_address = dag.add_global_address_node(
-            node.value_types[0], node.value, True)
-        return dag.add_node(AArch64DagOps.ADRP, node.value_types, DagValue(target_address, 0))
+        data_layout = dag.mfunc.func_info.func.module.data_layout
+        ptr_ty = self.get_pointer_type(data_layout)
+
+        hi_adr = DagValue(dag.add_global_address_node(
+            node.value_types[0], node.value, True, AArch64OperandFlag.MO_PAGE), 0)
+
+        lo_adr = DagValue(dag.add_global_address_node(
+            node.value_types[0], node.value, True, AArch64OperandFlag.MO_PAGEOFF | AArch64OperandFlag.MO_NC), 0)
+
+        adrp = DagValue(dag.add_node(AArch64DagOps.ADRP,
+                                     node.value_types, hi_adr), 0)
+
+        return dag.add_node(AArch64DagOps.ADDlow, [ptr_ty], adrp, lo_adr)
 
     def lower_global_tls_address(self, node: DagNode, dag: Dag):
         data_layout = dag.mfunc.func_info.func.module.data_layout
@@ -1328,11 +1415,20 @@ class AArch64TargetLowering(TargetLowering):
 
     def lower_constant_pool(self, node: DagNode, dag: Dag):
         assert(isinstance(node, ConstantPoolDagNode))
-        data_layout = dag.mfunc.func_info.func.module.data_layout
 
-        target_constant_pool = dag.add_constant_pool_node(
-            self.get_pointer_type(data_layout), node.value, True)
-        return dag.add_node(AArch64DagOps.WRAPPER, node.value_types, DagValue(target_constant_pool, 0))
+        data_layout = dag.mfunc.func_info.func.module.data_layout
+        ptr_ty = self.get_pointer_type(data_layout)
+
+        hi_adr = DagValue(dag.add_constant_pool_node(
+            ptr_ty, node.value, True, AArch64OperandFlag.MO_PAGE), 0)
+
+        lo_adr = DagValue(dag.add_constant_pool_node(
+            ptr_ty, node.value, True, AArch64OperandFlag.MO_PAGEOFF | AArch64OperandFlag.MO_NC), 0)
+
+        adrp = DagValue(dag.add_node(AArch64DagOps.ADRP,
+                                     node.value_types, hi_adr), 0)
+
+        return dag.add_node(AArch64DagOps.ADDlow, [ptr_ty], adrp, lo_adr)
 
     def lower_build_vector(self, node: DagNode, dag: Dag):
         assert(node.opcode == VirtualDagOps.BUILD_VECTOR)
@@ -1345,11 +1441,7 @@ class AArch64TargetLowering(TargetLowering):
 
         if is_one_val:
             if node.value_types[0] == MachineValueType(ValueType.V4F32):
-                vec = DagValue(dag.add_node(VirtualDagOps.SCALAR_TO_VECTOR, [
-                               MachineValueType(ValueType.V2F32)], node.operands[0]), 0)
-                lane = DagValue(dag.add_target_constant_node(
-                    MachineValueType(ValueType.I32), 0), 0)
-                return dag.add_node(AArch64DagOps.VDUP, node.value_types, vec, lane)
+                return dag.add_node(AArch64DagOps.DUP, node.value_types, node.operands[0])
 
         operands = []
         for operand in node.operands:
@@ -1361,126 +1453,17 @@ class AArch64TargetLowering(TargetLowering):
 
         return dag.add_node(VirtualDagOps.BUILD_VECTOR, node.value_types, *operands)
 
-    def shuffle_param(self, fp3, fp2, fp1, fp0):
-        return (fp3 << 6) | (fp2 << 4) | (fp1 << 2) | fp0
-
-    def get_x86_shuffle_mask_v4(self, mask, dag):
-        mask_val = self.shuffle_param(mask[3], mask[2], mask[1], mask[0])
-        return DagValue(dag.add_target_constant_node(MachineValueType(ValueType.I8), mask_val), 0)
-
-    def lower_insert_vector_elt(self, node: DagNode, dag: Dag):
-        assert(node.opcode == VirtualDagOps.INSERT_VECTOR_ELT)
-        vec = node.operands[0]
-        elem = node.operands[1]
-        idx = node.operands[2]
-
-        if isinstance(idx.node, ConstantDagNode):
-            if node.value_types[0].value_type == ValueType.V4F32:
-                if elem.ty in SPR.tys:
-                    subreg_idx = idx.node.value.value
-                    if subreg_idx == 0:
-                        subreg = ssub_0
-                    elif subreg_idx == 1:
-                        subreg = ssub_1
-                    elif subreg_idx == 2:
-                        subreg = ssub_2
-                    elif subreg_idx == 3:
-                        subreg = ssub_3
-                    else:
-                        raise ValueError("Invalid index")
-
-                    subreg_id = DagValue(dag.add_target_constant_node(
-                        MachineValueType(ValueType.I32), subregs.index(subreg)), 0)
-                    return dag.add_machine_dag_node(TargetDagOps.INSERT_SUBREG, [vec.ty], vec, elem, subreg_id)
-
-        raise ValueError()
-
-    def get_scalar_value_for_vec_elem(self, vec, idx, dag: Dag):
-        if vec.node.opcode == VirtualDagOps.SCALAR_TO_VECTOR and idx == 0:
-            scalar_val = vec.node.operands[idx]
-            return scalar_val
-
-        raise ValueError()
-
-    def lower_shuffle_as_elem_insertion(self, vt, vec1, vec2, mask, dag: Dag):
-        vec2_idx = find_if(mask, lambda m: m >= len(mask))
-
-        elem_vt = vt.get_vector_elem_type()
-        assert(elem_vt.value_type == ValueType.F32)
-
-        vec2_elem = self.get_scalar_value_for_vec_elem(vec2, vec2_idx, dag)
-
-        vec2 = DagValue(dag.add_node(
-            VirtualDagOps.SCALAR_TO_VECTOR, [vt], vec2_elem), 0)
-
-        if elem_vt.value_type == ValueType.F32:
-            opcode = AArch64DagOps.MOVSS
-        else:
-            opcode = AArch64DagOps.MOVSD
-
-        return dag.add_node(opcode, [vt], vec1, vec2)
-
-    def lower_shuffle_shufps(self, vt, vec1, vec2, mask, dag: Dag):
-        assert(len(mask) == 4)
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        new_mask = list(mask)
-        lo_vec, hi_vec = vec1, vec2
-
-        if num_vec2_elems == 1:
-            vec2_idx = find_if(mask, lambda m: m >= 4)
-
-            # Each element of the vector is divided into groups of two elements.
-            # If the index is odd, the index of the other element is even.
-            vec2_idx_adj = vec2_idx ^ 1
-
-            # Merge the vectors.
-            blend_mask = [mask[vec2_idx] - 4, 0, mask[vec2_idx_adj], 0]
-            vec2 = DagValue(dag.add_node(AArch64DagOps.SHUFP, [
-                vt], vec2, vec1, self.get_x86_shuffle_mask_v4(blend_mask, dag)), 0)
-
-            if vec2_idx < 2:
-                lo_vec = vec2
-                hi_vec = vec1
-            else:
-                lo_vec = vec1
-                hi_vec = vec2
-
-            new_mask[vec2_idx] = 0
-            new_mask[vec2_idx_adj] = 2
-        elif num_vec2_elems == 2:
-            raise NotImplementedError()
-
-        return dag.add_node(AArch64DagOps.SHUFP, [vt], lo_vec, hi_vec, self.get_x86_shuffle_mask_v4(new_mask, dag))
-
-    def lower_v4f32_shuffle(self, node: DagNode, dag: Dag):
-        vec1 = node.operands[0]
-        vec2 = node.operands[1]
-        mask = node.mask
-        num_vec2_elems = count_if(mask, lambda m: m >= 4)
-
-        if num_vec2_elems == 1 and mask[0] >= 4:
-            return self.lower_shuffle_as_elem_insertion(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-        return self.lower_shuffle_shufps(MachineValueType(ValueType.V4F32), vec1, vec2, mask, dag)
-
-    def lower_shuffle_vector(self, node: DagNode, dag: Dag):
-        if node.value_types[0] == MachineValueType(ValueType.V4F32):
-            return self.lower_v4f32_shuffle(node, dag)
-
-        raise ValueError()
-
     def lower_sub(self, node: DagNode, dag: Dag):
         return dag.add_node(AArch64DagOps.SUB, node.value_types, *node.operands)
 
     def lower_bitcast(self, node: DagNode, dag: Dag):
         hwmode = dag.mfunc.target_info.hwmode
 
-        tys = QPR.get_types(hwmode)
+        tys = FPR128.get_types(hwmode)
 
-        if node.operands[0].ty in tys:
-            if node.value_types[0] in tys:
-                return dag.add_node(VirtualDagOps.OR, node.value_types, node.operands[0], node.operands[0])
+        # if node.operands[0].ty in tys:
+        #     if node.value_types[0] in tys:
+        #         return dag.add_node(VirtualDagOps.OR, node.value_types, node.operands[0], node.operands[0])
 
         return node
 
@@ -1491,8 +1474,8 @@ class AArch64TargetLowering(TargetLowering):
             return self.lower_brcond(node, dag)
         elif node.opcode == VirtualDagOps.SETCC:
             return self.lower_setcc(node, dag)
-        elif node.opcode == VirtualDagOps.SUB:
-            return self.lower_sub(node, dag)
+        # elif node.opcode == VirtualDagOps.SUB:
+        #     return self.lower_sub(node, dag)
         elif node.opcode == VirtualDagOps.GLOBAL_ADDRESS:
             return self.lower_global_address(node, dag)
         elif node.opcode == VirtualDagOps.CONSTANT_FP:
@@ -1503,10 +1486,6 @@ class AArch64TargetLowering(TargetLowering):
             return self.lower_constant_pool(node, dag)
         elif node.opcode == VirtualDagOps.BUILD_VECTOR:
             return self.lower_build_vector(node, dag)
-        elif node.opcode == VirtualDagOps.SHUFFLE_VECTOR:
-            return self.lower_shuffle_vector(node, dag)
-        # elif node.opcode == VirtualDagOps.INSERT_VECTOR_ELT:
-        #     return self.lower_insert_vector_elt(node, dag)
         elif node.opcode == VirtualDagOps.BITCAST:
             return self.lower_bitcast(node, dag)
         elif node.opcode == VirtualDagOps.GLOBAL_TLS_ADDRESS:
@@ -1538,6 +1517,9 @@ class AArch64TargetLowering(TargetLowering):
 
                 for reg_idx in range(reg_count):
                     flags = CCArgFlags()
+
+                    if arg.has_attribute(AttributeKind.StructRet):
+                        flags.is_sret = True
 
                     args.append(CallingConvArg(
                         vt, reg_vt, i, offset_in_arg, flags))
@@ -1640,7 +1622,7 @@ class AArch64TargetLowering(TargetLowering):
 
                     regs = []
                     reg_vals = []
-                    for idx in range(reg_count):
+                    for _ in range(reg_count):
                         vreg = target_lowering.get_machine_vreg(
                             reg_vt)
                         reg = builder.mfunc.reg_info.create_virtual_register(
@@ -1661,7 +1643,7 @@ class AArch64TargetLowering(TargetLowering):
 
         if has_demote_arg:
             demote_arg = func.args[0]
-            mfunc.func_info.sret_reg = mfunc.func_info.reg_value_map[demote_arg]
+            mfunc.func_info.sret_reg = builder.func_info.reg_value_map[demote_arg]
             pass
         else:
             mfunc.func_info.sret_reg = None
@@ -1685,30 +1667,25 @@ class AArch64TargetLowering(TargetLowering):
 
         front_inst = bb.insts[0]
 
-        push_fp_lr_inst = MachineInstruction(AArch64MachineOps.STMDB_UPD)
-        push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
-        push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
-        push_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
+        push_fp_lr_inst = MachineInstruction(AArch64MachineOps.STPXprei)
+        push_fp_lr_inst.add_reg(MachineRegister(FP), RegState.Non)
         push_fp_lr_inst.add_reg(MachineRegister(LR), RegState.Non)
+        push_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
+        push_fp_lr_inst.add_imm(-32)
 
         push_fp_lr_inst.insert_before(front_inst)
 
-        mov_esp_inst = MachineInstruction(AArch64MachineOps.MOVr)
-        mov_esp_inst.add_reg(MachineRegister(R11), RegState.Define)  # To
-        mov_esp_inst.add_reg(MachineRegister(SP), RegState.Non)  # From
-
-        mov_esp_inst.insert_before(front_inst)
+        inst_info.copy_phys_reg(
+            MachineRegister(SP), MachineRegister(FP), False, push_fp_lr_inst)
 
         stack_size = func.frame.estimate_stack_size(
             AArch64MachineOps.ADJCALLSTACKDOWN, AArch64MachineOps.ADJCALLSTACKUP)
 
         max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
-        stack_size = int(
+        stack_size = func.frame.stack_size = int(
             int((stack_size + max_align - 1) / max_align) * max_align)
 
-        assert(get_mod_imm(stack_size) != -1)
-
-        sub_sp_inst = MachineInstruction(AArch64MachineOps.SUBri)
+        sub_sp_inst = MachineInstruction(AArch64MachineOps.SUBXri)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Define)
         sub_sp_inst.add_reg(MachineRegister(SP), RegState.Non)
         sub_sp_inst.add_imm(stack_size)
@@ -1728,6 +1705,13 @@ class AArch64TargetLowering(TargetLowering):
         reg_info = func.target_info.get_register_info()
         data_layout = func.func_info.func.module.data_layout
 
+        stack_size = func.frame.estimate_stack_size(
+            AArch64MachineOps.ADJCALLSTACKDOWN, AArch64MachineOps.ADJCALLSTACKUP)
+
+        max_align = max(func.frame.max_alignment, func.frame.stack_alignment)
+        stack_size = int(
+            int((stack_size + max_align - 1) / max_align) * max_align)
+
         front_inst = bb.insts[-1]
 
         for cs_info in func.frame.calee_save_info:
@@ -1738,17 +1722,18 @@ class AArch64TargetLowering(TargetLowering):
             inst_info.copy_reg_from_stack(MachineRegister(
                 reg), frame_idx, regclass, front_inst)
 
-        restore_esp_inst = MachineInstruction(AArch64MachineOps.MOVr)
-        restore_esp_inst.add_reg(MachineRegister(SP), RegState.Define)  # To
-        restore_esp_inst.add_reg(MachineRegister(R11), RegState.Non)  # From
+        restore_sp_inst = MachineInstruction(AArch64MachineOps.ADDXri)
+        restore_sp_inst.add_reg(MachineRegister(SP), RegState.Define)
+        restore_sp_inst.add_reg(MachineRegister(SP), RegState.Non)
+        restore_sp_inst.add_imm(stack_size)
 
-        restore_esp_inst.insert_before(front_inst)
+        restore_sp_inst.insert_before(front_inst)
 
-        pop_fp_lr_inst = MachineInstruction(AArch64MachineOps.LDMIA_UPD)
-        pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Define)
-        pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
-        pop_fp_lr_inst.add_reg(MachineRegister(R11), RegState.Non)
+        pop_fp_lr_inst = MachineInstruction(AArch64MachineOps.LDPXposti)
+        pop_fp_lr_inst.add_reg(MachineRegister(FP), RegState.Non)
         pop_fp_lr_inst.add_reg(MachineRegister(LR), RegState.Non)
+        pop_fp_lr_inst.add_reg(MachineRegister(SP), RegState.Non)
+        pop_fp_lr_inst.add_imm(32)
 
         pop_fp_lr_inst.insert_before(front_inst)
 
@@ -1786,7 +1771,7 @@ class AArch64TargetLowering(TargetLowering):
             if offset != 0:
                 src_ty = src_op.ty
                 size_node = DagValue(
-                    builder.g.add_target_constant_node(src_ty, offset), 0)
+                    builder.g.add_constant_node(src_ty, offset), 0)
                 src_ptr = DagValue(builder.g.add_node(
                     VirtualDagOps.ADD, [src_ty], src_op, size_node), 0)
             else:
@@ -1795,7 +1780,7 @@ class AArch64TargetLowering(TargetLowering):
             if offset != 0:
                 dst_ty = dst_op.ty
                 size_node = DagValue(
-                    builder.g.add_target_constant_node(dst_ty, offset), 0)
+                    builder.g.add_constant_node(dst_ty, offset), 0)
                 dst_ptr = DagValue(builder.g.add_node(
                     VirtualDagOps.ADD, [dst_ty], dst_op, size_node), 0)
             else:
@@ -1825,29 +1810,54 @@ class AArch64TargetRegisterInfo(TargetRegisterInfo):
 
     def get_reserved_regs(self):
         reserved = []
-        reserved.extend([R11, R12, SP, LR, PC])
+        reserved.extend(iter_super_regs(W29))
+        reserved.extend(iter_super_regs(WSP))
+        reserved.extend(iter_super_regs(WZR))
+
+        reserved.extend(iter_super_regs(W0))
+        reserved.extend(iter_super_regs(W1))
+        reserved.extend(iter_super_regs(W2))
+        reserved.extend(iter_super_regs(W3))
+        reserved.extend(iter_super_regs(W4))
+        reserved.extend(iter_super_regs(W5))
+        reserved.extend(iter_super_regs(W6))
+        reserved.extend(iter_super_regs(W7))
+
+        reserved.extend(iter_super_regs(B0))
+        reserved.extend(iter_super_regs(B1))
+        reserved.extend(iter_super_regs(B2))
+        reserved.extend(iter_super_regs(B3))
+        reserved.extend(iter_super_regs(B4))
+        reserved.extend(iter_super_regs(B5))
+        reserved.extend(iter_super_regs(B6))
+        reserved.extend(iter_super_regs(B7))
 
         return reserved
 
     @property
     def allocatable_regs(self):
         regs = set()
-        regs |= set(GPR.regs)
-        regs |= set(SPR.regs)
-        regs |= set(DPR.regs)
-        regs |= set(QPR.regs)
+        regs |= set(GPR32.regs)
+        regs |= set(GPR64.regs)
+        regs |= set(FPR16.regs)
+        regs |= set(FPR32.regs)
+        regs |= set(FPR64.regs)
+        regs |= set(FPR128.regs)
 
         return regs
 
     def get_callee_saved_regs(self):
-        callee_save_regs = [R4, R5, R6, R7, R8, R9,
-                            R10, D8, D9, D10, D11, D12, D13, D14, D15]
+        callee_save_regs = []
+        callee_save_regs.extend([
+            X19, X20, X21, X22,
+            X23, X24, X25, X26, X27, X28, FP])
+        callee_save_regs.extend([D8, D9, D10, D11, D12, D13, D14, D15])
 
         return callee_save_regs
 
     def get_callee_clobbered_regs(self):
-        regs = [R0, R1, R2, R3,
-                D0, D1, D2, D3, D4, D5, D6, D7]
+        regs = [X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, D16, D17,
+                D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31]
 
         return regs
 
@@ -1872,7 +1882,7 @@ class AArch64FrameLowering(TargetFrameLowering):
     def __init__(self, alignment):
         super().__init__(alignment)
 
-        self.frame_spill_size = 8
+        self.frame_spill_size = 32
 
     @property
     def stack_grows_direction(self):
@@ -2125,9 +2135,6 @@ class AArch64TargetMachine:
         from codegen.aarch64_asm_printer import AArch64AsmInfo, MCAsmStream, AArch64CodeEmitter, AArch64AsmBackend, AArch64AsmPrinter
         from codegen.coff import WinCOFFObjectWriter, WinCOFFObjectStream
         from codegen.elf import ELFObjectStream, ELFObjectWriter, AArch64ELFObjectWriter
-        from codegen.arm_constant_island import ARMConstantIsland
-
-        pass_manager.passes.append(ARMConstantIsland())
 
         objformat = self.triple.objformat
 

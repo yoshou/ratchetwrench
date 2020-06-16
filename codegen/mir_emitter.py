@@ -133,6 +133,29 @@ class MachineInstrEmitter:
             vals = self.vr_map[node]
             return vals[idx]
 
+        if node.opcode == TargetDagOps.IMPLICIT_DEF:
+            reg_info = self.bb.func.target_info.get_register_info()
+
+            def get_subclass_with_subreg(regclass, subreg):
+                if isinstance(subreg, ComposedSubRegDescription):
+                    regclass = get_subclass_with_subreg(
+                        regclass, subreg.subreg_a)
+                    subreg = subreg.subreg_b
+
+                return regclass.subclass_and_subregs[subreg]
+
+            regclass = reg_info.get_regclass_for_vt(node.value_types[0])
+            vreg = self.create_virtual_register(regclass)
+
+            inst = self.create_instruction(TargetDagOps.IMPLICIT_DEF)
+            reg = inst.add_reg(vreg, RegState.Define)
+
+            self.bb.append_inst(inst)
+
+            self.vr_map[node] = [reg]
+
+            return reg
+
         raise ValueError(
             "Argument node is not mapped.")
 

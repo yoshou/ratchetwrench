@@ -16,7 +16,7 @@ from codegen.aarch64_def import *
 
 def get_bb_symbol(bb: BasicBlock, ctx: MCContext):
     bb_num = bb.number
-    func_num = bb.func.func_info.func.module.funcs.index(
+    func_num = list(bb.func.func_info.func.module.funcs.values()).index(
         bb.func.func_info.func)
     prefix = ".LBB"
     return ctx.get_or_create_symbol(f"{prefix}{str(func_num)}_{str(bb_num)}")
@@ -32,10 +32,11 @@ def get_pic_label(label_id, func_number, ctx: MCContext):
     return ctx.get_or_create_symbol(f"PC{func_number}_{label_id}")
 
 
-class AArch64MCExprVarKind(Enum):
+class AArch64MCExprVarKind(IntFlag):
     Non = auto()
-    Lo = auto()
-    Hi = auto()
+    Page = auto()
+    PageOff = auto()
+    Nc = auto()
 
 
 class AArch64MCExpr(MCTargetExpr):
@@ -44,6 +45,16 @@ class AArch64MCExpr(MCTargetExpr):
 
         self.kind = kind
         self.expr = expr
+
+    def evaluate_expr_as_relocatable(self, layout, fixup):
+
+        result = evaluate_expr_as_relocatable(
+            self.expr, layout.asm, layout, fixup)
+
+        if not result:
+            return result
+
+        return result
 
 
 class AArch64MCInstLower:
@@ -69,10 +80,15 @@ class AArch64MCInstLower:
 
         expr = MCSymbolRefExpr(symbol)
 
-        if operand.target_flags & AArch64OperandFlag.MO_LO16.value:
-            expr = AArch64MCExpr(AArch64MCExprVarKind.Lo, expr)
-        elif operand.target_flags & AArch64OperandFlag.MO_HI16.value:
-            expr = AArch64MCExpr(AArch64MCExprVarKind.Hi, expr)
+        ref_flags = AArch64MCExprVarKind.Non
+
+        if operand.target_flags & AArch64OperandFlag.MO_PAGE.value:
+            ref_flags |= AArch64MCExprVarKind.Page
+
+        if operand.target_flags & AArch64OperandFlag.MO_NC.value:
+            ref_flags |= AArch64MCExprVarKind.Nc
+
+        expr = AArch64MCExpr(ref_flags, expr)
 
         if not operand.is_jti and not operand.is_mbb and operand.offset != 0:
             expr = MCBinaryExpr(MCBinaryOpcode.Add, expr,
@@ -195,12 +211,51 @@ class AArch64AsmPrinter(AsmPrinter):
                     return sym
 
         func = self.mfunc.func_info.func
-        func_num = func.module.funcs.index(func)
+        func_num = list(func.module.funcs.values()).index(func)
         name = f"CPI{func_num}_{index}"
         return self.ctx.get_or_create_symbol(name)
 
     def emit_constant_pool(self):
-        pass
+        cp = self.mfunc.constant_pool
+        if len(cp.constants) == 0:
+            return
+
+        cp_sections = OrderedDict()
+        for idx, entry in enumerate(cp.constants):
+            align = entry.alignment
+            kind = self.get_cp_section_kind(entry)
+
+            section = self.ctx.obj_file_info.get_section_for_const(
+                kind, entry.value, align)
+
+            if section not in cp_sections:
+                cp_indices = []
+                cp_sections[section] = cp_indices
+            else:
+                cp_indices = cp_sections[section]
+
+            cp_indices.append(idx)
+
+        for section, cp_indices in cp_sections.items():
+            offset = 0
+            self.stream.switch_section(section)
+            for cp_index in cp_indices:
+                symbol = self.get_cp_index_symbol(cp_index)
+                self.stream.emit_label(symbol)
+
+                cp_entry = cp.constants[cp_index]
+                align = cp_entry.alignment
+
+                aligned_offset = int(int((offset + align - 1) / align) * align)
+
+                self.stream.emit_zeros(aligned_offset - offset)
+                offset = aligned_offset
+
+                data_layout = self.module.data_layout
+                value_size = data_layout.get_type_alloc_size(cp_entry.value.ty)
+                self.emit_global_constant(data_layout, cp_entry.value)
+
+                offset += value_size
 
     def emit_function_header(self, func):
         self.emit_constant_pool()
@@ -247,42 +302,49 @@ class AArch64AsmPrinter(AsmPrinter):
     def emit_instruction(self, inst: MachineInstruction):
         data_layout = self.func.module.data_layout
 
-        if inst.opcode == AArch64MachineOps.CPEntry:
-            label_id = inst.operands[0].val
-            cp_idx = inst.operands[1].index
-
-            self.stream.emit_label(self.get_constant_pool_symbol(cp_idx))
-
-            cp_entry = self.mfunc.constant_pool.constants[cp_idx]
-
-            if cp_entry.is_machine_cp_entry:
-                self.emit_machine_cp_value(data_layout, cp_entry.value)
-            else:
-                self.emit_global_constant(data_layout, cp_entry.value)
+        if inst.opcode == TargetDagOps.IMPLICIT_DEF:
             return
 
-        if inst.opcode == AArch64MachineOps.PIC_ADD:
-            pic_label_id = inst.operands[2].val
-            func_number = self.func.module.funcs.index(self.func)
-            self.stream.emit_label(get_pic_label(
-                pic_label_id, func_number, self.ctx))
+        # if inst.opcode == AArch64MachineOps.CPEntry:
+        #     label_id = inst.operands[0].val
+        #     cp_idx = inst.operands[1].index
 
-            mc_inst = MCInst(AArch64MachineOps.ADDrr)
-            mc_inst.add_operand(MCOperandReg(inst.operands[0].reg))
-            mc_inst.add_operand(MCOperandReg(MachineRegister(PC)))
-            mc_inst.add_operand(MCOperandReg(inst.operands[1].reg))
-            self.emit_mc_inst(mc_inst)
-            return
+        #     self.stream.emit_label(self.get_constant_pool_symbol(cp_idx))
+
+        #     cp_entry = self.mfunc.constant_pool.constants[cp_idx]
+
+        #     if cp_entry.is_machine_cp_entry:
+        #         self.emit_machine_cp_value(data_layout, cp_entry.value)
+        #     else:
+        #         self.emit_global_constant(data_layout, cp_entry.value)
+        #     return
+
+        # if inst.opcode == AArch64MachineOps.PIC_ADD:
+        #     pic_label_id = inst.operands[2].val
+        #     func_number = self.func.module.funcs.index(self.func)
+        #     self.stream.emit_label(get_pic_label(
+        #         pic_label_id, func_number, self.ctx))
+
+        #     mc_inst = MCInst(AArch64MachineOps.ADDrr)
+        #     mc_inst.add_operand(MCOperandReg(inst.operands[0].reg))
+        #     mc_inst.add_operand(MCOperandReg(MachineRegister(PC)))
+        #     mc_inst.add_operand(MCOperandReg(inst.operands[1].reg))
+        #     self.emit_mc_inst(mc_inst)
+        #     return
 
         mc_inst_lower = AArch64MCInstLower(self.ctx, inst.mbb.func, self)
         mc_inst = mc_inst_lower.lower(inst)
 
         for operand in mc_inst.operands:
             if operand.is_expr:
-                if operand.expr.ty == MCExprType.SymbolRef:
+                expr = operand.expr
+                if expr.ty == MCExprType.Target:
+                    expr = expr.expr
+
+                if expr.ty == MCExprType.SymbolRef:
                     if hasattr(self.stream, "assembler"):
                         self.stream.assembler.register_symbol(
-                            operand.expr.symbol)
+                            expr.symbol)
 
         self.emit_mc_inst(mc_inst)
 
@@ -342,10 +404,10 @@ class AArch64AsmPrinter(AsmPrinter):
             self.stream.emit_symbol_attrib(symbol, attr)
 
     def finalize(self):
-        for variable in self.module.global_variables:
+        for variable in self.module.globals.values():
             self.emit_global_variable(variable)
 
-        for func in self.module.funcs:
+        for func in self.module.funcs.values():
             if not func.is_declaration:
                 continue
 
@@ -511,11 +573,10 @@ def get_fixup_size_by_kind(kind: MCFixupKind):
     elif kind in [MCFixupKind.PCRel_8, MCFixupKind.SecRel_8, MCFixupKind.Data_8]:
         return 8
     elif kind in [
-            AArch64FixupKind.AArch64_COND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BRANCH,
-            AArch64FixupKind.AArch64_UNCOND_BL, AArch64FixupKind.AArch64_PCREL_10, AArch64FixupKind.AArch64_LDST_PCREL_12]:
+            AArch64FixupKind.AArch64_ADD_IMM12]:
         return 3
     elif kind in [
-            AArch64FixupKind.AArch64_MOVW_LO16, AArch64FixupKind.AArch64_MOVT_HI16]:
+            AArch64FixupKind.AArch64_PCREL_ADRP_IMM21, AArch64FixupKind.AArch64_PCREL_BRANCH26, AArch64FixupKind.AArch64_PCREL_BRANCH19]:
         return 4
 
     raise ValueError("kind")
@@ -533,21 +594,20 @@ class AArch64AsmBackend(MCAsmBackend):
 
     def get_fixup_kind_info(self, kind):
         table = {
-            AArch64FixupKind.AArch64_COND_BRANCH: MCFixupKindInfo(
-                "AArch64_COND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            AArch64FixupKind.AArch64_UNCOND_BRANCH: MCFixupKindInfo(
-                "AArch64_UNCOND_BRANCH", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            AArch64FixupKind.AArch64_UNCOND_BL: MCFixupKindInfo(
-                "AArch64_UNCOND_BL", 0, 24, MCFixupKindInfoFlag.IsPCRel),
-            AArch64FixupKind.AArch64_PCREL_10: MCFixupKindInfo(
-                "AArch64_PCREL_10", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            AArch64FixupKind.AArch64_LDST_PCREL_12: MCFixupKindInfo(
-                "AArch64_LDST_PCREL_12", 0, 32, MCFixupKindInfoFlag.IsPCRel),
-            AArch64FixupKind.AArch64_MOVT_HI16: MCFixupKindInfo(
-                "AArch64_MOVT_HI16", 0, 20, MCFixupKindInfoFlag.Non),
-            AArch64FixupKind.AArch64_MOVW_LO16: MCFixupKindInfo(
-                "AArch64_MOVW_LO16", 0, 20, MCFixupKindInfoFlag.Non)
-
+            AArch64FixupKind.AArch64_ADD_IMM12: MCFixupKindInfo(
+                "AArch64_ADD_IMM12", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_PCREL_ADR_IMM21: MCFixupKindInfo(
+                "AArch64_PCREL_ADR_IMM21", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_ADRP_IMM21: MCFixupKindInfo(
+                "AArch64_PCREL_ADRP_IMM21", 0, 32, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_CALL26: MCFixupKindInfo(
+                "AArch64_PCREL_CALL26", 0, 26, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_BRANCH14: MCFixupKindInfo(
+                "AArch64_PCREL_BRANCH14", 5, 14, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_BRANCH19: MCFixupKindInfo(
+                "AArch64_PCREL_BRANCH19", 5, 19, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_PCREL_BRANCH26: MCFixupKindInfo(
+                "AArch64_PCREL_BRANCH26", 0, 26, MCFixupKindInfoFlag.IsPCRel)
         }
 
         if kind in table:
@@ -561,58 +621,45 @@ class AArch64AsmBackend(MCAsmBackend):
 
     def adjust_fixup_value(self, fixup: MCFixup, fixed_value: int):
         kind = fixup.kind
+        signed_value = fixed_value
 
-        if kind in [AArch64FixupKind.AArch64_COND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BRANCH, AArch64FixupKind.AArch64_UNCOND_BL]:
-            return 0xffffff & ((fixed_value - 8) >> 2)
+        def adr_imm_bits(value):
+            lo2 = value & 0x3
+            hi19 = (value & 0x1ffffc) >> 2
+            return (hi19 << 5) | (lo2 << 29)
 
-        if kind in [AArch64FixupKind.AArch64_PCREL_10]:
-            fixed_value = fixed_value - 8
-            is_add = 1
-            if fixed_value < 0:
-                is_add = 0
-                fixed_value = -fixed_value
+        if kind in [AArch64FixupKind.AArch64_PCREL_ADRP_IMM21]:
+            return adr_imm_bits((fixed_value & 0x1fffff000) >> 12)
 
-            fixed_value = fixed_value >> 2
+        if kind in [AArch64FixupKind.AArch64_ADD_IMM12]:
+            assert(fixed_value < 0x1000)
 
-            assert(fixed_value < 256)
-
-            fixed_value = fixed_value | (is_add << 23)
             return fixed_value
 
-        if kind in [AArch64FixupKind.AArch64_LDST_PCREL_12]:
-            fixed_value = fixed_value - 8
-            is_add = 1
-            if fixed_value < 0:
-                is_add = 0
-                fixed_value = -fixed_value
+        if kind in [AArch64FixupKind.AArch64_PCREL_BRANCH26, AArch64FixupKind.AArch64_PCREL_CALL26]:
+            assert(signed_value <= 134217727 and signed_value >= -134217728)
+            assert(fixed_value & 0x3 == 0)
 
-            fixed_value = get_mod_imm(fixed_value)
+            return (fixed_value >> 2) & 0x3ffffff
 
-            assert(fixed_value >= 0)
+        if kind in [AArch64FixupKind.AArch64_PCREL_BRANCH19]:
+            assert(signed_value <= 2097151 and signed_value >= -2097152)
+            assert(fixed_value & 0x3 == 0)
 
-            fixed_value = fixed_value | (is_add << 23)
-            return fixed_value
-
-        if kind in [AArch64FixupKind.AArch64_MOVT_HI16]:
-            fixed_value = fixed_value >> 16
-        if kind in [AArch64FixupKind.AArch64_MOVT_HI16, AArch64FixupKind.AArch64_MOVW_LO16]:
-            hi4 = (fixed_value >> 12) & 0xF
-            lo12 = fixed_value & 0xFFF
-
-            return (hi4 << 16) | lo12
-
-        if kind in [MCFixupKind.Data_1, MCFixupKind.Data_2, MCFixupKind.Data_4]:
-            return fixed_value
+            return (fixed_value >> 2) & 0x7ffff
 
         raise NotImplementedError()
 
     def apply_fixup(self, fixup: MCFixup, fixed_value: int, contents):
-        size = get_fixup_size_by_kind(fixup.kind)
-        offset = fixup.offset
-        fixed_value = self.adjust_fixup_value(fixup, fixed_value)
+        size_in_bits = self.get_fixup_kind_info(fixup.kind).size
+        offset_in_bits = self.get_fixup_kind_info(fixup.kind).offset
+        size = int((offset_in_bits + size_in_bits + 7) / 8)
 
         if fixed_value == 0:
             return
+
+        offset = fixup.offset
+        fixed_value = self.adjust_fixup_value(fixup, fixed_value)
 
         def to_bytes(value, order):
             import struct
@@ -626,6 +673,8 @@ class AArch64AsmBackend(MCAsmBackend):
         assert(offset < len(contents))
         assert(offset + size <= len(contents))
 
+        fixed_value = fixed_value << offset_in_bits
+
         order = 'little'
         bys = list(to_bytes(fixed_value, order))
 
@@ -633,8 +682,8 @@ class AArch64AsmBackend(MCAsmBackend):
             contents[offset + idx] |= bys[idx]
 
     def should_force_relocation(self, asm, fixup: MCFixup, target):
-        if fixup.kind == AArch64FixupKind.AArch64_UNCOND_BL:
-            return True
+        # if fixup.kind == AArch64FixupKind.AArch64_UNCOND_BL:
+        #     return True
 
         return False
 
@@ -644,13 +693,17 @@ class AArch64TSFlags(IntFlag):
 
 
 class AArch64FixupKind(Enum):
-    AArch64_COND_BRANCH = auto()
-    AArch64_UNCOND_BRANCH = auto()
-    AArch64_UNCOND_BL = auto()
-    AArch64_PCREL_10 = auto()
-    AArch64_LDST_PCREL_12 = auto()
-    AArch64_MOVW_LO16 = auto()
-    AArch64_MOVT_HI16 = auto()
+    AArch64_PCREL_ADR_IMM21 = auto()
+    AArch64_PCREL_ADRP_IMM21 = auto()
+    AArch64_ADD_IMM12 = auto()
+    AArch64_PCREL_CALL26 = auto()
+    AArch64_PCREL_BRANCH14 = auto()
+    AArch64_PCREL_BRANCH19 = auto()
+    AArch64_PCREL_BRANCH26 = auto()
+
+
+def get_reg_code(operand):
+    return operand.reg.spec.encoding
 
 
 def write_bits(value, bits, offset, count):
@@ -658,974 +711,782 @@ def write_bits(value, bits, offset, count):
     return (value & ~mask) | ((bits << offset) & mask)
 
 
-def get_binop_opcode(inst: MCInst):
-    opcode = inst.opcode
-    if opcode in [AArch64MachineOps.MOVr, AArch64MachineOps.MOVCCi, AArch64MachineOps.MOVCCr]:
-        return 0b1101
-    if opcode in [AArch64MachineOps.ANDri, AArch64MachineOps.ANDrr, AArch64MachineOps.ANDrsi]:
-        return 0b0000
-    if opcode in [AArch64MachineOps.XORri, AArch64MachineOps.XORrr, AArch64MachineOps.XORrsi]:
-        return 0b0001
-    if opcode in [AArch64MachineOps.ORri, AArch64MachineOps.ORrr, AArch64MachineOps.ORrsi]:
-        return 0b1100
-    if opcode in [AArch64MachineOps.ADDri, AArch64MachineOps.ADDrr, AArch64MachineOps.ADDrsi]:
-        return 0b0100
-    if opcode in [AArch64MachineOps.SUBri, AArch64MachineOps.SUBrr, AArch64MachineOps.SUBrsi]:
-        return 0b0010
-    if opcode in [AArch64MachineOps.CMPri, AArch64MachineOps.CMPrr, AArch64MachineOps.CMPrsi]:
-        return 0b1010
-
-    raise NotImplementedError()
-
-
-def get_binop_inst_code(inst: MCInst, cond, imm_op, set_cond, rn, rd):
-    opc = get_binop_opcode(inst)
-
-    if opc == 0b1101:
-        rn = rd
-
-    code = get_inst_code(inst, rn, rd)
-
-    code = write_bits(code, cond, 28, 4)
-
-    code = write_bits(code, 0b0, 26, 2)
-    code = write_bits(code, imm_op, 25, 1)
-    code = write_bits(code, opc, 21, 4)
-
-    if opc == 0b1101:
-        code = write_bits(code, 0, 16, 4)
-
-    if opc == 0b1010:
-        code = write_bits(code, 0, 12, 4)
-        code = write_bits(code, 1, 20, 1)
-
-    if imm_op == 0:
-        code = write_bits(code, get_reg_code(inst.operands[-1]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        imm = get_modimm_code(inst.operands[-1])
-        code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
-def get_inst_code(inst: MCInst, rn, rd):
-    code = 0
-    code = write_bits(code, 0b1110, 28, 4)
-    code = write_bits(code, get_reg_code(rd), 12, 4)
-    code = write_bits(code, get_reg_code(rn), 16, 4)
-    code = write_bits(code, 1, 23, 1)
-
-    return code
-
-
-def get_reg_code(operand):
-    return operand.reg.spec.encoding
-
-
-def get_imm16_code(operand):
-    return read_bits(operand.imm, 0, 16)
-
-
-def get_imm_code(operand):
-    simm = operand.imm
-    is_add = 1
-    if simm < 0:
-        is_add = 0
-        simm = -simm
-
-    return (is_add, simm)
-
-
-def get_shift_opcode(operand):
-    opc = operand.imm & 0b111
-
-    if opc == 0x2:  # lsl
-        return 0x0
-    if opc == 0x3:  # lsr
-        return 0x2
-    if opc == 0x1:  # asr
-        return 0x4
-    if opc == 0x4:  # ror
-        return 0x6
-
-    raise NotImplementedError()
-
-
-def get_shift_offset(operand):
-    return operand.imm >> 3
-
-
-def get_so_imm_code(inst, idx):
-    operands = inst.operands
-
-    value = get_reg_code(operands[idx])
-    shift_op = get_shift_opcode(operands[idx + 1])
-    offset = get_shift_offset(operands[idx + 1])
-
-    return value | (shift_op << 4) | (offset << 7)
-
-
-def get_modimm_code(operand):
-    imm = operand.imm
-    return get_mod_imm(imm)
-
-
-def get_ldst_inst_code(inst: MCInst, is_load, is_byte, imm_op, fixups):
-    code = 0
-    code = write_bits(code, 0b1110, 28, 4)  # always
-    code = write_bits(code, get_reg_code(inst.operands[0]), 12, 4)
-    code = write_bits(code, 1, 23, 1)
-
-    code = write_bits(code, 0b01, 26, 2)
-    code = write_bits(code, 1, 24, 1)  # Pre
-    code = write_bits(code, is_byte, 22, 1)  # Byte
-    code = write_bits(code, 0, 21, 1)  # Write-back
-    code = write_bits(code, is_load, 20, 1)  # Load
-
-    if imm_op == 0:
-        raise NotImplementedError()
-        code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-        code = write_bits(code, reg, 16, 4)
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, is_add, 23, 1)
-
-    return code
-
-
-def get_indexed_ldst_inst_code(inst: MCInst, is_load, is_byte, is_pre, imm_op, rn, rd):
-    code = get_inst_code(inst, rn, rd)
-
-    code = write_bits(code, 0b01, 26, 2)
-    code = write_bits(code, is_pre, 24, 1)
-    code = write_bits(code, is_byte, 22, 1)
-    code = write_bits(code, is_pre, 21, 1)
-    code = write_bits(code, is_load, 20, 1)
-
-    if imm_op == 0:
-        code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-    else:
-        assert(imm_op == 1)
-        is_add, imm = get_imm_code(inst.operands[2])
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, is_add, 23, 1)
-
-    return code
-
-
-def get_addr_mode_imm12_code(inst, operands, idx):
-    reg_op = operands[idx]
-    imm_op = operands[idx + 1]
-
-    reg = get_reg_code(reg_op)
-    is_add, imm = get_imm_code(imm_op)
-
-    return (reg, is_add, read_bits(imm, 0, 12))
-
-
-def get_indexed_st_inst_code(inst: MCInst, is_byte, is_pre, imm_op, rn, rd, fixups):
-    code = get_indexed_ldst_inst_code(inst, 0, is_byte, is_pre, imm_op, rn, rd)
-
-    reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-
-    code = write_bits(code, 0b0, 25, 1)
-    code = write_bits(code, is_add, 23, 1)
-    code = write_bits(code, reg, 16, 4)
-    code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
-def get_indexed_ld_inst_code(inst: MCInst, is_byte, is_pre, imm_op, rn, rd, fixups):
-    code = get_indexed_ldst_inst_code(inst, 1, is_byte, is_pre, imm_op, rn, rd)
-
-    reg, is_add, imm = get_addr_mode_imm12_code(inst, 1, fixups)
-
-    code = write_bits(code, 0b0, 25, 1)
-    code = write_bits(code, is_add, 23, 1)
-    code = write_bits(code, reg, 16, 4)
-    code = write_bits(code, imm, 0, 12)
-
-    return code
-
-
 def read_bits(value, offset, count):
     mask = (0x1 << count) - 1
     return (value >> offset) & mask
 
 
-def get_hilo16_imm_code(inst: MCInst, idx, fixups):
-    operand = inst.operands[idx]
-    if operand.is_imm:
-        return get_imm16_code(operand)
-
-    assert(operand.is_expr)
-
-    expr = operand.expr
-    assert(expr.ty == MCExprType.Target)
-
-    subexpr = expr.expr
-
-    if isinstance(subexpr, MCConstantExpr):
-        raise NotImplementedError()
-
-    assert(isinstance(subexpr, MCExpr))
-    if expr.kind == AArch64MCExprVarKind.Lo:
-        fixup_kind = AArch64FixupKind.AArch64_MOVW_LO16
-    elif expr.kind == AArch64MCExprVarKind.Hi:
-        fixup_kind = AArch64FixupKind.AArch64_MOVT_HI16
-    else:
-        assert(0)
-
-    fixups.append(MCFixup(0, subexpr, fixup_kind))
-
-    return 0
-
-
-def get_mov_immediate_inst_code(inst: MCInst, opcode, idx, fixups):
+def get_ldst_unscaled_inst_code(inst: MCInst, sz, v, opc, fixups):
     code = 0
-
-    code = write_bits(code, 0b1110, 28, 4)  # cond
-    code = write_bits(code, opcode, 21, 4)  # opcod
-    code = write_bits(code, 0b00, 26, 2)  #
-    code = write_bits(code, get_reg_code(inst.operands[idx]), 12, 4)
-
-    imm = get_hilo16_imm_code(inst, idx+1, fixups)
-
-    code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-    code = write_bits(code, read_bits(imm, 12, 4), 16, 4)
-
-    code = write_bits(code, 0b0, 20, 1)
-    code = write_bits(code, 0b1, 25, 1)
+    code = write_bits(code, sz, 30, 2)
+    code = write_bits(code, 0b111, 27, 3)
+    code = write_bits(code, v, 26, 1)
+    code = write_bits(code, 0b00, 24, 2)
+    code = write_bits(code, opc, 22, 2)
+    code = write_bits(code, 0b0, 21, 0)
+    code = write_bits(code, inst.operands[2].imm, 12, 9)
+    code = write_bits(code, 0b00, 10, 2)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
     return code
 
 
-def get_branch_target_code(inst: MCInst, idx, fixup_kind, fixups):
-    operand = inst.operands[idx]
+def get_ldst_ui_inst_code(inst: MCInst, sz, v, opc, fixups):
+    code = 0
+    code = write_bits(code, sz, 30, 2)
+    code = write_bits(code, 0b111, 27, 3)
+    code = write_bits(code, v, 26, 1)
+    code = write_bits(code, 0b01, 24, 2)
+    code = write_bits(code, opc, 22, 2)
+    code = write_bits(code, inst.operands[2].imm, 10, 12)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
-    if operand.is_expr:
-        expr = operand.expr
-        fixups.append(MCFixup(0, expr, fixup_kind))
-        return 0
-
-    return operand.imm >> 2
+    return code
 
 
-def get_addr_mode5_code(inst: MCInst, idx, fixups):
-    operands = inst.operands
+def get_ldst_pair_offset_inst_code(inst: MCInst, opc, v, is_load, fixups):
+    code = 0
+    code = write_bits(code, opc, 30, 2)
+    code = write_bits(code, 0b101, 27, 3)
+    code = write_bits(code, v, 26, 1)
+    code = write_bits(code, 0b010, 23, 3)
+    code = write_bits(code, is_load, 22, 1)
+    code = write_bits(code, inst.operands[3].imm >> 3, 15, 7)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 10, 5)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
-    op1 = operands[idx]
+    return code
 
-    if op1.is_expr:
-        reg = PC.encoding
-        is_add, imm = 0, 0
 
-        expr = op1.expr
-        fixups.append(MCFixup(0, expr, AArch64FixupKind.AArch64_PCREL_10))
+def get_ldst_pair_pre_idx_inst_code(inst: MCInst, opc, v, is_load, fixups):
+    code = 0
+    code = write_bits(code, opc, 30, 2)
+    code = write_bits(code, 0b101, 27, 3)
+    code = write_bits(code, v, 26, 1)
+    code = write_bits(code, 0b011, 23, 3)
+    code = write_bits(code, is_load, 22, 1)
+    code = write_bits(code, inst.operands[3].imm >> 3, 15, 7)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 10, 5)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_ldst_pair_post_idx_inst_code(inst: MCInst, opc, v, is_load, fixups):
+    code = 0
+    code = write_bits(code, opc, 30, 2)
+    code = write_bits(code, 0b101, 27, 3)
+    code = write_bits(code, v, 26, 1)
+    code = write_bits(code, 0b001, 23, 3)
+    code = write_bits(code, is_load, 22, 1)
+    code = write_bits(code, inst.operands[3].imm >> 3, 15, 7)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 10, 5)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_addsub_imm(inst: MCInst, is_sub, set_flags, fixups):
+    code = 0
+
+    code = write_bits(code, is_sub, 30, 1)
+    code = write_bits(code, set_flags, 29, 1)
+    code = write_bits(code, 0b10001, 24, 5)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_addsub_imm_value(inst: MCInst, idx, fixups):
+    if inst.operands[idx].is_imm:
+        return inst.operands[idx].imm
+
+    assert(inst.operands[idx].is_expr)
+
+    expr = inst.operands[idx].expr
+
+    fixup_kind = AArch64FixupKind.AArch64_ADD_IMM12
+
+    fixups.append(MCFixup(0, expr, fixup_kind))
+
+    return 0
+
+
+def get_addsub_imm_shift(inst: MCInst, is_sub, set_flags, fixups):
+    code = get_addsub_imm(inst, is_sub, set_flags, fixups)
+
+    imm = get_addsub_imm_value(inst, 2, fixups)
+
+    # code = write_bits(code, read_bits(imm, 12, 2), 22, 2)
+    code = write_bits(code, read_bits(imm, 0, 12), 10, 12)
+
+    return code
+
+
+def get_addsub_sreg(inst: MCInst, is_sub, set_flags, fixups):
+    code = 0
+
+    # shift = inst.operands[3].imm
+    shift = 0
+
+    code = write_bits(code, is_sub, 30, 1)
+    code = write_bits(code, set_flags, 29, 1)
+    code = write_bits(code, 0b01011, 24, 5)
+    code = write_bits(code, read_bits(shift, 6, 2), 22, 2)
+    code = write_bits(code, 0, 21, 1)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, read_bits(shift, 0, 6), 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_logical_imm(inst: MCInst, opc, fixups):
+    code = 0
+
+    code = write_bits(code, opc, 29, 2)
+    code = write_bits(code, 0b100100, 23, 6)
+
+    imm = inst.operands[2].imm
+
+    code = write_bits(code, read_bits(imm, 12, 1), 22, 1)
+    code = write_bits(code, read_bits(imm, 6, 6), 16, 6)
+    code = write_bits(code, read_bits(imm, 0, 6), 10, 6)
+
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_logical_sreg(inst: MCInst, opc, n, fixups):
+    code = 0
+
+    # shift = inst.operands[3].imm
+    shift = 0
+
+    code = write_bits(code, opc, 29, 2)
+    code = write_bits(code, 0b01010, 24, 5)
+    code = write_bits(code, read_bits(shift, 6, 2), 22, 2)
+    code = write_bits(code, n, 21, 1)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, read_bits(shift, 0, 6), 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_move_immediate(inst: MCInst, opc, fixups):
+    code = 0
+
+    code = write_bits(code, opc, 29, 2)
+    code = write_bits(code, 0b100101, 23, 6)
+
+    imm = inst.operands[2].imm
+    shift = inst.operands[3].imm
+
+    code = write_bits(code, read_bits(shift, 4, 2), 21, 2)
+    code = write_bits(code, imm, 5, 16)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_bitfield_imm(inst: MCInst, opc, fixups):
+    code = 0
+
+    code = write_bits(code, opc, 29, 2)
+    code = write_bits(code, 0b100110, 23, 6)
+
+    immr = inst.operands[2].imm
+    imms = inst.operands[3].imm
+
+    code = write_bits(code, immr, 16, 6)
+    code = write_bits(code, imms, 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_adr_label_value(inst: MCInst, idx, fixups):
+    if inst.operands[idx].is_imm:
+        return inst.operands[idx].imm
+
+    assert(inst.operands[idx].is_expr)
+
+    expr = inst.operands[idx].expr
+
+    if inst.opcode == AArch64MachineOps.ADR:
+        fixup_kind = AArch64FixupKind.AArch64_PCREL_ADR_IMM21
     else:
-        imm_op = operands[idx + 1]
+        fixup_kind = AArch64FixupKind.AArch64_PCREL_ADRP_IMM21
 
-        reg = get_reg_code(op1)
-        is_add, imm = get_imm_code(imm_op)
+    fixups.append(MCFixup(0, expr, fixup_kind))
 
-    return (reg, is_add, read_bits(imm, 0, 8))
+    return 0
 
 
-def get_addr_mode_imm12_code(inst: MCInst, idx, fixups):
-    operands = inst.operands
+def get_adri_inst_code(inst: MCInst, page, fixups):
+    code = 0
 
-    op1 = operands[idx]
+    label = get_adr_label_value(inst, 1, fixups)
 
-    if op1.is_expr:
-        reg = PC.encoding
-        is_add, imm = 0, 0
+    code = write_bits(code, page, 31, 1)
+    code = write_bits(code, read_bits(label, 0, 2), 29, 2)
+    code = write_bits(code, 0b10000, 24, 5)
+    code = write_bits(code, read_bits(label, 2, 19), 5, 19)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
-        expr = op1.expr
-        fixups.append(MCFixup(0, expr, AArch64FixupKind.AArch64_LDST_PCREL_12))
+    return code
+
+
+def get_branch_cond_target_value(inst: MCInst, idx, fixups):
+    if inst.operands[idx].is_imm:
+        return inst.operands[idx].imm
+
+    assert(inst.operands[idx].is_expr)
+
+    expr = inst.operands[idx].expr
+
+    fixups.append(MCFixup(0, expr, AArch64FixupKind.AArch64_PCREL_BRANCH19))
+
+    return 0
+
+
+def get_branch_target_value(inst: MCInst, idx, fixups):
+    if inst.operands[idx].is_imm:
+        return inst.operands[idx].imm
+
+    assert(inst.operands[idx].is_expr)
+
+    expr = inst.operands[idx].expr
+
+    if inst.opcode == AArch64MachineOps.BL:
+        fixup_kind = AArch64FixupKind.AArch64_PCREL_CALL26
     else:
-        imm_op = operands[idx + 1]
+        fixup_kind = AArch64FixupKind.AArch64_PCREL_BRANCH26
 
-        reg = get_reg_code(op1)
-        is_add, imm = get_imm_code(imm_op)
+    fixups.append(MCFixup(0, expr, fixup_kind))
 
-    return (reg, is_add, read_bits(imm, 0, 12))
+    return 0
+
+
+def get_branch_cond(inst: MCInst, fixups):
+    code = 0
+
+    target = get_branch_cond_target_value(inst, 0, fixups)
+    cond = inst.operands[1].imm
+
+    code = write_bits(code, 0b01010100, 24, 8)
+    code = write_bits(code, target, 5, 19)
+    code = write_bits(code, 0, 4, 1)
+    code = write_bits(code, cond, 0, 4)
+
+    return code
+
+
+def get_branch_imm(inst: MCInst, op, fixups):
+    code = 0
+
+    addr = get_branch_target_value(inst, 0, fixups)
+
+    code = write_bits(code, op, 31, 1)
+    code = write_bits(code, 0b00101, 26, 5)
+    code = write_bits(code, addr, 0, 26)
+
+    return code
+
+
+def get_call_imm(inst: MCInst, op, fixups):
+    return get_branch_imm(inst, op, fixups)
+
+
+def get_branch_reg(inst: MCInst, opc, fixups):
+    code = 0
+
+    code = write_bits(code, 0b1101011, 25, 7)
+    code = write_bits(code, opc, 21, 4)
+    code = write_bits(code, 0b11111, 16, 5)
+    code = write_bits(code, 0b000000, 10, 6)
+    code = write_bits(code, 0b00000, 0, 5)
+
+    return code
+
+
+def get_single_operand_fp_data(inst: MCInst, opcode, fixups):
+    code = 0
+
+    code = write_bits(code, 0b00011110, 24, 8)
+    code = write_bits(code, 0b1, 21, 1)
+    code = write_bits(code, opcode, 15, 6)
+    code = write_bits(code, 0b10000, 10, 5)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_two_operand_fp_data(inst: MCInst, opcode, fixups):
+    code = 0
+
+    code = write_bits(code, 0b00011110, 24, 8)
+    code = write_bits(code, 0b1, 21, 1)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, opcode, 12, 4)
+    code = write_bits(code, 0b10, 10, 2)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_fp_comparison(inst: MCInst, signal_all_nans, fixups):
+    code = 0
+
+    code = write_bits(code, 0b00011110, 24, 8)
+    code = write_bits(code, 0b1, 21, 1)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 16, 5)
+    code = write_bits(code, 0b001000, 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 5, 5)
+    code = write_bits(code, signal_all_nans, 4, 1)
+    code = write_bits(code, 0b0000, 0, 4)
+
+    return code
+
+
+def get_cond_select_op(inst: MCInst, op, op2, fixups):
+    code = 0
+
+    cond = inst.operands[3].imm
+
+    code = write_bits(code, op, 30, 1)
+    code = write_bits(code, 0b011010100, 21, 9)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, cond, 12, 4)
+    code = write_bits(code, op2, 10, 2)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_simd_three_vec(inst: MCInst, q, u, size, opcode, fixups):
+    code = 0
+
+    code = write_bits(code, 0, 31, 1)
+    code = write_bits(code, q, 30, 1)
+    code = write_bits(code, u, 29, 1)
+    code = write_bits(code, 0b01110, 24, 5)
+    code = write_bits(code, size, 21, 3)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, opcode, 11, 5)
+    code = write_bits(code, 1, 10, 1)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_simd_dup(inst: MCInst, q, op, fixups):
+    code = 0
+
+    code = write_bits(code, 0, 31, 1)
+    code = write_bits(code, q, 30, 1)
+    code = write_bits(code, op, 29, 1)
+    code = write_bits(code, 0b01110000, 21, 8)
+    code = write_bits(code, 0, 15, 1)
+    code = write_bits(code, 1, 10, 1)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_simd_ins(inst: MCInst, q, op, fixups):
+    code = 0
+
+    code = write_bits(code, 0, 31, 1)
+    code = write_bits(code, q, 30, 1)
+    code = write_bits(code, op, 29, 1)
+    code = write_bits(code, 0b01110000, 21, 8)
+    code = write_bits(code, 0, 15, 1)
+    code = write_bits(code, 1, 10, 1)
+    code = write_bits(code, get_reg_code(inst.operands[3]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_simd_dup_from_elem(inst: MCInst, q, fixups):
+    code = get_simd_dup(inst, q, 0, fixups)
+    code = write_bits(code, 0b0000, 11, 4)
+    return code
+
+
+def get_simd_ins_from_elem(inst: MCInst, q, fixups):
+    return get_simd_ins(inst, 1, 1, fixups)
 
 
 def get_inst_binary_code(inst: MCInst, fixups):
     opcode = inst.opcode
     num_operands = len(inst.operands)
 
-    if opcode == AArch64MachineOps.STRi12:
-        return get_ldst_inst_code(inst, 0, 0, 1, fixups)
+    if opcode == AArch64MachineOps.STURWi:
+        return get_ldst_unscaled_inst_code(inst, 0b10, 0, 0b00, fixups)
 
-    if opcode == AArch64MachineOps.LDRi12:
-        return get_ldst_inst_code(inst, 1, 0, 1, fixups)
+    if opcode == AArch64MachineOps.STURXi:
+        return get_ldst_unscaled_inst_code(inst, 0b11, 0, 0b00, fixups)
 
-    if opcode == AArch64MachineOps.MOVi:
-        rd = inst.operands[0]
+    if opcode == AArch64MachineOps.STURHi:
+        return get_ldst_unscaled_inst_code(inst, 0b01, 1, 0b00, fixups)
 
-        code = 0
+    if opcode == AArch64MachineOps.STURSi:
+        return get_ldst_unscaled_inst_code(inst, 0b10, 1, 0b00, fixups)
 
-        code = write_bits(code, 0b1110, 28, 4)  # cond
-        code = write_bits(code, 0b1101, 21, 4)  # opcod
-        code = write_bits(code, 0b00, 26, 2)  #
-        code = write_bits(code, get_reg_code(rd), 12, 4)
+    if opcode == AArch64MachineOps.STURDi:
+        return get_ldst_unscaled_inst_code(inst, 0b11, 1, 0b00, fixups)
 
-        imm = get_imm16_code(inst.operands[-1])
+    if opcode == AArch64MachineOps.STURQi:
+        return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b10, fixups)
 
-        code = write_bits(code, read_bits(imm, 0, 12), 0, 12)
-        code = write_bits(code, 0b0000, 16, 4)
+    if opcode == AArch64MachineOps.STRWui:
+        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b00, fixups)
 
-        code = write_bits(code, 0b1, 25, 1)
+    if opcode == AArch64MachineOps.STRXui:
+        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b00, fixups)
 
+    if opcode == AArch64MachineOps.STRBui:
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b00, fixups)
+
+    if opcode == AArch64MachineOps.STRHui:
+        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b00, fixups)
+
+    if opcode == AArch64MachineOps.STRSui:
+        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b00, fixups)
+
+    if opcode == AArch64MachineOps.STRDui:
+        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b00, fixups)
+
+    if opcode == AArch64MachineOps.STRQui:
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b10, fixups)
+
+    if opcode == AArch64MachineOps.LDURWi:
+        return get_ldst_unscaled_inst_code(inst, 0b10, 0, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDURXi:
+        return get_ldst_unscaled_inst_code(inst, 0b11, 0, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDURHi:
+        return get_ldst_unscaled_inst_code(inst, 0b01, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDURSi:
+        return get_ldst_unscaled_inst_code(inst, 0b10, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDURDi:
+        return get_ldst_unscaled_inst_code(inst, 0b11, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDURQi:
+        return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b11, fixups)
+
+    if opcode == AArch64MachineOps.LDRWui:
+        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRXui:
+        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRBui:
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRHui:
+        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRSui:
+        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRDui:
+        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b01, fixups)
+
+    if opcode == AArch64MachineOps.LDRQui:
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b11, fixups)
+
+    if opcode == AArch64MachineOps.STPWi:
+        return get_ldst_pair_offset_inst_code(inst, 0b00, 0, 0, fixups)
+
+    if opcode == AArch64MachineOps.STPXi:
+        return get_ldst_pair_offset_inst_code(inst, 0b10, 0, 0, fixups)
+
+    if opcode == AArch64MachineOps.STPXprei:
+        return get_ldst_pair_pre_idx_inst_code(inst, 0b10, 0, 0, fixups)
+
+    if opcode == AArch64MachineOps.STPXposti:
+        return get_ldst_pair_post_idx_inst_code(inst, 0b10, 0, 0, fixups)
+
+    if opcode == AArch64MachineOps.LDPWi:
+        return get_ldst_pair_offset_inst_code(inst, 0b00, 0, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPXi:
+        return get_ldst_pair_offset_inst_code(inst, 0b10, 0, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPXprei:
+        return get_ldst_pair_pre_idx_inst_code(inst, 0b10, 0, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPXposti:
+        return get_ldst_pair_post_idx_inst_code(inst, 0b10, 0, 1, fixups)
+
+    if opcode == AArch64MachineOps.ADDWri:
+        code = get_addsub_imm_shift(inst, 0, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.MOVi16:
-        return get_mov_immediate_inst_code(inst, 0b1000, 0, fixups)
-
-    if opcode == AArch64MachineOps.MOVTi16:
-        return get_mov_immediate_inst_code(inst, 0b1010, 1, fixups)
-
-    if opcode == AArch64MachineOps.MOVsi:
-        rd = inst.operands[0]
-
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # cond
-        code = write_bits(code, 0b1101, 21, 4)  # opcod
-        code = write_bits(code, 0b00, 26, 2)  #
-        code = write_bits(code, get_reg_code(rd), 12, 4)
-
-        imm = get_so_imm_code(inst, 1)
-
-        code = write_bits(code, read_bits(imm, 0, 4), 0, 4)
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, read_bits(imm, 5, 7), 5, 7)
-
-        code = write_bits(code, 0b0000, 16, 4)
-
-        code = write_bits(code, 0b0, 25, 1)
-
+    if opcode == AArch64MachineOps.ADDXri:
+        code = get_addsub_imm_shift(inst, 0, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.MOVPCLR:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b0001101000001111000000001110, 0, 28)
+    if opcode == AArch64MachineOps.SUBWri:
+        code = get_addsub_imm_shift(inst, 1, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.STR_PRE_IMM:
-        return get_indexed_st_inst_code(inst, 0, 1, 1, inst.operands[1], inst.operands[0], fixups)
-
-    if opcode == AArch64MachineOps.LDR_POST_IMM:
-        return get_indexed_ld_inst_code(inst, 0, 0, 1, inst.operands[1], inst.operands[0], fixups)
-
-    if opcode in [AArch64MachineOps.MOVr, AArch64MachineOps.ADDrr, AArch64MachineOps.ANDrr, AArch64MachineOps.ORrr, AArch64MachineOps.SUBrr, AArch64MachineOps.XORrr]:
-        return get_binop_inst_code(
-            inst, 0b1110, 0, 0, inst.operands[1], inst.operands[0])
-
-    if opcode in [AArch64MachineOps.CMPrr]:
-        return get_binop_inst_code(
-            inst, 0b1110, 0, 0, inst.operands[0], inst.operands[0])
-
-    if opcode in [AArch64MachineOps.ADDri, AArch64MachineOps.ANDri, AArch64MachineOps.ORri, AArch64MachineOps.SUBri, AArch64MachineOps.XORri]:
-        return get_binop_inst_code(
-            inst, 0b1110, 1, 0, inst.operands[1], inst.operands[0])
-
-    if opcode in [AArch64MachineOps.CMPri]:
-        return get_binop_inst_code(
-            inst, 0b1110, 1, 0, inst.operands[0], inst.operands[0])
-
-    # vfp (between AArch64 core register and single-precision register)
-    if opcode in [AArch64MachineOps.VMOVSR]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11100000, 20, 8)  # opc1
-        code = write_bits(code, 0b1010, 8, 4)
-        code = write_bits(code, 0b1, 4, 1)
-
-        code = write_bits(code, 0b0, 5, 2)  # opc2
-
-        code = write_bits(code, 0b0000, 0, 4)
-
-        sn = inst.operands[0]
-        rt = inst.operands[1]
-
-        sn_reg = get_reg_code(sn)
-
-        code = write_bits(code, read_bits(sn_reg, 1, 4), 16, 4)  # Vd
-        code = write_bits(code, read_bits(sn_reg, 0, 1), 7, 1)  # D
-
-        code = write_bits(code, get_reg_code(rt), 12, 4)  # Rt
-
+    if opcode == AArch64MachineOps.SUBXri:
+        code = get_addsub_imm_shift(inst, 1, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VLDRS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b01, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
+    if opcode == AArch64MachineOps.ADDSWrr:
+        code = get_addsub_sreg(inst, 0, 1, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VLDRD]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b01, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
+    if opcode == AArch64MachineOps.ADDSXrr:
+        code = get_addsub_sreg(inst, 0, 1, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VSTRS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b00, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
+    if opcode == AArch64MachineOps.SUBSWrr:
+        code = get_addsub_sreg(inst, 1, 1, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VSTRD]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1101, 24, 4)  # opc1
-        code = write_bits(code, 0b00, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        rn_reg, is_add, imm = get_addr_mode5_code(inst, 1, fixups)
-
-        sd_reg = get_reg_code(inst.operands[0])
-
-        code = write_bits(code, is_add, 23, 1)  # U (add)
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, rn_reg, 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(imm, 0, 8), 0, 8)  # imm
-
+    if opcode == AArch64MachineOps.SUBSXrr:
+        code = get_addsub_sreg(inst, 1, 1, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VADDS, AArch64MachineOps.VSUBS, AArch64MachineOps.VMULS, AArch64MachineOps.VDIVS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-
-        if opcode in [AArch64MachineOps.VADDS, AArch64MachineOps.VSUBS, AArch64MachineOps.VMULS]:
-            code = write_bits(code, 0b11100, 23, 5)  # opc1
-        elif opcode in [AArch64MachineOps.VDIVS]:
-            code = write_bits(code, 0b11101, 23, 5)  # opc1
-
-        if opcode in [AArch64MachineOps.VADDS]:
-            code = write_bits(code, 0b11, 20, 2)  # opc2
-        elif opcode in [AArch64MachineOps.VSUBS]:
-            code = write_bits(code, 0b11, 20, 2)
-        elif opcode in [AArch64MachineOps.VMULS]:
-            code = write_bits(code, 0b10, 20, 2)
-        elif opcode in [AArch64MachineOps.VDIVS]:
-            code = write_bits(code, 0b00, 20, 2)
-
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        if opcode in [AArch64MachineOps.VADDS]:
-            code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [AArch64MachineOps.VMULS]:
-            code = write_bits(code, 0b0, 6, 1)
-        elif opcode in [AArch64MachineOps.VSUBS]:
-            code = write_bits(code, 0b1, 6, 1)
-
-        sd = inst.operands[0]
-        sn = inst.operands[1]
-        sm = inst.operands[2]
-
-        sn_reg = get_reg_code(sn)
-        sd_reg = get_reg_code(sd)
-        sm_reg = get_reg_code(sm)
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 1, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 0, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.ORRWri:
+        code = get_logical_imm(inst, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        code = write_bits(code, 0, 22, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VCMPS]:
-        code = 0
-
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11101, 23, 5)  # opc1
-        code = write_bits(code, 0b11, 20, 2)  # opc2
-        code = write_bits(code, 0b101, 9, 3)
-        code = write_bits(code, 0b0, 8, 1)  # dp_operation = (sz == ‘1’)
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, 0b0100, 16, 4)  # Vn
-        code = write_bits(code, 0b0, 7, 1)  # quiet_nan_exc = (E == ‘1’)
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.ORRWrr:
+        code = get_logical_sreg(inst, 0b01, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.Bcc]:
-        target = get_branch_target_code(
-            inst, 0, AArch64FixupKind.AArch64_COND_BRANCH, fixups)
-
-        code = 0
-        code = write_bits(code, inst.operands[1].imm, 28, 4)
-        code = write_bits(code, 0b1010, 24, 4)
-        code = write_bits(code, target, 0, 24)
+    if opcode == AArch64MachineOps.ORRXrr:
+        code = get_logical_sreg(inst, 0b01, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.B]:
-        target = get_branch_target_code(
-            inst, 0, AArch64FixupKind.AArch64_UNCOND_BRANCH, fixups)
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1010, 24, 4)
-        code = write_bits(code, target, 0, 24)
-
+    if opcode == AArch64MachineOps.ANDWrr:
+        code = get_logical_sreg(inst, 0b00, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.BL]:
-        target = get_branch_target_code(
-            inst, 0, AArch64FixupKind.AArch64_UNCOND_BL, fixups)
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b1011, 24, 4)
-        code = write_bits(code, target, 0, 24)
-
+    if opcode == AArch64MachineOps.ANDXrr:
+        code = get_logical_sreg(inst, 0b00, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VADDfq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.EORWrr:
+        code = get_logical_sreg(inst, 0b10, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VORRq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)
-        code = write_bits(code, 0b000, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b1, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.EORXrr:
+        code = get_logical_sreg(inst, 0b10, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VST1q64]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b01000, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b1010, 8, 4)  # type == '2' (regs = 2)
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        align_amt = count_trailing_zeros(inst.operands[2].imm)
-
-        if align_amt == 0:
-            align = 0
-        else:
-            assert(align_amt >= 1 and align_amt < 4)
-            align_amt = align_amt - 1
-            assert((inst.operands[2].imm & (2 << align_amt))
-                   == inst.operands[2].imm)
-
-        code = write_bits(code, 3, 6, 2)  # size = log2(nbytes / 8)
-
-        # alignment = if align == ‘00’ then 1 else 4 << UInt(align);
-        code = write_bits(code, align_amt, 4, 2)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        rn_reg = get_reg_code(inst.operands[1])
-        rm_reg = 0b1111
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(rn_reg, 0, 4), 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(rm_reg, 0, 4), 0, 4)  # Rm
-
+    if opcode == AArch64MachineOps.MOVKWi:
+        code = get_move_immediate(inst, 0b11, fixups)
+        code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VLD1q64]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b01000, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b1010, 8, 4)  # type == '2' (regs = 2)
-
-        code = write_bits(code, 0b0, 4, 1)
-
-        align_amt = count_trailing_zeros(inst.operands[2].imm)
-
-        if align_amt == 0:
-            align = 0
-        else:
-            assert(align_amt >= 1 and align_amt < 4)
-            align_amt = align_amt - 1
-            assert((inst.operands[2].imm & (2 << align_amt))
-                   == inst.operands[2].imm)
-
-        code = write_bits(code, 3, 6, 2)  # size = log2(nbytes / 8)
-
-        # alignment = if align == ‘00’ then 1 else 4 << UInt(align);
-        code = write_bits(code, align_amt, 4, 2)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        rn_reg = get_reg_code(inst.operands[1])
-        rm_reg = 0b1111
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(rn_reg, 0, 4), 16, 4)  # Rn
-
-        code = write_bits(code, read_bits(rm_reg, 0, 4), 0, 4)  # Rm
-
+    if opcode == AArch64MachineOps.SBFMWri:
+        code = get_bitfield_imm(inst, 0b00, fixups)
+        code = write_bits(code, 0, 31, 1)
+        code = write_bits(code, 0, 22, 1)
+        code = write_bits(code, 0, 21, 1)
+        code = write_bits(code, 0, 15, 1)
         return code
 
-    if opcode in [AArch64MachineOps.FMSTAT]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)
-        code = write_bits(code, 0b111011110001, 16, 12)
-        code = write_bits(code, 0b101000010000, 0, 12)
-        code = write_bits(code, 0b1111, 12, 4)
+    if opcode == AArch64MachineOps.SBFMXri:
+        code = get_bitfield_imm(inst, 0b00, fixups)
+        code = write_bits(code, 1, 31, 1)
+        code = write_bits(code, 1, 22, 1)
         return code
 
-    if opcode in [AArch64MachineOps.MOVCCr, AArch64MachineOps.MOVCCi]:
-        cond = inst.operands[3].imm
-        rn, rd = inst.operands[1], inst.operands[0]
-        imm_op = 1 if inst.operands[2].is_imm else 0
-
-        opc = get_binop_opcode(inst)
-
-        if opc == 0b1101:
-            rn = rd
-
-        code = get_inst_code(inst, rn, rd)
-
-        code = write_bits(code, cond, 28, 4)
-
-        code = write_bits(code, 0b0, 26, 2)
-        code = write_bits(code, imm_op, 25, 1)
-        code = write_bits(code, opc, 21, 4)
-
-        if opc == 0b1101:
-            code = write_bits(code, 0, 16, 4)
-
-        if opc == 0b1010:
-            code = write_bits(code, 0, 12, 4)
-            code = write_bits(code, 1, 20, 1)
-
-        if imm_op == 0:
-            code = write_bits(code, get_reg_code(inst.operands[2]), 0, 4)
-        else:
-            assert(imm_op == 1)
-            imm = inst.operands[2].imm
-            code = write_bits(code, imm, 0, 12)
-
+    if opcode == AArch64MachineOps.UBFMWri:
+        code = get_bitfield_imm(inst, 0b10, fixups)
+        code = write_bits(code, 0, 31, 1)
+        code = write_bits(code, 0, 22, 1)
+        code = write_bits(code, 0, 21, 1)
+        code = write_bits(code, 0, 15, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VDUPLN32q]:
-        size = 32
-        if size == 32:
-            lane = (inst.operands[2].imm << 3) | 0b100
-        elif size == 16:
-            lane = (inst.operands[2].imm << 2) | 0b10
-        elif size == 8:
-            lane = (inst.operands[2].imm << 1) | 0b1
-
-        code = 0
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00111, 23, 5)  # opc1
-
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 20, 1)
-        code = write_bits(code, 0b0, 8, 1)
-        code = write_bits(code, 0b0, 7, 1)
-
-        code = write_bits(code, lane, 16, 4)  # ln
-
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.UBFMXri:
+        code = get_bitfield_imm(inst, 0b10, fixups)
+        code = write_bits(code, 1, 31, 1)
+        code = write_bits(code, 1, 22, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VMULfq]:
-        code = 0
-
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00110, 23, 5)  # opc1
-        code = write_bits(code, 0b0, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b1, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.MOVKXi:
+        code = get_move_immediate(inst, 0b11, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode in [AArch64MachineOps.VSUBfq]:
-        code = 0
+    if opcode == AArch64MachineOps.ADR:
+        return get_adri_inst_code(inst, 0, fixups)
 
-        code = write_bits(code, 0b1111, 28, 4)  # neon
-        code = write_bits(code, 0b00100, 23, 5)  # opc1
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b0, 20, 1)  # sz
-        code = write_bits(code, 0b110, 9, 3)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
+    if opcode == AArch64MachineOps.ADRP:
+        return get_adri_inst_code(inst, 1, fixups)
 
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 6, 1)  # Q
+    if opcode == AArch64MachineOps.Bcc:
+        return get_branch_cond(inst, fixups)
 
-        sd_reg = get_reg_code(inst.operands[0])
-        sn_reg = get_reg_code(inst.operands[1])
-        sm_reg = get_reg_code(inst.operands[2])
+    if opcode == AArch64MachineOps.B:
+        return get_branch_imm(inst, 0, fixups)
 
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
+    if opcode == AArch64MachineOps.BL:
+        return get_call_imm(inst, 1, fixups)
 
-        code = write_bits(code, read_bits(sn_reg, 0, 4), 16, 4)  # Vn
-        code = write_bits(code, read_bits(sn_reg, 4, 1), 7, 1)  # N
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.RET:
+        code = get_branch_reg(inst, 0b0010, fixups)
+        code = write_bits(code, get_reg_code(inst.operands[0]), 5, 5)
         return code
 
-    if opcode in [AArch64MachineOps.VMOVS]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11101, 23, 5)  # opc1
-        code = write_bits(code, 0b11, 20, 2)
-        code = write_bits(code, 0b0000, 16, 4)
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b0, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b01, 6, 2)
-
-        code = write_bits(code, 0b101, 9, 3)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 1, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 0, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sm_reg, 1, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 0, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.FMOVHr:
+        code = get_single_operand_fp_data(inst, 0b000000, fixups)
+        code = write_bits(code, 0b11, 22, 2)
         return code
 
-    if opcode in [AArch64MachineOps.VMOVD]:
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b11101, 23, 5)  # opc1
-        code = write_bits(code, 0b11, 20, 2)
-        code = write_bits(code, 0b0000, 16, 4)
-        code = write_bits(code, 0b0, 4, 1)
-        code = write_bits(code, 0b1, 8, 1)  # single-presicion
-
-        code = write_bits(code, 0b01, 6, 2)
-
-        code = write_bits(code, 0b101, 9, 3)
-
-        sd_reg = get_reg_code(inst.operands[0])
-        sm_reg = get_reg_code(inst.operands[1])
-
-        code = write_bits(code, read_bits(sd_reg, 0, 4), 12, 4)  # Vd
-        code = write_bits(code, read_bits(sd_reg, 4, 1), 22, 1)  # D
-
-        code = write_bits(code, read_bits(sm_reg, 0, 4), 0, 4)  # Vm
-        code = write_bits(code, read_bits(sm_reg, 4, 1), 5, 1)  # M
-
+    if opcode == AArch64MachineOps.FMOVSr:
+        code = get_single_operand_fp_data(inst, 0b000000, fixups)
+        code = write_bits(code, 0b00, 22, 2)
         return code
 
-    if opcode in [AArch64MachineOps.STMDB_UPD]:
-        rd = inst.operands[0]
-
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b10, 23, 2)  # op
-        code = write_bits(code, 0b0, 22, 1)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 27, 1)
-
-        code = write_bits(code, get_reg_code(rd), 16, 4)
-
-        bits = 0
-        for operand in inst.operands[2:]:
-            reg = get_reg_code(operand)
-
-            bits = bits | (1 << reg)
-
-        code = write_bits(code, bits, 0, 16)
-
+    if opcode == AArch64MachineOps.FMOVDr:
+        code = get_single_operand_fp_data(inst, 0b000000, fixups)
+        code = write_bits(code, 0b01, 22, 2)
         return code
 
-    if opcode in [AArch64MachineOps.LDMIA_UPD]:
-        rd = inst.operands[0]
+    if opcode == AArch64MachineOps.FADDHrr:
+        code = get_two_operand_fp_data(inst, 0b0010, fixups)
+        code = write_bits(code, 0b11, 22, 2)
+        return code
 
-        code = 0
-        code = write_bits(code, 0b1110, 28, 4)  # always
-        code = write_bits(code, 0b01, 23, 2)  # op
-        code = write_bits(code, 0b0, 22, 1)
-        code = write_bits(code, 0b1, 21, 1)
-        code = write_bits(code, 0b1, 27, 1)
-        code = write_bits(code, 0b1, 20, 1)
+    if opcode == AArch64MachineOps.FADDSrr:
+        code = get_two_operand_fp_data(inst, 0b0010, fixups)
+        code = write_bits(code, 0b00, 22, 2)
+        return code
 
-        code = write_bits(code, get_reg_code(rd), 16, 4)
+    if opcode == AArch64MachineOps.FADDDrr:
+        code = get_two_operand_fp_data(inst, 0b0010, fixups)
+        code = write_bits(code, 0b01, 22, 2)
+        return code
 
-        bits = 0
-        for operand in inst.operands[2:]:
-            reg = get_reg_code(operand)
+    if opcode == AArch64MachineOps.FSUBSrr:
+        code = get_two_operand_fp_data(inst, 0b0011, fixups)
+        code = write_bits(code, 0b00, 22, 2)
+        return code
 
-            bits = bits | (1 << reg)
+    if opcode == AArch64MachineOps.FMULSrr:
+        code = get_two_operand_fp_data(inst, 0b0000, fixups)
+        code = write_bits(code, 0b00, 22, 2)
+        return code
 
-        code = write_bits(code, bits, 0, 16)
+    if opcode == AArch64MachineOps.FDIVSrr:
+        code = get_two_operand_fp_data(inst, 0b0001, fixups)
+        code = write_bits(code, 0b00, 22, 2)
+        return code
 
+    if opcode == AArch64MachineOps.FCMPHrr:
+        code = get_fp_comparison(inst, 0, fixups)
+        code = write_bits(code, 0b11, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FCMPSrr:
+        code = get_fp_comparison(inst, 0, fixups)
+        code = write_bits(code, 0b00, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FCMPDrr:
+        code = get_fp_comparison(inst, 0, fixups)
+        code = write_bits(code, 0b01, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.CSINCWr:
+        code = get_cond_select_op(inst, 0, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.CSINCXr:
+        code = get_cond_select_op(inst, 0, 0b01, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ORRv16i8:
+        code = get_simd_three_vec(inst, 1, 0, 0b101, 0b00011, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FADDv4f32:
+        code = get_simd_three_vec(inst, 1, 0, 0b001, 0b11010, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FSUBv4f32:
+        code = get_simd_three_vec(inst, 1, 0, 0b101, 0b11010, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FMULv4f32:
+        code = get_simd_three_vec(inst, 1, 1, 0b001, 0b11011, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FDIVv4f32:
+        code = get_simd_three_vec(inst, 1, 1, 0b001, 0b11111, fixups)
+        return code
+
+    # if opcode == AArch64MachineOps.DUPv2i32lane:
+    #     code = get_simd_dup_from_elem(inst, 0, fixups)
+        # idx = inst.operands[1].imm
+        # code = write_bits(code, idx, 18, 3)
+        # code = write_bits(code, 0b10, 16, 2)
+    #     return code
+
+    if opcode == AArch64MachineOps.DUPv4i32lane:
+        code = get_simd_dup_from_elem(inst, 1, fixups)
+        idx = inst.operands[2].imm
+        code = write_bits(code, idx, 19, 2)
+        code = write_bits(code, 0b100, 16, 3)
+        return code
+
+    if opcode == AArch64MachineOps.INSvi32lane:
+        code = get_simd_ins_from_elem(inst, 1, fixups)
+        idx = inst.operands[2].imm
+        idx2 = inst.operands[4].imm
+        code = write_bits(code, idx, 19, 2)
+        code = write_bits(code, 0b100, 16, 3)
+        code = write_bits(code, idx2, 13, 2)
         return code
 
     raise NotImplementedError()

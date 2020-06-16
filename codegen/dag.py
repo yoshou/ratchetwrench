@@ -134,6 +134,9 @@ class DagNode:
         self._ops = []
         self._uses = set()
 
+        for vt in value_types:
+            assert(isinstance(vt, MachineValueType))
+
         for operand in operands:
             self._add_operand(operand)
 
@@ -834,11 +837,6 @@ class Dag:
 
             for op in node.ops:
                 op.ref.node.uses.add(op)
-
-        from codegen.x64_gen import X64DagOps
-
-        if node.opcode == VirtualDagOps.COPY_TO_REG:
-            assert(node.operands[1].ty == node.operands[2].ty)
 
         return node
 

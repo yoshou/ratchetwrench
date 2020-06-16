@@ -6,20 +6,6 @@ from ir.data_layout import DataLayout
 from ir.values import Function
 
 
-class TargetDagOp(DagOp):
-    def __init__(self, name):
-        super().__init__(name, "target")
-
-
-class TargetDagOps(Enum):
-    EXTRACT_SUBREG = TargetDagOp("EXTRACT_SUBREG")
-    INSERT_SUBREG = TargetDagOp("INSERT_SUBREG")
-    COPY = TargetDagOp("COPY")
-    COPY_TO_REGCLASS = TargetDagOp("COPY_TO_REGCLASS")
-    SUBREG_TO_REG = TargetDagOp("SUBREG_TO_REG")
-    INLINEASM = TargetDagOp("INLINEASM")
-
-
 class MachineConstantPoolValue:
     def __init__(self, ty):
         self.ty = ty
@@ -364,6 +350,8 @@ class MachineFunction:
         if start_op > 0:
             f.write(' = ')
 
+        from codegen.spec import TargetDagOps
+
         if isinstance(inst.opcode, TargetDagOps):
             if inst.opcode == TargetDagOps.COPY:
                 f.write('copy')
@@ -377,6 +365,8 @@ class MachineFunction:
                 f.write('subreg_to_reg')
             elif inst.opcode == TargetDagOps.INLINEASM:
                 f.write('asm')
+            elif inst.opcode == TargetDagOps.IMPLICIT_DEF:
+                f.write('implicit_def')
             else:
                 raise NotImplementedError()
         else:

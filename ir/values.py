@@ -337,7 +337,6 @@ class ConstantInt(Constant):
     def __init__(self, value: int, ty):
         super().__init__(ty)
         assert(isinstance(value, int))
-        assert(isinstance(ty, PrimitiveType))
         self.value = value
 
     def __repr__(self):
@@ -348,7 +347,6 @@ class ConstantInt(Constant):
 
     def __eq__(self, other):
         if not isinstance(other, ConstantInt):
-            raise NotImplementedError()
             return False
 
         return self.ty == other.ty and self.value == other.value

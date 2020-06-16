@@ -370,41 +370,55 @@ class InstructionSelection(MachineFunctionPass):
                 dag.remove_unreachable_nodes()
 
     def select(self):
+        changed = True
+
         def create_select_node(dag, results):
             def select_node(node):
+                if isinstance(node, MachineDagNode):
+                    return
+
                 results[node] = self.selector.select(node, dag)
             return select_node
 
-        for bb in self.func.bbs:
-            dag = self.dags[bb]
+        while changed:
+            changed = False
 
-            results = {}
-            self._bfs(dag.root.node, create_select_node(dag, results), set())
+            for bb in self.func.bbs:
+                dag = self.dags[bb]
 
-            operands = set()
+                results = {}
+                self._bfs(dag.root.node, create_select_node(
+                    dag, results), set())
 
-            def collect_operands(node):
-                for operand in node.operands:
-                    operands.add(operand)
+                operands = set()
 
-            self._bfs(dag.root.node, collect_operands, set())
+                def collect_operands(node):
+                    for operand in node.operands:
+                        operands.add(operand)
 
-            operands.add(dag.root)
+                self._bfs(dag.root.node, collect_operands, set())
 
-            assignments = set()
-            for operand in operands:
-                if operand.node in results:
-                    assignments.add((operand, results[operand.node]))
+                for result in results.values():
+                    collect_operands(result)
 
-            for old_node, new_node in results.items():
-                if old_node is not new_node:
-                    for op in old_node.uses:
-                        new_node.uses.add(op)
+                operands.add(dag.root)
 
-            for operand, new_node in assignments:
-                operand.node = new_node
+                assignments = set()
+                for operand in operands:
+                    if operand.node in results:
+                        assignments.add((operand, results[operand.node]))
 
-            dag.remove_unreachable_nodes()
+                for old_node, new_node in results.items():
+                    if old_node is not new_node:
+                        for op in old_node.uses:
+                            new_node.uses.add(op)
+
+                for operand, new_node in assignments:
+                    if operand.node != new_node:
+                        changed = True
+                    operand.node = new_node
+
+                dag.remove_unreachable_nodes()
 
     def schedule(self):
         vr_map = {}
