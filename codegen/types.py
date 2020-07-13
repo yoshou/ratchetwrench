@@ -146,6 +146,8 @@ class MachineValueType:
             return 64
         elif self.value_type in [ValueType.V4F32]:
             return 128
+        elif self.value_type in [ValueType.V16I8]:
+            return 128
 
         raise ValueError("Can't get the type size.")
 
