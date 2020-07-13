@@ -67,12 +67,15 @@ def glued_node_iter(node):
 
 
 def is_passive_node(node):
-    from codegen.dag import MachineDagNode
+    from codegen.dag import ConstantDagNode, ConstantFPDagNode, RegisterDagNode, GlobalAddressDagNode, BasicBlockDagNode
+    from codegen.dag import FrameIndexDagNode, ConstantPoolDagNode, ExternalSymbolDagNode
+    from codegen.dag import VirtualDagOps
 
-    if isinstance(node, MachineDagNode):
-        return False
+    if isinstance(node, (ConstantDagNode, ConstantFPDagNode, RegisterDagNode, GlobalAddressDagNode, BasicBlockDagNode,
+                         FrameIndexDagNode, ConstantPoolDagNode, ExternalSymbolDagNode)):
+        return True
 
-    if len(node.operands) == 0:
+    if node.opcode == VirtualDagOps.ENTRY:
         return True
 
     return False
