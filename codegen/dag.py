@@ -42,6 +42,7 @@ class VirtualDagOps(Enum):
     GLOBAL_TLS_ADDRESS = VirtualDagOp("GlobalTLSAddress")
     FRAME_INDEX = VirtualDagOp("FrameIndex")
     EXTERNAL_SYMBOL = VirtualDagOp("ExternalSymbol")
+    REGISTER_MASK = VirtualDagOp("RegisterMask")
 
     TARGET_CONSTANT = VirtualDagOp("TargetConstant")
     TARGET_CONSTANT_FP = VirtualDagOp("TargetConstantFP")
@@ -585,6 +586,21 @@ class ShuffleVectorDagNode(DagNode):
         return super().__eq__(other) and self.mask == other.mask
 
 
+class RegisterMaskDagNode(DagNode):
+    def __init__(self, mask: int):
+        super().__init__(VirtualDagOps.REGISTER_MASK, [
+            MachineValueType(ValueType.UNTYPED)], [])
+        self.mask = mask
+
+    def __hash__(self):
+        return hash((super().__hash__(), tuple(self.mask)))
+
+    def __eq__(self, other):
+        if not isinstance(other, RegisterMaskDagNode):
+            return False
+        return super().__eq__(other) and self.mask == other.mask
+
+
 class MachineDagNode(DagNode):
     def __init__(self, opcode, value_types, operands):
         super().__init__(opcode, value_types, operands)
@@ -594,6 +610,8 @@ class Dag:
     def __init__(self, mfunc):
         self.mfunc = mfunc
         self.nodes = {}
+        self.unique_id = 0
+
         entry_node = self.add_node(VirtualDagOps.ENTRY, [
                                    MachineValueType(ValueType.OTHER)])
         self._root = self.entry = DagValue(entry_node, 0)
@@ -629,6 +647,12 @@ class Dag:
         assert(isinstance(vec2, DagValue))
         assert(isinstance(mask, list))
         node = ShuffleVectorDagNode([value_ty], [vec1, vec2], mask)
+        node = self.append_node(node)
+        return node
+
+    def add_register_mask_node(self, mask):
+        assert(isinstance(mask, list))
+        node = RegisterMaskDagNode(mask)
         node = self.append_node(node)
         return node
 
@@ -821,7 +845,7 @@ class Dag:
             visited.add(node)
 
             for operand in node.operands:
-                assert(isinstance(operand, DagNodeValue))
+                assert(isinstance(operand, DagValue))
                 dfs_post_rec(operand.node)
 
             func(node, *args)
@@ -834,6 +858,8 @@ class Dag:
             node = self.nodes[node]
         else:
             self.nodes[node] = node
+            node.number = self.unique_id
+            self.unique_id += 1
 
             for op in node.ops:
                 op.ref.node.uses.add(op)
