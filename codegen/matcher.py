@@ -96,6 +96,9 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
     for reg in inst.uses:
         assert(isinstance(reg, MachineRegisterDef))
+        if not reg in dic:
+            continue
+
         operand = dic[reg].value
 
         if not operand:
@@ -112,6 +115,17 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
                                       *copy_to_reg_ops), 0)
 
         glue = chain.get_value(1)
+
+    operand_idx += len(ops)
+
+    while operand_idx < len(node.operands):
+        operand = node.operands[operand_idx]
+        operand_idx += 1
+
+        if operand == glue:
+            continue
+
+        ops.append(operand)
 
     if chain:
         ops.append(chain)
@@ -411,6 +425,8 @@ class NodeValuePatternMatcher(PatternMatcher):
 bb = NodeOpcodePatternMatcher(VirtualDagOps.BASIC_BLOCK)
 imm = NodeOpcodePatternMatcher(VirtualDagOps.CONSTANT)
 timm = NodeOpcodePatternMatcher(VirtualDagOps.TARGET_CONSTANT)
+fpimm = NodeOpcodePatternMatcher(VirtualDagOps.CONSTANT_FP)
+tfpimm = NodeOpcodePatternMatcher(VirtualDagOps.TARGET_CONSTANT_FP)
 globaladdr_ = NodeOpcodePatternMatcher(VirtualDagOps.GLOBAL_ADDRESS)
 tglobaladdr_ = NodeOpcodePatternMatcher(VirtualDagOps.TARGET_GLOBAL_ADDRESS)
 constpool_ = NodeOpcodePatternMatcher(VirtualDagOps.CONSTANT_POOL)
@@ -462,7 +478,8 @@ class ValueTypeMatcher(NodeValuePatternMatcher):
         from codegen.dag import DagNode, DagValue
 
         if isinstance(base_node, DagNode):
-            return [DagValue(dag.add_node(base_node.opcode, [self.value_type], *base_node.operands), 0)]
+            return [DagValue(base_node, 0)]
+            # return [DagValue(dag.add_node(base_node.opcode, [self.value_type], *base_node.operands), 0)]
         else:
             raise NotImplementedError()
 
