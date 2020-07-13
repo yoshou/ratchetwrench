@@ -341,14 +341,17 @@ class AArch64ELFObjectWriter(ELFObjectTargetWriter):
         self.has_relocation_addend = False
 
     def get_reloc_type(self, context: MCContext, target: MCValue, fixup: MCFixup, is_pcrel):
-        modifier = target.access_variant
+        ref_kind = target.ref_kind
         kind = fixup.kind
 
-        from codegen.aarch64_asm_printer import AArch64FixupKind
+        from codegen.aarch64_asm_printer import AArch64FixupKind, AArch64MCExprVarKind
 
         if is_pcrel:
             if kind in [AArch64FixupKind.AArch64_PCREL_ADRP_IMM21]:
-                return R_AARCH64_ADR_PREL_PG_HI21
+                if ref_kind & AArch64MCExprVarKind.ABS:
+                    return R_AARCH64_ADR_PREL_PG_HI21
+                elif ref_kind & AArch64MCExprVarKind.TLSDESC:
+                    return R_AARCH64_TLSDESC_ADR_PAGE21
             elif kind in [AArch64FixupKind.AArch64_PCREL_CALL26]:
                 return R_AARCH64_CALL26
             else:
@@ -356,7 +359,18 @@ class AArch64ELFObjectWriter(ELFObjectTargetWriter):
 
         # absolute
         if kind in [AArch64FixupKind.AArch64_ADD_IMM12]:
-            return R_AARCH64_ADD_ABS_LO12_NC
+            if ref_kind & AArch64MCExprVarKind.ABS:
+                return R_AARCH64_ADD_ABS_LO12_NC
+            elif ref_kind & AArch64MCExprVarKind.TLSDESC:
+                return R_AARCH64_TLSDESC_ADD_LO12
+        elif kind in [AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8]:
+            if ref_kind & AArch64MCExprVarKind.ABS:
+                return R_AARCH64_ADD_ABS_LO12_NC
+            elif ref_kind & AArch64MCExprVarKind.TLSDESC:
+                return R_AARCH64_TLSDESC_LD64_LO12
+        elif kind in [AArch64FixupKind.AArch64_TLSDESC_CALL]:
+            return R_AARCH64_TLSDESC_CALL
+
         raise NotImplementedError()
 
 
