@@ -168,6 +168,19 @@ class InstructionSelection(MachineFunctionPass):
 
         action(node)
 
+    def _bfs_pre(self, node: DagNode, action, visited):
+        assert(isinstance(node, DagNode))
+
+        if node in visited:
+            return
+
+        visited.add(node)
+
+        action(node)
+
+        for op in set(node.operands):
+            self._bfs(op.node, action, visited)
+
     def do_legalize(self):
         def iter_all_nodes(dag):
             def iter_all_nodes_bfs(node: DagNode, visited):
@@ -370,45 +383,73 @@ class InstructionSelection(MachineFunctionPass):
                 dag.remove_unreachable_nodes()
 
     def select(self):
-        changed = True
+        class ISelNode:
+            def __init__(self, node):
+                self.node = node
+                self.compute_hash()
+
+            def compute_hash(self):
+                node = self.node
+
+                operands = tuple((id(opnd.node), opnd.index)
+                                 for opnd in node.operands)
+                self._hash_val = hash((node.opcode, operands))
+
+            def __hash__(self):
+                return self._hash_val
+
+            def __eq__(self, other):
+                if not isinstance(other, ISelNode):
+                    return False
+
+                this_node = self.node
+                other_node = other.node
+
+                for opnd1, opnd2 in zip(this_node.operands, other_node.operands):
+                    if opnd1.node is not opnd2.node:
+                        return False
+                    if opnd1.index != opnd2.index:
+                        return False
+                return this_node.opcode == other_node.opcode
 
         def create_select_node(dag, results):
             def select_node(node):
                 if isinstance(node, MachineDagNode):
                     return
 
-                results[node] = self.selector.select(node, dag)
+                selected = self.selector.select(node, dag)
+                if selected is not node:
+                    results[node.number] = (node, selected)
             return select_node
 
-        while changed:
-            changed = False
+        for bb in self.func.bbs:
+            dag = self.dags[bb]
 
-            for bb in self.func.bbs:
-                dag = self.dags[bb]
+            results = {}
+            self._bfs(dag.root.node, create_select_node(
+                dag, results), set())
 
-                results = {}
-                self._bfs(dag.root.node, create_select_node(
-                    dag, results), set())
+            operands = list()
 
-                operands = set()
+            def collect_operands(node):
+                for operand in node.operands:
+                    operands.append(operand)
 
-                def collect_operands(node):
-                    for operand in node.operands:
-                        operands.add(operand)
+            operands.append(dag.root)
 
-                self._bfs(dag.root.node, collect_operands, set())
+            self._bfs_pre(dag.root.node, collect_operands, set())
 
-                for result in results.values():
-                    collect_operands(result)
-
-                operands.add(dag.root)
+            changed = True
+            while changed:
+                changed = False
 
                 assignments = set()
                 for operand in operands:
-                    if operand.node in results:
-                        assignments.add((operand, results[operand.node]))
+                    if operand.node.number in results:
+                        _, result = results[operand.node.number]
+                        assignments.add((operand, result))
 
-                for old_node, new_node in results.items():
+                for old_node, new_node in results.values():
                     if old_node is not new_node:
                         for op in old_node.uses:
                             new_node.uses.add(op)
@@ -418,7 +459,7 @@ class InstructionSelection(MachineFunctionPass):
                         changed = True
                     operand.node = new_node
 
-                dag.remove_unreachable_nodes()
+            dag.remove_unreachable_nodes()
 
     def schedule(self):
         vr_map = {}
@@ -431,7 +472,7 @@ class InstructionSelection(MachineFunctionPass):
 
             mbb.append_inst(minst)
 
-        scheduler = TopologicalSortScheduler()
+        scheduler = ListScheduler()
 
         for bb in self.func.bbs:
             dag = self.dags[bb]
