@@ -962,13 +962,19 @@ class InstructionSelector:
     def select(self, node, dag):
         raise NotImplementedError()
 
+
 def get_legalized_op(operand, legalized):
     from codegen.dag import DagValue
-    
-    if operand.node in legalized:
-        return DagValue(legalized[operand.node], operand.index)
 
-    return operand
+    if operand.node not in legalized:
+        return operand
+
+    legalized_node = legalized[operand.node]
+
+    if isinstance(legalized_node, (list, tuple)):
+        return [DagValue(n, operand.index) for n in legalized_node]
+
+    return DagValue(legalized_node, operand.index)
 
 
 class Legalizer:
