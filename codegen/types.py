@@ -104,8 +104,8 @@ class ValueType(Enum):
     V1024F64 = "v1024f64"
 
     GLUE = "glue"
-
     IPTR = "iptr"
+    UNTYPED = "untyped"
 
 
 class MachineValueType:
