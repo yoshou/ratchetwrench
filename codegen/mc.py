@@ -549,10 +549,11 @@ class MCStream:
 
 
 class MCValue:
-    def __init__(self, value: int, symbol1: MCSymbol, symbol2: MCSymbol):
+    def __init__(self, value: int, symbol1: MCSymbol, symbol2: MCSymbol, ref_kind=0):
         self.value = value
         self.symbol1 = symbol1
         self.symbol2 = symbol2
+        self.ref_kind = ref_kind
 
     @property
     def is_constant(self):
