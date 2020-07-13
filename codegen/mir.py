@@ -752,6 +752,16 @@ class MOExternalSymbol(MachineOperand):
         f.write(f'@{self.symbol}')
 
 
+class MORegisterMask(MachineOperand):
+    def __init__(self, mask, target_flags=0):
+        assert(isinstance(mask, list))
+        super().__init__(target_flags)
+        self.mask = mask
+
+    def print(self, f, slot_id_map):
+        f.write(f'mask')
+
+
 class MOConstantPoolIndex(MachineOperand):
     def __init__(self, index, target_flags=0):
         super().__init__(target_flags)
@@ -875,6 +885,9 @@ class MachineInstruction:
 
     def add_external_symbol(self, value, target_flags=0):
         return self.add_operand(MOExternalSymbol(value, target_flags))
+
+    def add_reg_mask(self, value):
+        return self.add_operand(MORegisterMask(value))
 
     def insert_before(self, inst):
         if inst.mbb is None:
