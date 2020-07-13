@@ -244,6 +244,8 @@ class ARMInstructionSelector(InstructionSelector):
             return node
         elif node.opcode == VirtualDagOps.TARGET_FRAME_INDEX:
             return node
+        elif node.opcode == VirtualDagOps.TARGET_EXTERNAL_SYMBOL:
+            return node
         elif node.opcode in SELECT_TABLE:
             select_func = SELECT_TABLE[node.opcode]
             return select_func(node, dag, new_ops)
@@ -1677,17 +1679,6 @@ class ARMLegalizer(Legalizer):
     def __init__(self):
         super().__init__()
 
-    def get_legalized_op(self, operand, legalized):
-        if operand.node not in legalized:
-            return operand
-
-        legalized_node = legalized[operand.node]
-
-        if isinstance(legalized_node, (list, tuple)):
-            return [DagValue(n, operand.index) for n in legalized_node]
-
-        return DagValue(legalized_node, operand.index)
-
     def promote_integer_result_setcc(self, node, dag, legalized):
         target_lowering = dag.mfunc.target_info.get_lowering()
         setcc_ty = target_lowering.get_setcc_result_type_for_vt(
@@ -1696,8 +1687,8 @@ class ARMLegalizer(Legalizer):
         return dag.add_node(node.opcode, [setcc_ty], *node.operands)
 
     def promote_integer_result_bin(self, node, dag, legalized):
-        lhs = self.get_legalized_op(node.operands[0], legalized)
-        rhs = self.get_legalized_op(node.operands[1], legalized)
+        lhs = get_legalized_op(node.operands[0], legalized)
+        rhs = get_legalized_op(node.operands[1], legalized)
 
         return dag.add_node(node.opcode, [lhs.ty], lhs, rhs)
 
