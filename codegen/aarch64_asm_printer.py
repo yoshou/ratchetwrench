@@ -38,6 +38,12 @@ class AArch64MCExprVarKind(IntFlag):
     PageOff = auto()
     Nc = auto()
 
+    ABS = auto()
+    GOTTPREL = auto()
+    TPREL = auto()
+    DTPREL = auto()
+    TLSDESC = auto()
+
 
 class AArch64MCExpr(MCTargetExpr):
     def __init__(self, kind, expr):
@@ -54,7 +60,7 @@ class AArch64MCExpr(MCTargetExpr):
         if not result:
             return result
 
-        return result
+        return MCValue(result.value, result.symbol1, result.symbol2, self.kind)
 
 
 class AArch64MCInstLower:
@@ -88,6 +94,16 @@ class AArch64MCInstLower:
         if operand.target_flags & AArch64OperandFlag.MO_NC.value:
             ref_flags |= AArch64MCExprVarKind.Nc
 
+        if operand.target_flags & AArch64OperandFlag.MO_TLS.value:
+            model = operand.value.thread_local
+
+            if model == ThreadLocalMode.GeneralDynamicTLSModel:
+                ref_flags |= AArch64MCExprVarKind.TLSDESC
+            else:
+                raise NotImplementedError()
+        else:
+            ref_flags |= AArch64MCExprVarKind.ABS
+
         expr = AArch64MCExpr(ref_flags, expr)
 
         if not operand.is_jti and not operand.is_mbb and operand.offset != 0:
@@ -100,7 +116,7 @@ class AArch64MCInstLower:
     def target_info(self):
         return self.func.target_info
 
-    def lower_operand(self, inst, operand):
+    def lower_operand(self, operand):
         if isinstance(operand, MOReg):
             if operand.is_implicit:
                 return None
@@ -114,13 +130,15 @@ class AArch64MCInstLower:
         elif isinstance(operand, MOConstantPoolIndex):
             symbol = self.asm_printer.get_cp_index_symbol(operand.index)
             return self.lower_symbol_operand(operand, symbol)
+        elif isinstance(operand, MORegisterMask):
+            return None
 
         raise NotImplementedError()
 
     def lower(self, inst):
         mc_inst = MCInst(inst.opcode)
         for operand in inst.operands:
-            mc_op = self.lower_operand(inst, operand)
+            mc_op = self.lower_operand(operand)
             if mc_op is not None:
                 mc_inst.add_operand(mc_op)
         return mc_inst
@@ -332,7 +350,74 @@ class AArch64AsmPrinter(AsmPrinter):
         #     self.emit_mc_inst(mc_inst)
         #     return
 
+        from codegen.aarch64_gen import AArch64OperandFlag
+
         mc_inst_lower = AArch64MCInstLower(self.ctx, inst.mbb.func, self)
+
+        if inst.opcode == AArch64MachineOps.TLSDESC_CALLSEQ:
+            sym_op = inst.operands[0]
+
+            tlsdesc_lo12 = MOGlobalAddress(
+                sym_op.value, sym_op.offset, AArch64OperandFlag.MO_TLS | AArch64OperandFlag.MO_PAGEOFF)
+
+            tlsdesc = MOGlobalAddress(
+                sym_op.value, sym_op.offset, AArch64OperandFlag.MO_TLS | AArch64OperandFlag.MO_PAGE)
+
+            sym = mc_inst_lower.lower_operand(sym_op)
+            sym_tlsdesc_lo12 = mc_inst_lower.lower_operand(tlsdesc_lo12)
+            sym_tlsdesc = mc_inst_lower.lower_operand(tlsdesc)
+
+            # adrp  x0, :tlsdesc:var
+            adrp_inst = MCInst(AArch64MachineOps.ADRP)
+            adrp_inst.add_operand(MCOperandReg(MachineRegister(X0)))
+            adrp_inst.add_operand(sym_tlsdesc)
+
+            self.emit_mc_inst(adrp_inst)
+
+            # ldr   x1, [x0, #:tlsdesc_lo12:var]
+            ldr_inst = MCInst(AArch64MachineOps.LDRXui)
+            ldr_inst.add_operand(MCOperandReg(MachineRegister(X1)))
+            ldr_inst.add_operand(MCOperandReg(MachineRegister(X0)))
+            ldr_inst.add_operand(sym_tlsdesc_lo12)
+            ldr_inst.add_operand(MCOperandImm(0))
+
+            self.emit_mc_inst(ldr_inst)
+
+            def get_shift_value(imm):
+                return imm & 0x3f
+
+            # add   x0, x0, #:tlsdesc_lo12:var
+            add_inst = MCInst(AArch64MachineOps.ADDXri)
+            add_inst.add_operand(MCOperandReg(MachineRegister(X0)))
+            add_inst.add_operand(MCOperandReg(MachineRegister(X0)))
+            add_inst.add_operand(sym_tlsdesc_lo12)
+            add_inst.add_operand(MCOperandImm(get_shift_value(0)))
+
+            self.emit_mc_inst(add_inst)
+
+            # .tlsdesccall var
+            tlsdesccall_inst = MCInst(AArch64MachineOps.TLSDESCCALL)
+            tlsdesccall_inst.add_operand(sym)
+
+            self.emit_mc_inst(tlsdesccall_inst)
+
+            # blr   x1
+            blr_inst = MCInst(AArch64MachineOps.BLR)
+            blr_inst.add_operand(MCOperandReg(MachineRegister(X1)))
+
+            self.emit_mc_inst(blr_inst)
+
+            return
+
+        if inst.opcode == AArch64MachineOps.FMOVS0:
+            mc_inst = MCInst(AArch64MachineOps.FMOVWSr)
+            mc_inst.add_operand(MCOperandReg(inst.operands[0].reg))
+            mc_inst.add_operand(MCOperandReg(MachineRegister(WZR)))
+
+            self.emit_mc_inst(mc_inst)
+
+            return
+
         mc_inst = mc_inst_lower.lower(inst)
 
         for operand in mc_inst.operands:
@@ -596,6 +681,16 @@ class AArch64AsmBackend(MCAsmBackend):
         table = {
             AArch64FixupKind.AArch64_ADD_IMM12: MCFixupKindInfo(
                 "AArch64_ADD_IMM12", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED1: MCFixupKindInfo(
+                "AArch64_LDST_IMM12_UNSCALED1", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED2: MCFixupKindInfo(
+                "AArch64_LDST_IMM12_UNSCALED2", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4: MCFixupKindInfo(
+                "AArch64_LDST_IMM12_UNSCALED4", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8: MCFixupKindInfo(
+                "AArch64_LDST_IMM12_UNSCALED8", 10, 12, MCFixupKindInfoFlag.Non),
+            AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED16: MCFixupKindInfo(
+                "AArch64_LDST_IMM12_UNSCALED16", 10, 12, MCFixupKindInfoFlag.Non),
             AArch64FixupKind.AArch64_PCREL_ADR_IMM21: MCFixupKindInfo(
                 "AArch64_PCREL_ADR_IMM21", 0, 32, MCFixupKindInfoFlag.IsPCRel),
             AArch64FixupKind.AArch64_PCREL_ADRP_IMM21: MCFixupKindInfo(
@@ -607,7 +702,9 @@ class AArch64AsmBackend(MCAsmBackend):
             AArch64FixupKind.AArch64_PCREL_BRANCH19: MCFixupKindInfo(
                 "AArch64_PCREL_BRANCH19", 5, 19, MCFixupKindInfoFlag.IsPCRel),
             AArch64FixupKind.AArch64_PCREL_BRANCH26: MCFixupKindInfo(
-                "AArch64_PCREL_BRANCH26", 0, 26, MCFixupKindInfoFlag.IsPCRel)
+                "AArch64_PCREL_BRANCH26", 0, 26, MCFixupKindInfoFlag.IsPCRel),
+            AArch64FixupKind.AArch64_TLSDESC_CALL: MCFixupKindInfo(
+                "AArch64_TLSDESC_CALL", 0, 0, MCFixupKindInfoFlag.Non)
         }
 
         if kind in table:
@@ -696,14 +793,35 @@ class AArch64FixupKind(Enum):
     AArch64_PCREL_ADR_IMM21 = auto()
     AArch64_PCREL_ADRP_IMM21 = auto()
     AArch64_ADD_IMM12 = auto()
+    AArch64_LDST_IMM12_UNSCALED1 = auto()
+    AArch64_LDST_IMM12_UNSCALED2 = auto()
+    AArch64_LDST_IMM12_UNSCALED4 = auto()
+    AArch64_LDST_IMM12_UNSCALED8 = auto()
+    AArch64_LDST_IMM12_UNSCALED16 = auto()
     AArch64_PCREL_CALL26 = auto()
     AArch64_PCREL_BRANCH14 = auto()
     AArch64_PCREL_BRANCH19 = auto()
     AArch64_PCREL_BRANCH26 = auto()
+    AArch64_TLSDESC_CALL = auto()
 
 
 def get_reg_code(operand):
     return operand.reg.spec.encoding
+
+
+def get_sysreg_code(operand):
+    assert(operand.is_imm)
+    idx = operand.imm
+    sysreg = list(AArch64SysReg)[idx].value
+
+    code = 0
+    code = write_bits(code, sysreg.op0, 14, 2)
+    code = write_bits(code, sysreg.op1, 11, 3)
+    code = write_bits(code, sysreg.crn, 7, 4)
+    code = write_bits(code, sysreg.crm, 3, 4)
+    code = write_bits(code, sysreg.op2, 0, 3)
+
+    return code
 
 
 def write_bits(value, bits, offset, count):
@@ -732,14 +850,27 @@ def get_ldst_unscaled_inst_code(inst: MCInst, sz, v, opc, fixups):
     return code
 
 
-def get_ldst_ui_inst_code(inst: MCInst, sz, v, opc, fixups):
+def get_ldst_uimm12_value(inst: MCInst, idx, fixups, fixup_kind):
+    if inst.operands[idx].is_imm:
+        return inst.operands[idx].imm
+
+    assert(inst.operands[idx].is_expr)
+
+    expr = inst.operands[idx].expr
+    fixups.append(MCFixup(0, expr, fixup_kind))
+
+    return 0
+
+
+def get_ldst_ui_inst_code(inst: MCInst, sz, v, opc, fixups, fixup_kind):
     code = 0
     code = write_bits(code, sz, 30, 2)
     code = write_bits(code, 0b111, 27, 3)
     code = write_bits(code, v, 26, 1)
     code = write_bits(code, 0b01, 24, 2)
     code = write_bits(code, opc, 22, 2)
-    code = write_bits(code, inst.operands[2].imm, 10, 12)
+    code = write_bits(code, get_ldst_uimm12_value(
+        inst, 2, fixups, fixup_kind), 10, 12)
     code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
     code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
@@ -1035,6 +1166,20 @@ def get_single_operand_fp_data(inst: MCInst, opcode, fixups):
     return code
 
 
+def get_unscaled_conversion(inst: MCInst, rmode, opcode, fixups):
+    code = 0
+
+    code = write_bits(code, 0b0011110, 24, 7)
+    code = write_bits(code, 0b1, 21, 1)
+    code = write_bits(code, rmode, 19, 2)
+    code = write_bits(code, opcode, 16, 3)
+    code = write_bits(code, 0b000000, 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
 def get_two_operand_fp_data(inst: MCInst, opcode, fixups):
     code = 0
 
@@ -1136,6 +1281,14 @@ def get_simd_ins_from_elem(inst: MCInst, q, fixups):
     return get_simd_ins(inst, 1, 1, fixups)
 
 
+def get_system(inst: MCInst, l, fixups):
+    code = 0
+    code = write_bits(code, 0b1101010100, 22, 10)
+    code = write_bits(code, l, 21, 1)
+
+    return code
+
+
 def get_inst_binary_code(inst: MCInst, fixups):
     opcode = inst.opcode
     num_operands = len(inst.operands)
@@ -1159,25 +1312,25 @@ def get_inst_binary_code(inst: MCInst, fixups):
         return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b10, fixups)
 
     if opcode == AArch64MachineOps.STRWui:
-        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
 
     if opcode == AArch64MachineOps.STRXui:
-        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8)
 
     if opcode == AArch64MachineOps.STRBui:
-        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED1)
 
     if opcode == AArch64MachineOps.STRHui:
-        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED2)
 
     if opcode == AArch64MachineOps.STRSui:
-        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
 
     if opcode == AArch64MachineOps.STRDui:
-        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b00, fixups)
+        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8)
 
     if opcode == AArch64MachineOps.STRQui:
-        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b10, fixups)
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b10, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED16)
 
     if opcode == AArch64MachineOps.LDURWi:
         return get_ldst_unscaled_inst_code(inst, 0b10, 0, 0b01, fixups)
@@ -1198,31 +1351,34 @@ def get_inst_binary_code(inst: MCInst, fixups):
         return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b11, fixups)
 
     if opcode == AArch64MachineOps.LDRWui:
-        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b10, 0, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
 
     if opcode == AArch64MachineOps.LDRXui:
-        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b11, 0, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8)
 
     if opcode == AArch64MachineOps.LDRBui:
-        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED1)
 
     if opcode == AArch64MachineOps.LDRHui:
-        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b01, 1, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED2)
 
     if opcode == AArch64MachineOps.LDRSui:
-        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b10, 1, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
 
     if opcode == AArch64MachineOps.LDRDui:
-        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b01, fixups)
+        return get_ldst_ui_inst_code(inst, 0b11, 1, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED8)
 
     if opcode == AArch64MachineOps.LDRQui:
-        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b11, fixups)
+        return get_ldst_ui_inst_code(inst, 0b00, 1, 0b11, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED16)
 
     if opcode == AArch64MachineOps.STPWi:
         return get_ldst_pair_offset_inst_code(inst, 0b00, 0, 0, fixups)
 
     if opcode == AArch64MachineOps.STPXi:
         return get_ldst_pair_offset_inst_code(inst, 0b10, 0, 0, fixups)
+
+    if opcode == AArch64MachineOps.STPDi:
+        return get_ldst_pair_offset_inst_code(inst, 0b01, 1, 0, fixups)
 
     if opcode == AArch64MachineOps.STPXprei:
         return get_ldst_pair_pre_idx_inst_code(inst, 0b10, 0, 0, fixups)
@@ -1235,6 +1391,15 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
     if opcode == AArch64MachineOps.LDPXi:
         return get_ldst_pair_offset_inst_code(inst, 0b10, 0, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPSi:
+        return get_ldst_pair_offset_inst_code(inst, 0b00, 1, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPDi:
+        return get_ldst_pair_offset_inst_code(inst, 0b01, 1, 1, fixups)
+
+    if opcode == AArch64MachineOps.LDPQi:
+        return get_ldst_pair_offset_inst_code(inst, 0b10, 1, 1, fixups)
 
     if opcode == AArch64MachineOps.LDPXprei:
         return get_ldst_pair_pre_idx_inst_code(inst, 0b10, 0, 1, fixups)
@@ -1371,6 +1536,11 @@ def get_inst_binary_code(inst: MCInst, fixups):
     if opcode == AArch64MachineOps.BL:
         return get_call_imm(inst, 1, fixups)
 
+    if opcode == AArch64MachineOps.BLR:
+        code = get_branch_reg(inst, 0b0001, fixups)
+        code = write_bits(code, get_reg_code(inst.operands[0]), 5, 5)
+        return code
+
     if opcode == AArch64MachineOps.RET:
         code = get_branch_reg(inst, 0b0010, fixups)
         code = write_bits(code, get_reg_code(inst.operands[0]), 5, 5)
@@ -1389,6 +1559,12 @@ def get_inst_binary_code(inst: MCInst, fixups):
     if opcode == AArch64MachineOps.FMOVDr:
         code = get_single_operand_fp_data(inst, 0b000000, fixups)
         code = write_bits(code, 0b01, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FMOVWSr:
+        code = get_unscaled_conversion(inst, 0b00, 0b111, fixups)
+        code = write_bits(code, 0, 31, 1)
+        code = write_bits(code, 0b00, 22, 2)
         return code
 
     if opcode == AArch64MachineOps.FADDHrr:
@@ -1489,6 +1665,12 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, idx2, 13, 2)
         return code
 
+    if opcode == AArch64MachineOps.MRS:
+        code = get_system(inst, 1, fixups)
+        code = write_bits(code, get_sysreg_code(inst.operands[1]), 5, 16)
+        code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+        return code
+
     raise NotImplementedError()
 
 
@@ -1506,6 +1688,13 @@ class AArch64CodeEmitter(MCCodeEmitter):
     def encode_instruction(self, inst: MCInst, fixups, output):
         opcode = inst.opcode
         num_operands = len(inst.operands)
+
+        if inst.opcode == AArch64MachineOps.TLSDESCCALL:
+            fixup_kind = AArch64FixupKind.AArch64_TLSDESC_CALL
+            expr = inst.operands[0].expr
+            fixups.append(MCFixup(0, expr, fixup_kind))
+
+            return
 
         code = get_inst_binary_code(inst, fixups)
 
