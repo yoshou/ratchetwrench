@@ -263,7 +263,8 @@ class ARMAsmPrinter(AsmPrinter):
 
         if inst.opcode == ARMMachineOps.PIC_ADD:
             pic_label_id = inst.operands[2].val
-            func_number = self.func.module.funcs.index(self.func)
+            func_number = list(
+                self.func.module.funcs.values()).index(self.func)
             self.stream.emit_label(get_pic_label(
                 pic_label_id, func_number, self.ctx))
 
@@ -420,7 +421,7 @@ class ARMAsmPrinter(AsmPrinter):
             symbol, get_variant_kind_from_modifier(value.modifier))
 
         def get_function_number(func):
-            return func.module.funcs.index(func)
+            return list(func.module.funcs.values()).index(func)
 
         if value.pc_offset != 0:
             pc_label = get_pic_label(
