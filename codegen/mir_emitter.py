@@ -169,7 +169,7 @@ class MachineInstrEmitter:
         minst.add_reg(
             vreg_op.reg, RegState.Kill if is_kill else RegState.Non)
 
-    def add_operand(self, minst: MachineInstruction, operand: DagValue):
+    def add_operand(self, minst: MachineInstruction, operand: DagValue, ii=None, operand_idx=-1):
         assert(isinstance(operand, DagValue))
 
         if isinstance(operand.node, ConstantDagNode):
@@ -186,7 +186,10 @@ class MachineInstrEmitter:
 
             minst.add_constant_pool_index(index, operand.node.target_flags)
         elif isinstance(operand.node, RegisterDagNode):
-            minst.add_reg(operand.node.reg, RegState.Non)
+            reg_state = RegState.Non
+            if operand_idx >= 0 and ii and operand_idx >= ii.num_operands:
+                reg_state = RegState.Implicit
+            minst.add_reg(operand.node.reg, reg_state)
         elif isinstance(operand.node, GlobalAddressDagNode):
             minst.add_global_address(
                 operand.node.value, operand.node.target_flags)
@@ -197,6 +200,8 @@ class MachineInstrEmitter:
         elif isinstance(operand.node, ExternalSymbolDagNode):
             minst.add_external_symbol(
                 operand.node.symbol, operand.node.target_flags)
+        elif isinstance(operand.node, RegisterMaskDagNode):
+            minst.add_reg_mask(operand.node.mask)
         elif isinstance(operand.node, (MachineDagNode, DagNode)):
             self.add_register_operand(minst, operand)
         else:
@@ -415,12 +420,14 @@ class MachineInstrEmitter:
         if operands and operands[-1].ty.value_type == ValueType.OTHER:
             operands.pop()
 
-        for operand in operands[:num_operands]:
+        for i in range(len(operands)):
+            operand = operands[i]
+
             if isinstance(operand.node, DagNode):
                 if operand.node.opcode == VirtualDagOps.TOKEN_FACTOR:
                     continue
 
-            self.add_operand(minst, operand)
+            self.add_operand(minst, operand, ii, i)
 
         constraint_dic = {c.op1: c.op2 for c in ii.constraints}
 
