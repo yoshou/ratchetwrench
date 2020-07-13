@@ -1127,11 +1127,13 @@ def build_ir_func_header(node, func, ctx):
         func.add_arg(ir_arg)
 
     for (arg_ty, arg_quals, arg_name), arg_info in zip(node.params, func_info.arguments):
-        param_ty = arg_info.ty
+        param_ty = ctx.get_ir_type(arg_ty)
+        coerced_param_ty = arg_info.ty
         if arg_info.kind == ABIArgKind.Indirect:
-            ir_arg = ir_arg_ptr = Argument(PointerType(param_ty, 0), arg_name)
+            ir_arg = ir_arg_ptr = Argument(
+                PointerType(param_ty, 0), arg_name)
         else:
-            ir_arg = Argument(param_ty, arg_name)
+            ir_arg = Argument(coerced_param_ty, arg_name)
         func.add_arg(ir_arg)
 
 
@@ -1647,8 +1649,6 @@ def emit_ir(ast, abi, module):
                 thread_local = ThreadLocalMode.GeneralDynamicTLSModel
                 if "shared" in ident.val.ty_qual:
                     thread_local = ThreadLocalMode.NotThreadLocal
-
-                thread_local = ThreadLocalMode.NotThreadLocal
 
                 name = ident.val.name
                 global_named_values[ident.val] = module.add_global(name,
