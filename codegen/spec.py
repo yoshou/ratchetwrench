@@ -542,7 +542,7 @@ class Constraint:
 
 
 class MachineInstructionDef:
-    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False, enabled=None):
+    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False, enabled=None, sched=None):
         self.mnemonic = mnemonic
         self.outs = OrderedDict(outs)
         self.ins = OrderedDict(ins)
@@ -556,6 +556,7 @@ class MachineInstructionDef:
         self.is_call = is_call
 
         self.enabled = enabled
+        self.sched = sched
 
         for pattern in self.patterns:
             pattern.inst = self

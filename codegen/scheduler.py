@@ -9,6 +9,7 @@ class ScheduleUnit:
         self.succs = []
         self.preds = []
         self._height = -1
+        self.latency = 0
 
     def compute_height(self):
         # Calculates the maximal path from the node to the entry.
@@ -20,9 +21,9 @@ class ScheduleUnit:
         for succ in self.succs:
             succ.node.compute_height()
 
-            max_height = max(max_height, succ.node._height)
+            max_height = max(max_height, succ.node._height + succ.node.latency)
 
-        self._height = max_height + 1
+        self._height = max_height
 
     def get_height(self):
         if self._height == -1:
@@ -89,6 +90,14 @@ class ScheduleDag:
 
     def create_sched_node(self, node):
         sched_node = ScheduleUnit(node, len(self.nodes))
+
+        from codegen.spec import MachineInstructionDef
+
+        if isinstance(node.opcode, MachineInstructionDef):
+            sched = node.opcode.sched
+            if sched:
+                sched_node.latency = sched.latency
+
         self.nodes.append(sched_node)
         return sched_node
 
@@ -340,23 +349,23 @@ class ListScheduler:
             return scratches
 
         def comp_sunit(a, b):
-            if numbers[a] == numbers[b]:
-                a_height = get_closest(a)
-                b_height = get_closest(b)
+            if numbers[a] != numbers[b]:
+                return numbers[a] > numbers[b]
 
-                if a_height != b_height:
-                    return a_height < b_height
+            a_height = get_closest(a)
+            b_height = get_closest(b)
 
-                a_scratch = get_num_scratches(a)
-                b_scratch = get_num_scratches(b)
+            if a_height != b_height:
+                return a_height < b_height
 
-                # How many registers becomes live when the node is scheduled.
-                if a_scratch != b_scratch:
-                    return a_scratch > b_scratch
+            a_scratch = get_num_scratches(a)
+            b_scratch = get_num_scratches(b)
 
-                return a.id > b.id
+            # How many registers becomes live when the node is scheduled.
+            if a_scratch != b_scratch:
+                return a_scratch > b_scratch
 
-            return numbers[a] > numbers[b]
+            return a.id > b.id
 
         available_queue = ScheduingPriorityQueue(comp_sunit)
 

@@ -852,23 +852,74 @@ class ProcResource:
         self.num = num
 
 
+class ProcResGroup:
+    def __init__(self, resources):
+        self.resources = resources
+
+
 A72UnitB = ProcResource(1)
 A72UnitI = ProcResource(1)
+A72UnitM = ProcResource(1)
+A72UnitL = ProcResource(1)
+A72UnitS = ProcResource(1)
+A72UnitX = ProcResource(1)
+A72UnitW = ProcResource(1)
+A72UnitV = ProcResGroup([A72UnitX, A72UnitW])
+
 
 class ProcWriteResources:
-    def __init__(self, resource, latency=1):
-        self.resource = resource
+    def __init__(self, resources, latency=1):
+        self.resources = resources
         self.latency = latency
 
 
 class SchedWriteRes(ProcWriteResources):
-    def __init__(self, resource, latency=1):
-        super().__init__(resource, latency)
+    def __init__(self, resources, latency=1, num_uops=1):
+        super().__init__(resources, latency)
 
 
-A72Write_1cyc_1I = SchedWriteRes(A72UnitI, 1)
+A72Write_1cyc_1B = SchedWriteRes([A72UnitB], latency=1)
+A72Write_1cyc_1I = SchedWriteRes([A72UnitI], latency=1)
+A72Write_2cyc_1M = SchedWriteRes([A72UnitM], latency=1)
+A72Write_19cyc_1M = SchedWriteRes([A72UnitM], latency=19)
+A72Write_35cyc_1M = SchedWriteRes([A72UnitM], latency=35)
+A72Write_4cyc_1L = SchedWriteRes([A72UnitL], latency=4)
+A72Write_5cyc_1L = SchedWriteRes([A72UnitL], latency=5)
+A72Write_1cyc_1S = SchedWriteRes([A72UnitS], latency=1)
+A72Write_4cyc_1I_1L = SchedWriteRes(
+    [A72UnitI, A72UnitL], latency=4, num_uops=2)
+A72Write_1cyc_1I_1S = SchedWriteRes(
+    [A72UnitI, A72UnitS], latency=1, num_uops=2)
+A72Write_3cyc_1V = SchedWriteRes([A72UnitV], latency=3)
+A72Write_5cyc_1V = SchedWriteRes([A72UnitV], latency=5)
+A72Write_17cyc_1W = SchedWriteRes([A72UnitW], latency=17)
 
 WriteImm = A72Write_1cyc_1I
+WriteI = A72Write_1cyc_1I
+WriteISReg = A72Write_2cyc_1M
+WriteIEReg = A72Write_2cyc_1M
+WriteExtr = A72Write_1cyc_1I
+WriteIS = A72Write_1cyc_1I
+WriteID32 = A72Write_19cyc_1M
+WriteID64 = A72Write_35cyc_1M
+WriteBr = A72Write_1cyc_1B
+WriteBrReg = A72Write_1cyc_1B
+WriteLD = A72Write_4cyc_1L
+WriteST = A72Write_1cyc_1S
+WriteSTP = A72Write_1cyc_1S
+WriteAdr = A72Write_1cyc_1I
+WriteLDIdx = A72Write_4cyc_1I_1L
+WriteSTIdx = A72Write_1cyc_1I_1S
+WriteF = A72Write_3cyc_1V
+WriteFCmp = A72Write_3cyc_1V
+WriteFCvt = A72Write_5cyc_1V
+WriteFCopy = A72Write_5cyc_1L
+WriteFImm = A72Write_3cyc_1V
+WriteFMul = A72Write_5cyc_1V
+WriteFDiv = A72Write_17cyc_1W
+WriteV = A72Write_3cyc_1V
+WriteVLD = A72Write_5cyc_1L
+WriteVST = A72Write_1cyc_1S
 
 
 class SchedMachineMode:
@@ -916,7 +967,8 @@ class AArch64MachineOps:
         outs=[("rt", GPR32)],
         ins=[("rn", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", GPR32), load_(
-            am_indexed32(("rn", GPR64sp), ("offset", uimm12s4))))]
+            am_indexed32(("rn", GPR64sp), ("offset", uimm12s4))))],
+        sched=WriteLD,
     )
 
     LDRXui = def_inst(
@@ -924,7 +976,8 @@ class AArch64MachineOps:
         outs=[("dst", GPR64)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", GPR64), load_(
-            am_indexed64(("src", GPR64sp), ("offset", uimm12s8))))]
+            am_indexed64(("src", GPR64sp), ("offset", uimm12s8))))],
+        sched=WriteLD,
     )
 
     LDRBui = def_inst(
@@ -932,7 +985,8 @@ class AArch64MachineOps:
         outs=[("dst", FPR8)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", FPR16), load_(
-            am_indexed8(("src", GPR64sp), ("offset", uimm12s1))))]
+            am_indexed8(("src", GPR64sp), ("offset", uimm12s1))))],
+        sched=WriteLD,
     )
 
     LDRHui = def_inst(
@@ -940,7 +994,8 @@ class AArch64MachineOps:
         outs=[("dst", FPR16)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", FPR16), load_(
-            am_indexed16(("src", GPR64sp), ("offset", uimm12s2))))]
+            am_indexed16(("src", GPR64sp), ("offset", uimm12s2))))],
+        sched=WriteLD,
     )
 
     LDRSui = def_inst(
@@ -948,7 +1003,8 @@ class AArch64MachineOps:
         outs=[("dst", FPR32)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", FPR32), load_(
-            am_indexed32(("src", GPR64sp), ("offset", uimm12s4))))]
+            am_indexed32(("src", GPR64sp), ("offset", uimm12s4))))],
+        sched=WriteLD,
     )
 
     LDRDui = def_inst(
@@ -956,7 +1012,8 @@ class AArch64MachineOps:
         outs=[("dst", FPR64)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", FPR64), load_(
-            am_indexed64(("src", GPR64sp), ("offset", uimm12s8))))]
+            am_indexed64(("src", GPR64sp), ("offset", uimm12s8))))],
+        sched=WriteLD,
     )
 
     LDRQui = def_inst(
@@ -964,7 +1021,8 @@ class AArch64MachineOps:
         outs=[("dst", FPR128)],
         ins=[("src", GPR64sp), ("offset", I32Imm)],
         patterns=[set_(("dst", FPR128), load_(
-            am_indexed128(("src", GPR64sp), ("offset", uimm12s16))))]
+            am_indexed128(("src", GPR64sp), ("offset", uimm12s16))))],
+        sched=WriteLD,
     )
 
     LDURWi = def_inst(
