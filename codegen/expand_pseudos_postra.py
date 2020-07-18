@@ -30,6 +30,9 @@ class ExpandPseudosPostRA(MachineFunctionPass):
             inst.remove()
             return True
 
+        src_op.subst_phys_reg(self.target_reg_info)
+        dst_op.subst_phys_reg(self.target_reg_info)
+
         self.target_inst_info.copy_phys_reg(
             src_op.reg, dst_op.reg, src_op.is_kill, inst)
         inst.remove()
