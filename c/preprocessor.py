@@ -289,7 +289,7 @@ class Preprocessor:
         if ident:
             idents.append(ident)
         while True:
-            pos = self.pos
+            self.save_pos()
             self.skip_whitespaces()
             ident = None
             if self.source[self.pos:].startswith(","):
@@ -299,7 +299,7 @@ class Preprocessor:
                 idents.append(ident)
 
             if not ident:
-                self.pos = pos
+                self.restore_pos()
                 break
 
         return idents
@@ -558,7 +558,7 @@ class Preprocessor:
                 if ident:
                     self.skip_whitespaces()
                     src = self.source[self.pos:]
-                    pos = self.pos
+                    self.save_pos()
                     if src.startswith("("):
                         self.advance(1)
                         self.skip_whitespaces()
@@ -580,7 +580,7 @@ class Preprocessor:
                                     DefineReplacementDirective(ident, replacements, idents))
                                 return True
 
-                    self.pos = pos
+                    self.restore_pos()
 
                     replacements = self.process_tokens()
                     self.skip_whitespaces()
@@ -600,7 +600,7 @@ class Preprocessor:
                     self.skip_whitespaces()
                     m = newline.match(self.source, self.pos)
                     if m:
-                        self.pos = m.end()
+                        self.advance(m.end() - self.pos)
                         self.groups.append(
                             UndefDirective(ident))
                         return True
@@ -914,6 +914,9 @@ class Preprocessor:
                 self.eval_masks.append(
                     EvalMask(self.eval_masks[-1].masked and value))
 
+                if value:
+                    self.eval_masks[-1].evaluated = True
+
                 pos += 1
             elif isinstance(group, ElseDirective):
                 self.eval_masks[-1].masked = self.eval_masks[-2].masked and not self.eval_masks[-1].masked
@@ -931,6 +934,8 @@ class Preprocessor:
                     self.eval_masks[-1].masked = self.eval_masks[-2].masked and value
                     if self.eval_masks[-1].masked:
                         self.eval_masks[-1].evaluated = True
+                else:
+                    self.eval_masks[-1].masked = False
 
                 pos += 1
             elif isinstance(group, EndIfDirective):
