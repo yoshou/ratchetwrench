@@ -576,9 +576,25 @@ class MOReg(MachineOperand):
         assert(isinstance(reg, (MachineRegister, MachineVirtualRegister)))
         self._reg = reg
         self.flags = flags
-        self.subreg = subreg
+        self._subreg = subreg
         self.prev = None
         self.next = None
+
+    @property
+    def subreg(self):
+        return self._subreg
+
+    @subreg.setter
+    def subreg(self, value):
+        self._subreg = value
+
+    def subst_phys_reg(self, reg_info):
+        reg = self._reg.spec
+        if self.subreg is not None:
+            reg = reg_info.get_subreg(reg, self._subreg)
+            self._subreg = None
+
+        self._reg = MachineRegister(reg)
 
     @property
     def reg(self):
