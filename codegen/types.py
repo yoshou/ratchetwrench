@@ -127,6 +127,31 @@ class MachineValueType:
     def get_size_in_byte(self):
         return int((self.get_size_in_bits() + 7) / 8)
 
+    def bits_eq(self, other):
+        if not isinstance(other, MachineValueType):
+            return False
+        return self.get_size_in_bits() == other.get_size_in_bits()
+
+    def bits_gt(self, other):
+        if not isinstance(other, MachineValueType):
+            return False
+        return self.get_size_in_bits() > other.get_size_in_bits()
+
+    def bits_ge(self, other):
+        if not isinstance(other, MachineValueType):
+            return False
+        return self.get_size_in_bits() >= other.get_size_in_bits()
+
+    def bits_lt(self, other):
+        if not isinstance(other, MachineValueType):
+            return False
+        return self.get_size_in_bits() < other.get_size_in_bits()
+
+    def bits_le(self, other):
+        if not isinstance(other, MachineValueType):
+            return False
+        return self.get_size_in_bits() <= other.get_size_in_bits()
+
     def get_size_in_bits(self):
         if self.value_type == ValueType.I1:
             return 1
