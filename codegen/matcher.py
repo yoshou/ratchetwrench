@@ -61,12 +61,14 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
     for name, opnd in inst.ins.items():
         ops.extend(opnd.apply(dic[name].value, dag))
 
+    operands = list(node.operands)
+
     # Capture chain
     chain = None
 
     operand_idx = 0
-    if operand_idx < len(node.operands) and node.operands[operand_idx].ty.value_type == ValueType.OTHER:
-        chain = node.operands[operand_idx]
+    if operand_idx < len(operands) and operands[operand_idx].ty.value_type == ValueType.OTHER:
+        chain = operands[operand_idx]
         operand_idx += 1
 
     stack = []
@@ -91,8 +93,9 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
     glue = None
 
-    if len(node.operands) > 0 and node.operands[-1].ty.value_type == ValueType.GLUE:
+    if len(operands) > 0 and operands[-1].ty.value_type == ValueType.GLUE:
         glue = node.operands[-1]
+        operands.pop()
 
     for reg in inst.uses:
         assert(isinstance(reg, MachineRegisterDef))
@@ -118,8 +121,8 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
     operand_idx += len(ops)
 
-    while operand_idx < len(node.operands):
-        operand = node.operands[operand_idx]
+    while operand_idx < len(operands):
+        operand = operands[operand_idx]
         operand_idx += 1
 
         if operand == glue:
@@ -310,6 +313,7 @@ mul_ = NodePatternMatcherGen(
     VirtualDagOps.MUL, NodeProperty.Commutative, NodeProperty.Associative)
 
 sdiv_ = NodePatternMatcherGen(VirtualDagOps.SDIV)
+udiv_ = NodePatternMatcherGen(VirtualDagOps.UDIV)
 and_ = NodePatternMatcherGen(
     VirtualDagOps.AND, NodeProperty.Commutative, NodeProperty.Associative)
 
