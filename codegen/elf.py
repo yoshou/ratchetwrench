@@ -62,6 +62,12 @@ def create_elf_section(name, ty, flags, entry_size=0, associated=None, alignment
     return section
 
 
+def to_bytes(value, size, order):
+    value = value & ((1 << (size * 8)) - 1)
+    return value.to_bytes(
+        size, byteorder=order, signed=False)
+
+
 class ELFObjectStream(MCObjectStream):
     def __init__(self, context: MCContext, backend: MCAsmBackend, writer: MCObjectWriter, emitter: MCCodeEmitter):
         super().__init__(context, backend, writer, emitter)
@@ -150,8 +156,8 @@ class ELFObjectStream(MCObjectStream):
     def emit_int_value(self, value: int, size: int):
         order = 'little'
         fragment = self.get_or_create_data_fragment()
-        fragment.contents.extend(value.to_bytes(
-            size, byteorder=order, signed=True))
+
+        fragment.contents.extend(to_bytes(value, size, order))
 
     def emit_zeros(self, size):
         fragment = self.get_or_create_data_fragment()
