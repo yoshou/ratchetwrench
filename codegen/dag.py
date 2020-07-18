@@ -220,6 +220,7 @@ class DagValue:
 
     @node.setter
     def node(self, node):
+        assert(self.ty == node.value_types[self.index])
         assert(isinstance(node, DagNode))
         self._node = node
 
@@ -621,6 +622,18 @@ class Dag:
         return self.mfunc.func_info.func.module.data_layout
 
     def add_node(self, opcode, value_types, *operands):
+        if opcode == VirtualDagOps.ZERO_EXTEND:
+            if value_types[0] == operands[0].ty:
+                return operands[0].node
+
+        if opcode == VirtualDagOps.SIGN_EXTEND:
+            if value_types[0] == operands[0].ty:
+                return operands[0].node
+
+        if opcode == VirtualDagOps.TRUNCATE:
+            if value_types[0] == operands[0].ty:
+                return operands[0].node
+
         operands = [operand for operand in list(operands) if operand.valid]
         node = DagNode(opcode, value_types, operands)
         node = self.append_node(node)
@@ -853,6 +866,8 @@ class Dag:
         dfs_post_rec(self.root.node)
 
     def append_node(self, node: DagNode):
+        if node.opcode == VirtualDagOps.COPY_TO_REG:
+            assert(node.operands[1].ty == node.operands[2].ty)
         assert(isinstance(node, DagNode))
         if node in self.nodes:
             node = self.nodes[node]

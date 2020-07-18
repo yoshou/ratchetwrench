@@ -659,6 +659,10 @@ class DagBuilder:
         rs_value = self.get_value(inst.rs)
         to_ty = compute_value_types(inst.ty, self.data_layout)
 
+        if rs_value.ty == to_ty[0]:
+            self.set_inst_value(inst, rs_value)
+            return
+
         node = self.g.add_node(
             VirtualDagOps.ZERO_EXTEND, to_ty, rs_value)
 
@@ -667,6 +671,10 @@ class DagBuilder:
     def visit_sext(self, inst: TruncInst):
         rs_value = self.get_value(inst.rs)
         to_ty = compute_value_types(inst.ty, self.data_layout)
+
+        if rs_value.ty == to_ty[0]:
+            self.set_inst_value(inst, rs_value)
+            return
 
         node = self.g.add_node(
             VirtualDagOps.SIGN_EXTEND, to_ty, rs_value)
