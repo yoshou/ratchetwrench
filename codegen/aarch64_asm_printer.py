@@ -603,6 +603,11 @@ class AArch64AsmPrinter(AsmPrinter):
             self.emit_global_constant_struct(data_layout, constant, offset)
         elif isinstance(constant, GlobalValue):
             self.stream.emit_int_value(0, int(size / 8))
+        elif isinstance(constant, TruncInst):
+            if isinstance(constant.rs, ConstantInt):
+                self.stream.emit_int_value(constant.rs.value, int(size / 8))
+            else:
+                raise ValueError("Invalid constant type")
         else:
             raise ValueError("Invalid constant type")
 
@@ -960,7 +965,7 @@ def get_addsub_imm_shift(inst: MCInst, is_sub, set_flags, fixups):
     return code
 
 
-def get_addsub_sreg(inst: MCInst, is_sub, set_flags, fixups):
+def get_addsubs_reg(inst: MCInst, is_sub, set_flags, fixups):
     code = 0
 
     # shift = inst.operands[3].imm
@@ -973,6 +978,27 @@ def get_addsub_sreg(inst: MCInst, is_sub, set_flags, fixups):
     code = write_bits(code, 0, 21, 1)
     code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
     code = write_bits(code, read_bits(shift, 0, 6), 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_div(inst: MCInst, is_signed, fixups):
+    code = get_two_operand(inst, 0b0010, fixups)
+    code = write_bits(code, is_signed, 10, 1)
+
+    return code
+
+
+def mul_accum(inst: MCInst, is_sub, op, fixups):
+    code = 0
+
+    code = write_bits(code, 0b0011011, 24, 7)
+    code = write_bits(code, op, 21, 3)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, is_sub, 15, 1)
+    code = write_bits(code, get_reg_code(inst.operands[3]), 10, 5)
     code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
     code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
 
@@ -1289,6 +1315,70 @@ def get_system(inst: MCInst, l, fixups):
     return code
 
 
+def fp_conversion(inst: MCInst, ty, op, fixups):
+    code = 0
+
+    code = write_bits(code, 0b00011110, 24, 8)
+    code = write_bits(code, ty, 22, 2)
+    code = write_bits(code, 0b10001, 17, 5)
+    code = write_bits(code, op, 15, 2)
+    code = write_bits(code, 0b10000, 10, 5)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def fp_to_integer_unscaled(inst: MCInst, rmode, op, ty, fixups):
+    code = 0
+
+    code = write_bits(code, 0b00, 29, 2)
+    code = write_bits(code, 0b11110, 24, 5)
+    code = write_bits(code, ty, 22, 2)
+    code = write_bits(code, 1, 21, 1)
+    code = write_bits(code, rmode, 19, 2)
+    code = write_bits(code, op, 16, 3)
+    code = write_bits(code, 0, 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def integer_to_fp_unscaled(inst: MCInst, is_unsigned, ty, fixups):
+    code = 0
+
+    code = write_bits(code, 0b0011110, 24, 7)
+    code = write_bits(code, ty, 22, 2)
+    code = write_bits(code, 0b10001, 17, 5)
+    code = write_bits(code, is_unsigned, 16, 1)
+    code = write_bits(code, 0b000000, 10, 6)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_two_operand(inst: MCInst, op, fixups):
+    code = 0
+
+    code = write_bits(code, 0b0011010110, 21, 10)
+    code = write_bits(code, get_reg_code(inst.operands[2]), 16, 5)
+    code = write_bits(code, 0b00, 14, 2)
+    code = write_bits(code, op, 10, 4)
+    code = write_bits(code, get_reg_code(inst.operands[1]), 5, 5)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def shift(inst: MCInst, shift_ty, fixups):
+    code = get_two_operand(inst, 0b1000, fixups)
+    code = write_bits(code, shift_ty, 10, 2)
+
+    return code
+
+
 def get_inst_binary_code(inst: MCInst, fixups):
     opcode = inst.opcode
     num_operands = len(inst.operands)
@@ -1427,23 +1517,83 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.ADDSWrr:
-        code = get_addsub_sreg(inst, 0, 1, fixups)
+    if opcode == AArch64MachineOps.MADDWrrr:
+        code = mul_accum(inst, 0, 0b000, fixups)
         code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.ADDSXrr:
-        code = get_addsub_sreg(inst, 0, 1, fixups)
+    if opcode == AArch64MachineOps.MADDXrrr:
+        code = mul_accum(inst, 0, 0b000, fixups)
         code = write_bits(code, 1, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.SUBSWrr:
-        code = get_addsub_sreg(inst, 1, 1, fixups)
+    if opcode == AArch64MachineOps.MSUBWrrr:
+        code = mul_accum(inst, 1, 0b000, fixups)
         code = write_bits(code, 0, 31, 1)
         return code
 
-    if opcode == AArch64MachineOps.SUBSXrr:
-        code = get_addsub_sreg(inst, 1, 1, fixups)
+    if opcode == AArch64MachineOps.MSUBXrrr:
+        code = mul_accum(inst, 1, 0b000, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ADDWrs:
+        code = get_addsubs_reg(inst, 0, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ADDXrs:
+        code = get_addsubs_reg(inst, 0, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SUBWrs:
+        code = get_addsubs_reg(inst, 1, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SUBXrs:
+        code = get_addsubs_reg(inst, 1, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ADDSWrs:
+        code = get_addsubs_reg(inst, 0, 1, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ADDSXrs:
+        code = get_addsubs_reg(inst, 0, 1, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SUBSWrs:
+        code = get_addsubs_reg(inst, 1, 1, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SUBSXrs:
+        code = get_addsubs_reg(inst, 1, 1, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UDIVWrr:
+        code = get_div(inst, 0, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UDIVXrr:
+        code = get_div(inst, 0, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SDIVWrr:
+        code = get_div(inst, 1, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SDIVXrr:
+        code = get_div(inst, 1, fixups)
         code = write_bits(code, 1, 31, 1)
         return code
 
@@ -1582,9 +1732,24 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 0b01, 22, 2)
         return code
 
+    if opcode == AArch64MachineOps.FSUBHrr:
+        code = get_two_operand_fp_data(inst, 0b0011, fixups)
+        code = write_bits(code, 0b11, 22, 2)
+        return code
+
     if opcode == AArch64MachineOps.FSUBSrr:
         code = get_two_operand_fp_data(inst, 0b0011, fixups)
         code = write_bits(code, 0b00, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FSUBDrr:
+        code = get_two_operand_fp_data(inst, 0b0011, fixups)
+        code = write_bits(code, 0b01, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FMULHrr:
+        code = get_two_operand_fp_data(inst, 0b0000, fixups)
+        code = write_bits(code, 0b11, 22, 2)
         return code
 
     if opcode == AArch64MachineOps.FMULSrr:
@@ -1592,9 +1757,24 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 0b00, 22, 2)
         return code
 
+    if opcode == AArch64MachineOps.FMULDrr:
+        code = get_two_operand_fp_data(inst, 0b0000, fixups)
+        code = write_bits(code, 0b01, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FDIVHrr:
+        code = get_two_operand_fp_data(inst, 0b0001, fixups)
+        code = write_bits(code, 0b11, 22, 2)
+        return code
+
     if opcode == AArch64MachineOps.FDIVSrr:
         code = get_two_operand_fp_data(inst, 0b0001, fixups)
         code = write_bits(code, 0b00, 22, 2)
+        return code
+
+    if opcode == AArch64MachineOps.FDIVDrr:
+        code = get_two_operand_fp_data(inst, 0b0001, fixups)
+        code = write_bits(code, 0b01, 22, 2)
         return code
 
     if opcode == AArch64MachineOps.FCMPHrr:
@@ -1669,6 +1849,150 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = get_system(inst, 1, fixups)
         code = write_bits(code, get_sysreg_code(inst.operands[1]), 5, 16)
         code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTSHr:
+        code = fp_conversion(inst, 0b11, 0b00, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTDHr:
+        code = fp_conversion(inst, 0b11, 0b01, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTHSr:
+        code = fp_conversion(inst, 0b00, 0b11, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTDSr:
+        code = fp_conversion(inst, 0b00, 0b01, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTHDr:
+        code = fp_conversion(inst, 0b01, 0b11, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTSDr:
+        code = fp_conversion(inst, 0b01, 0b00, fixups)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUWHr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b11, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUXHr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b11, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUWSr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b00, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUXSr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b00, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUWDr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.FCVTZSUXDr:
+        code = fp_to_integer_unscaled(inst, 0b11, 0b000, 0b01, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUWHr:
+        code = integer_to_fp_unscaled(inst, 0, 0b11, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUWSr:
+        code = integer_to_fp_unscaled(inst, 0, 0b00, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUWDr:
+        code = integer_to_fp_unscaled(inst, 0, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUXHr:
+        code = integer_to_fp_unscaled(inst, 0, 0b11, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUXSr:
+        code = integer_to_fp_unscaled(inst, 0, 0b00, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.SCVTFUXDr:
+        code = integer_to_fp_unscaled(inst, 0, 0b01, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUWHr:
+        code = integer_to_fp_unscaled(inst, 1, 0b11, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUWSr:
+        code = integer_to_fp_unscaled(inst, 1, 0b00, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUWDr:
+        code = integer_to_fp_unscaled(inst, 1, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUXHr:
+        code = integer_to_fp_unscaled(inst, 1, 0b11, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUXSr:
+        code = integer_to_fp_unscaled(inst, 1, 0b00, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.UCVTFUXDr:
+        code = integer_to_fp_unscaled(inst, 1, 0b01, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ASRVWrr:
+        code = shift(inst, 0b10, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.ASRVXrr:
+        code = shift(inst, 0b10, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.LSLVWrr:
+        code = shift(inst, 0b00, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.LSLVXrr:
+        code = shift(inst, 0b00, fixups)
+        code = write_bits(code, 1, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.LSRVWrr:
+        code = shift(inst, 0b01, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.LSRVXrr:
+        code = shift(inst, 0b01, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
     raise NotImplementedError()

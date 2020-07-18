@@ -247,7 +247,7 @@ Q29 = def_reg("q29", [D29], [dsub], encoding=29)
 Q30 = def_reg("q30", [D30], [dsub], encoding=30)
 Q31 = def_reg("q31", [D31], [dsub], encoding=31)
 
-NZCV = def_reg("cpsr", encoding=0)
+NZCV = def_reg("nzcv", encoding=0)
 
 
 aarch64_regclasses = []
@@ -261,7 +261,7 @@ def def_aarch64_regclass(*args, **kwargs):
 
 def sequence(format_str, start, end):
     seq = [globals()[format_str.format(i)]
-           for i in range(start, (end - start))]
+           for i in range(start, (end - start + 1))]
     return seq
 
 
@@ -353,7 +353,8 @@ class AArch64DagOp(DagOp):
 
 
 class AArch64DagOps(Enum):
-    CMP = AArch64DagOp("cmp")
+    ADDS = AArch64DagOp("adds")
+    SUBS = AArch64DagOp("subs")
     SETCC = AArch64DagOp("setcc")
     BRCOND = AArch64DagOp("brcond")
 
@@ -384,7 +385,8 @@ class AArch64DagOps(Enum):
 
 
 aarch64_brcond_ = NodePatternMatcherGen(AArch64DagOps.BRCOND)
-aarch64_cmp_ = NodePatternMatcherGen(AArch64DagOps.CMP)
+aarch64_adds_ = NodePatternMatcherGen(AArch64DagOps.ADDS)
+aarch64_subs_ = NodePatternMatcherGen(AArch64DagOps.SUBS)
 aarch64_fcmp_ = NodePatternMatcherGen(AArch64DagOps.CMPFP)
 aarch64_csel_ = NodePatternMatcherGen(AArch64DagOps.CSEL)
 aarch64_csinc_ = NodePatternMatcherGen(AArch64DagOps.CSINC)
@@ -423,23 +425,21 @@ def match_addrmode_indexed(node, values, idx, dag, size):
         if value1.node.opcode == VirtualDagOps.CONSTANT:
             offset_val = value1.node.value
 
-            assert(offset_val.value % size == 0)
+            if offset_val.value % size == 0:
+                base = value2
+                offset = DagValue(dag.add_target_constant_node(
+                    value1.ty, ConstantInt(int(offset_val.value / size), offset_val.ty)), 0)
 
-            base = value2
-            offset = DagValue(dag.add_target_constant_node(
-                value1.ty, ConstantInt(int(offset_val.value / size), offset_val.ty)), 0)
-
-            return idx + 1, [base, offset]
+                return idx + 1, [base, offset]
         elif value2.node.opcode == VirtualDagOps.CONSTANT:
             offset_val = value2.node.value
 
-            assert(offset_val.value % size == 0)
+            if offset_val.value % size == 0:
+                base = value1
+                offset = DagValue(dag.add_target_constant_node(
+                    value2.ty, ConstantInt(int(offset_val.value / size), offset_val.ty)), 0)
 
-            base = value1
-            offset = DagValue(dag.add_target_constant_node(
-                value2.ty, ConstantInt(int(offset_val.value / size), offset_val.ty)), 0)
-
-            return idx + 1, [base, offset]
+                return idx + 1, [base, offset]
     elif value.node.opcode == VirtualDagOps.FRAME_INDEX:
         base = DagValue(dag.add_frame_index_node(
             value.ty, value.node.index, True), 0)
@@ -575,6 +575,27 @@ def match_imm0_31(node, values, idx, dag):
 
 
 imm0_31 = ComplexOperandMatcher(match_imm0_31)
+
+
+def match_imm0_63(node, values, idx, dag):
+    from codegen.dag import VirtualDagOps
+    from codegen.types import ValueType
+
+    value = values[idx]
+    if value.node.opcode not in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
+        return idx, None
+
+    constant = value.node.value.value
+    if constant >= 0 and constant < 64:
+        target_value = DagValue(dag.add_target_constant_node(
+            value.ty, constant), 0)
+
+        return idx + 1, target_value
+
+    return idx, None
+
+
+imm0_63 = ComplexOperandMatcher(match_imm0_63)
 
 
 def is_power_of_2(value):
@@ -1330,57 +1351,143 @@ class AArch64MachineOps:
             ("src1", GPR64), ("src2", addsub_shifted_imm32)))]
     )
 
-    ADDSWrr = def_inst(
-        "addsw_rr",
+    MADDWrrr = def_inst(
+        "maddw_rrr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32), ("src3", GPR32)]
+    )
+
+    MADDXrrr = def_inst(
+        "maddx_rrr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64), ("src3", GPR64)]
+    )
+
+    UDIVWrr = def_inst(
+        "udivw_rr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        patterns=[set_(("dst", GPR32), udiv_(
+            ("src1", GPR32), ("src2", GPR32)))]
+    )
+
+    UDIVXrr = def_inst(
+        "udivx_rr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        patterns=[set_(("dst", GPR64), udiv_(
+            ("src1", GPR64), ("src2", GPR64)))]
+    )
+
+    SDIVWrr = def_inst(
+        "sdivw_rr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        patterns=[set_(("dst", GPR32), sdiv_(
+            ("src1", GPR32), ("src2", GPR32)))]
+    )
+
+    SDIVXrr = def_inst(
+        "sdivx_rr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        patterns=[set_(("dst", GPR64), sdiv_(
+            ("src1", GPR64), ("src2", GPR64)))]
+    )
+
+    MSUBWrrr = def_inst(
+        "msubw_rrr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32), ("src3", GPR32)]
+    )
+
+    MSUBXrrr = def_inst(
+        "msubx_rrr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64), ("src3", GPR64)]
+    )
+
+    ADDWrs = def_inst(
+        "addw_rs",
         outs=[("dst", GPR32)],
         ins=[("src1", GPR32), ("src2", GPR32)],
         patterns=[
-            set_(("dst", GPR32), add_(("src1", GPR32), ("src2", GPR32)))
+            set_(("dst", GPR32), add_(
+                ("src1", GPR32), ("src2", GPR32)))
         ]
     )
 
-    ADDSXrr = def_inst(
-        "addsx_rr",
+    ADDXrs = def_inst(
+        "addx_rs",
         outs=[("dst", GPR64)],
         ins=[("src1", GPR64), ("src2", GPR64)],
         patterns=[
-            set_(("dst", GPR64), add_(("src1", GPR64), ("src2", GPR64)))
+            set_(("dst", GPR64), add_(
+                ("src1", GPR64), ("src2", GPR64)))
         ]
     )
 
-    SUBSWrr = def_inst(
-        "subsw_rr",
+    SUBWrs = def_inst(
+        "subw_rs",
         outs=[("dst", GPR32)],
         ins=[("src1", GPR32), ("src2", GPR32)],
         patterns=[
-            set_(("dst", GPR32), sub_(("src1", GPR32), ("src2", GPR32)))
+            set_(("dst", GPR32), sub_(
+                ("src1", GPR32), ("src2", GPR32)))
         ]
     )
 
-    CMPSWrr = def_inst(
-        "cmpsw_rr",
-        outs=[],
-        ins=[("src1", GPR32), ("src2", GPR32)],
-        patterns=[
-            aarch64_cmp_(("src1", GPR32), ("src2", GPR32))
-        ]
-    )
-
-    SUBSXrr = def_inst(
-        "subsx_rr",
+    SUBXrs = def_inst(
+        "subx_rs",
         outs=[("dst", GPR64)],
         ins=[("src1", GPR64), ("src2", GPR64)],
         patterns=[
-            set_(("dst", GPR64), sub_(("src1", GPR64), ("src2", GPR64)))
+            set_(("dst", GPR64), sub_(
+                ("src1", GPR64), ("src2", GPR64)))
         ]
     )
 
-    CMPSXrr = def_inst(
-        "cmpsx_rr",
-        outs=[],
-        ins=[("src1", GPR64), ("src2", GPR64)],
+    ADDSWrs = def_inst(
+        "addsw_rs",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        defs=[NZCV],
         patterns=[
-            aarch64_cmp_(("src1", GPR64), ("src2", GPR64))
+            set_(("dst", GPR32), aarch64_adds_(
+                ("src1", GPR32), ("src2", GPR32)))
+        ]
+    )
+
+    ADDSXrs = def_inst(
+        "addsx_rs",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        defs=[NZCV],
+        patterns=[
+            set_(("dst", GPR64), aarch64_adds_(
+                ("src1", GPR64), ("src2", GPR64)))
+        ]
+    )
+
+    SUBSWrs = def_inst(
+        "subsw_rs",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        defs=[NZCV],
+        patterns=[
+            set_(("dst", GPR32), aarch64_subs_(
+                ("src1", GPR32), ("src2", GPR32)))
+        ]
+    )
+
+    SUBSXrs = def_inst(
+        "subsx_rs",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        defs=[NZCV],
+        patterns=[
+            set_(("dst", GPR64), aarch64_subs_(
+                ("src1", GPR64), ("src2", GPR64)))
         ]
     )
 
@@ -1440,6 +1547,48 @@ class AArch64MachineOps:
         ins=[("src1", GPR64), ("src2", I64Imm)],
         patterns=[set_(("dst", GPR64sp), or_(
             ("src1", GPR64), ("src2", logical_imm32)))]
+    )
+
+    ASRVWrr = def_inst(
+        "asrvw_rr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        patterns=[set_(("dst", GPR32), sra_(("src1", GPR32), ("src2", GPR32)))]
+    )
+
+    ASRVXrr = def_inst(
+        "asrvx_rr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        patterns=[set_(("dst", GPR64), sra_(("src1", GPR64), ("src2", GPR64)))]
+    )
+
+    LSLVWrr = def_inst(
+        "lslvw_rr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        patterns=[set_(("dst", GPR32), shl_(("src1", GPR32), ("src2", GPR32)))]
+    )
+
+    LSLVXrr = def_inst(
+        "lslvx_rr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        patterns=[set_(("dst", GPR64), shl_(("src1", GPR64), ("src2", GPR64)))]
+    )
+
+    LSRVWrr = def_inst(
+        "lsrvw_rr",
+        outs=[("dst", GPR32)],
+        ins=[("src1", GPR32), ("src2", GPR32)],
+        patterns=[set_(("dst", GPR32), srl_(("src1", GPR32), ("src2", GPR32)))]
+    )
+
+    LSRVXrr = def_inst(
+        "lsrvx_rr",
+        outs=[("dst", GPR64)],
+        ins=[("src1", GPR64), ("src2", GPR64)],
+        patterns=[set_(("dst", GPR64), srl_(("src1", GPR64), ("src2", GPR64)))]
     )
 
     MOVKWi = def_inst(
@@ -1558,12 +1707,36 @@ class AArch64MachineOps:
             ("src1", FPR64), ("src2", FPR64)))]
     )
 
+    FSUBHrr = def_inst(
+        "fsubh_rr",
+        outs=[("dst", FPR16)],
+        ins=[("src1", FPR16), ("src2", FPR16)],
+        patterns=[set_(("dst", FPR16), fsub_(
+            ("src1", FPR16), ("src2", FPR16)))]
+    )
+
     FSUBSrr = def_inst(
         "fsubs_rr",
         outs=[("dst", FPR32)],
         ins=[("src1", FPR32), ("src2", FPR32)],
         patterns=[set_(("dst", FPR32), fsub_(
             ("src1", FPR32), ("src2", FPR32)))]
+    )
+
+    FSUBDrr = def_inst(
+        "fsubd_rr",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fsub_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FMULHrr = def_inst(
+        "fmulh_rr",
+        outs=[("dst", FPR16)],
+        ins=[("src1", FPR16), ("src2", FPR16)],
+        patterns=[set_(("dst", FPR16), fmul_(
+            ("src1", FPR16), ("src2", FPR16)))]
     )
 
     FMULSrr = def_inst(
@@ -1574,6 +1747,22 @@ class AArch64MachineOps:
             ("src1", FPR32), ("src2", FPR32)))]
     )
 
+    FMULDrr = def_inst(
+        "fmuld_rr",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fmul_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FDIVHrr = def_inst(
+        "fdivh_rr",
+        outs=[("dst", FPR16)],
+        ins=[("src1", FPR16), ("src2", FPR16)],
+        patterns=[set_(("dst", FPR16), fdiv_(
+            ("src1", FPR16), ("src2", FPR16)))]
+    )
+
     FDIVSrr = def_inst(
         "fdivs_rr",
         outs=[("dst", FPR32)],
@@ -1582,10 +1771,19 @@ class AArch64MachineOps:
             ("src1", FPR32), ("src2", FPR32)))]
     )
 
+    FDIVDrr = def_inst(
+        "fdivd_rr",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fdiv_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
     FCMPHrr = def_inst(
         "fcmph_rr",
         outs=[],
         ins=[("src1", FPR16), ("src2", FPR16)],
+        defs=[NZCV],
         patterns=[
             aarch64_fcmp_(("src1", FPR16), ("src2", FPR16))
         ]
@@ -1595,6 +1793,7 @@ class AArch64MachineOps:
         "fcmps_rr",
         outs=[],
         ins=[("src1", FPR32), ("src2", FPR32)],
+        defs=[NZCV],
         patterns=[
             aarch64_fcmp_(("src1", FPR32), ("src2", FPR32))
         ]
@@ -1604,6 +1803,7 @@ class AArch64MachineOps:
         "fcmpd_rr",
         outs=[],
         ins=[("src1", FPR64), ("src2", FPR64)],
+        defs=[NZCV],
         patterns=[
             aarch64_fcmp_(("src1", FPR64), ("src2", FPR64))
         ]
@@ -1675,6 +1875,180 @@ class AArch64MachineOps:
         "csincx_r",
         outs=[("dst", GPR64)],
         ins=[("src1", GPR64), ("src2", GPR64), ("ccond", I32Imm)]
+    )
+
+    # fcvt
+
+    FCVTSHr = def_inst(
+        "fcvtsh_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", FPR16)],
+        patterns=[set_(("dst", FPR32), fp_round_(("src", FPR16)))]
+    )
+
+    FCVTDHr = def_inst(
+        "fcvtdh_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", FPR16)],
+        patterns=[set_(("dst", FPR64), fp_round_(("src", FPR16)))]
+    )
+
+    FCVTHSr = def_inst(
+        "fcvths_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", FPR32)],
+        patterns=[set_(("dst", FPR16), fp_extend_(("src", FPR32)))]
+    )
+
+    FCVTDSr = def_inst(
+        "fcvtds_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", FPR32)],
+        patterns=[set_(("dst", FPR64), fp_extend_(("src", FPR32)))]
+    )
+
+    FCVTHDr = def_inst(
+        "fcvthd_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", FPR64)],
+        patterns=[set_(("dst", FPR16), fp_round_(("src", FPR64)))]
+    )
+
+    FCVTSDr = def_inst(
+        "fcvtsd_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", FPR64)],
+        patterns=[set_(("dst", FPR32), fp_round_(("src", FPR64)))]
+    )
+
+    # unscaled
+    FCVTZSUWHr = def_inst(
+        "fcvtzsuwh_r",
+        outs=[("dst", GPR32)],
+        ins=[("src", FPR16)],
+        patterns=[set_(("dst", GPR32), fp_to_sint_(("src", FPR16)))]
+    )
+
+    FCVTZSUXHr = def_inst(
+        "fcvtzsuxh_r",
+        outs=[("dst", GPR64)],
+        ins=[("src", FPR16)],
+        patterns=[set_(("dst", GPR64), fp_to_sint_(("src", FPR16)))]
+    )
+
+    FCVTZSUWSr = def_inst(
+        "fcvtzsuws_r",
+        outs=[("dst", GPR32)],
+        ins=[("src", FPR32)],
+        patterns=[set_(("dst", GPR32), fp_to_sint_(("src", FPR32)))]
+    )
+
+    FCVTZSUXSr = def_inst(
+        "fcvtzsuxs_r",
+        outs=[("dst", GPR64)],
+        ins=[("src", FPR32)],
+        patterns=[set_(("dst", GPR64), fp_to_sint_(("src", FPR32)))]
+    )
+
+    FCVTZSUWDr = def_inst(
+        "fcvtzsuwd_r",
+        outs=[("dst", GPR32)],
+        ins=[("src", FPR64)],
+        patterns=[set_(("dst", GPR32), fp_to_sint_(("src", FPR64)))]
+    )
+
+    FCVTZSUXDr = def_inst(
+        "fcvtzsuxd_r",
+        outs=[("dst", GPR64)],
+        ins=[("src", FPR64)],
+        patterns=[set_(("dst", GPR64), fp_to_sint_(("src", FPR64)))]
+    )
+
+    # unscaled
+    # signed
+    SCVTFUWHr = def_inst(
+        "scvtfuwh_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR16), sint_to_fp_(("src", GPR32)))]
+    )
+
+    SCVTFUWSr = def_inst(
+        "scvtfuws_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR32), sint_to_fp_(("src", GPR32)))]
+    )
+
+    SCVTFUWDr = def_inst(
+        "scvtfuwd_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR64), sint_to_fp_(("src", GPR32)))]
+    )
+
+    SCVTFUXHr = def_inst(
+        "scvtfuxh_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR16), sint_to_fp_(("src", GPR64)))]
+    )
+
+    SCVTFUXSr = def_inst(
+        "scvtfuxs_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR32), sint_to_fp_(("src", GPR64)))]
+    )
+
+    SCVTFUXDr = def_inst(
+        "scvtfuxd_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR64), sint_to_fp_(("src", GPR64)))]
+    )
+
+    # unsigned
+    UCVTFUWHr = def_inst(
+        "ucvtfuwh_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR16), uint_to_fp_(("src", GPR32)))]
+    )
+
+    UCVTFUWSr = def_inst(
+        "ucvtfuws_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR32), uint_to_fp_(("src", GPR32)))]
+    )
+
+    UCVTFUWDr = def_inst(
+        "ucvtfuwd_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR32)],
+        patterns=[set_(("dst", FPR64), uint_to_fp_(("src", GPR32)))]
+    )
+
+    UCVTFUXHr = def_inst(
+        "ucvtfuxh_r",
+        outs=[("dst", FPR16)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR16), uint_to_fp_(("src", GPR64)))]
+    )
+
+    UCVTFUXSr = def_inst(
+        "ucvtfuxs_r",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR32), uint_to_fp_(("src", GPR64)))]
+    )
+
+    UCVTFUXDr = def_inst(
+        "ucvtfuxd_r",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR64)],
+        patterns=[set_(("dst", FPR64), uint_to_fp_(("src", GPR64)))]
     )
 
     # simd
@@ -1813,6 +2187,7 @@ def def_pat_aarch64(pattern, result):
 
 
 UBFMWri = def_inst_node_(AArch64MachineOps.UBFMWri)
+UBFMXri = def_inst_node_(AArch64MachineOps.UBFMXri)
 
 def_pat_aarch64(shl_(("rn", GPR32), ("imm", imm0_31)),
                 UBFMWri(("rn", GPR32), i32shift_a(("imm", I32Imm)), i32shift_b(("imm", I32Imm))))
@@ -1820,6 +2195,9 @@ def_pat_aarch64(shl_(("rn", GPR32), ("imm", imm0_31)),
 
 def_pat_aarch64(srl_(("rn", GPR32), ("imm", imm0_31)),
                 UBFMWri(("rn", GPR32), ("imm", I32Imm), 31))
+
+def_pat_aarch64(srl_(("rn", GPR64), ("imm", imm0_63)),
+                UBFMXri(("rn", GPR64), ("imm", I32Imm), 63))
 
 CSINCWr = def_inst_node_(AArch64MachineOps.CSINCWr)
 CSINCXr = def_inst_node_(AArch64MachineOps.CSINCXr)
@@ -1833,3 +2211,12 @@ INSvi32lane = def_inst_node_(AArch64MachineOps.INSvi32lane)
 
 # def_pat_aarch64(v4f32_(vector_insert_(("vec", FPR128),
 #                                       ("elm", FPR32), ("idx", imm))), INSvi32lane(("vec", FPR128), ("idx", I32Imm)))
+
+
+MADDWrrr = def_inst_node_(AArch64MachineOps.MADDWrrr)
+MADDXrrr = def_inst_node_(AArch64MachineOps.MADDXrrr)
+
+def_pat_aarch64(i32_(mul_(("rn", GPR32), ("rm", GPR32))),
+                MADDWrrr(("rn", GPR32), ("rm", GPR32), WZR))
+def_pat_aarch64(i64_(mul_(("rn", GPR64), ("rm", GPR64))),
+                MADDXrrr(("rn", GPR64), ("rm", GPR64), XZR))
