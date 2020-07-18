@@ -1291,7 +1291,7 @@ class X64CodeEmitter(MCCodeEmitter):
 
     def encode_instruction(self, inst: MCInst, fixups, output):
         opcode = inst.opcode
-        num_operands = len(inst.operands)
+        num_operands = inst.opcode.num_operands
 
         if opcode == X64MachineOps.MEMBARRIER:
             return
