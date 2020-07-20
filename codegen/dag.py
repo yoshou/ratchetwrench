@@ -43,6 +43,7 @@ class VirtualDagOps(Enum):
     FRAME_INDEX = VirtualDagOp("FrameIndex")
     EXTERNAL_SYMBOL = VirtualDagOp("ExternalSymbol")
     REGISTER_MASK = VirtualDagOp("RegisterMask")
+    VALUETYPE = VirtualDagOp("ValueType")
 
     TARGET_CONSTANT = VirtualDagOp("TargetConstant")
     TARGET_CONSTANT_FP = VirtualDagOp("TargetConstantFP")
@@ -605,6 +606,21 @@ class RegisterMaskDagNode(DagNode):
 class MachineDagNode(DagNode):
     def __init__(self, opcode, value_types, operands):
         super().__init__(opcode, value_types, operands)
+
+
+class ValueTypeDagNode(DagNode):
+    def __init__(self, vt: MachineValueType):
+        super().__init__(VirtualDagOps.VALUETYPE, [
+            MachineValueType(ValueType.OTHER)], [])
+        self.vt = vt
+
+    def __hash__(self):
+        return hash((super().__hash__(), tuple(self.vt)))
+
+    def __eq__(self, other):
+        if not isinstance(other, ValueTypeDagNode):
+            return False
+        return super().__eq__(other) and self.vt == other.vt
 
 
 class Dag:
