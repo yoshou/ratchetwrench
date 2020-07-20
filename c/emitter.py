@@ -1594,7 +1594,8 @@ def build_ir_expr_func_call(node, block, ctx):
                         block, val = build_ir_expr(param, block, ctx)
                         val = FPExtInst(block, val, dst_type)
                     else:
-                        raise NotImplementedError()
+                        block, val = build_ir_expr(param, block, ctx)
+                        val = FPTruncInst(block, val, dst_type)
                 elif src_type in [i1, i8, i16, i32, i64] and isinstance(dst_type, PointerType):
                     block, val = build_ir_expr(param, block, ctx)
                     val = IntToPtrInst(block, val, dst_type)
