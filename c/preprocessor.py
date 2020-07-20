@@ -878,14 +878,6 @@ class Preprocessor:
                     macro_start += 1
 
                 continue
-            elif str(tokens[pos]) == "#":
-                lhs_token = tokens[pos - 1]
-                rhs_token = tokens[pos + 1]
-                pos += 1
-                new_tok_val = f'"{str(tokens[pos])}"'
-                result.append(self.create_token(
-                    new_tok_val, Span(0, len(new_tok_val)), TokenType.StringLiteral))
-                pos += 1
             else:
                 if self.do_replacement(tokens, pos, replacements):
                     continue
@@ -1016,6 +1008,25 @@ class Preprocessor:
                         pos += 1
             else:
                 processed_tokens.pop(pos)
+
+        pos = 0
+        while pos < len(processed_tokens):
+            token = processed_tokens[pos]
+            if str(token) == "#":
+                rhs = processed_tokens[pos + 1]
+
+                if rhs.ty in [TokenType.Identifier, TokenType.Other]:
+                    new_str = f'"{str(rhs)}"'
+
+                    new_token = Token(token.filename,
+                                      new_str, Span(0, len(new_str)), TokenType.StringLiteral, rhs.line_col)
+
+                    processed_tokens.pop(pos)
+                    processed_tokens[pos] = new_token
+                else:
+                    raise Exception()
+
+            pos += 1
 
         self.processed_tokens = processed_tokens
         return processed_tokens
