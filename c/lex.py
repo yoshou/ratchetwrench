@@ -15,7 +15,7 @@ hexadecimal_constant = re.compile(r'0[xX][0-9a-fA-F]+')
 octet_constant = re.compile(r'0[0-7]*')
 
 floating_constant = re.compile(
-    r'((?:(?:[-+]?[0-9]*\.[0-9]+(?:[eE][-+]?[0-9]+)?)|(?:[0-9]+[eE][-+]?[0-9]+)))')
+    r'((?:(?:[0-9]*\.[0-9]+(?:[eE][-+]?[0-9]+)?)|(?:[0-9]+[eE][-+]?[0-9]+)))')
 
 floating_suffix = re.compile(r'([flFL])')
 
@@ -237,15 +237,15 @@ block_semicolon = re.compile(r"[;{}]")
 
 
 def peek_token(src, pos, cnt):
-    matched = match_identifier(src, pos)
-    if matched:
-        return matched
-
     matched = match_string_literal(src, pos)
     if matched:
         return matched
 
     matched = match_character_constant(src, pos)
+    if matched:
+        return matched
+
+    matched = match_identifier(src, pos)
     if matched:
         return matched
 

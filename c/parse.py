@@ -1497,7 +1497,6 @@ def parse_enumerator(tokens, pos, ctx):
         pos = save_pos.pop()
 
         return (pos, EnumConstantDecl(enum_const, None))
-    pos = save_pos.pop()
 
     return (pos, None)
 
@@ -1635,7 +1634,7 @@ def parse_declaration_specifier(tokens, pos, ctx):
                     pos += 1
 
                     # message
-                    while isinstance(tokens[pos], StringLiteral):
+                    while tokens[pos].value != ")":
                         pos += 1
 
                     assert(tokens[pos].value == ")")
