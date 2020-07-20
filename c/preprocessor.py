@@ -53,7 +53,7 @@ comment = re.compile(
 
 identifier = re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*")
 
-string_literal = re.compile(r'"(?:\\.|[^"\\]*)*"')
+string_literal = re.compile(r'L?"(?:\\.|[^"\\]*)*"')
 
 character_constant = re.compile(r"(?:u|U|L)?'(\\.|[^'])*'")
 
@@ -95,10 +95,11 @@ class IncludeDirective:
 
 
 class DefineReplacementDirective:
-    def __init__(self, identifier, replacements, params=None):
+    def __init__(self, identifier, replacements, params=None, is_variadic=False):
         self.identifier = identifier
         self.replacements = replacements
         self.params = params
+        self.is_variadic = is_variadic
 
     @property
     def is_func_style(self):
@@ -136,6 +137,16 @@ class EndIfDirective:
         pass
 
 
+class ErrorDirective:
+    def __init__(self, msg_tokens):
+        self.msg_tokens = msg_tokens
+
+
+class WarningDirective:
+    def __init__(self, msg_tokens):
+        self.msg_tokens = msg_tokens
+
+
 def evalute_constant_expr(expr):
     while isinstance(expr, list):
         if len(expr) != 1:
@@ -148,6 +159,9 @@ def evalute_constant_expr(expr):
         if op == "||":
             if lhs:
                 return 1
+        if op == "&&":
+            if not lhs:
+                return 0
 
         rhs = evalute_constant_expr(expr.rhs)
 
@@ -181,13 +195,17 @@ def evalute_constant_expr(expr):
             return lhs % rhs
     elif isinstance(expr, ConditionalExpr):
         cond_expr = evalute_constant_expr(expr.cond_expr)
-        true_expr = evalute_constant_expr(expr.true_expr)
-        false_expr = evalute_constant_expr(expr.false_expr)
-        return true_expr if cond_expr != 0 else false_expr
+
+        if cond_expr != 0:
+            return evalute_constant_expr(expr.true_expr)
+        else:
+            return evalute_constant_expr(expr.false_expr)
     elif isinstance(expr, UnaryOp):
         value = evalute_constant_expr(expr.expr)
         if expr.op == "!":
             return not value
+        elif expr.op == "-":
+            return -value
     elif isinstance(expr, IntegerConstantExpr):
         return expr.val
     elif isinstance(expr, FloatingConstantExpr):
@@ -198,6 +216,7 @@ def evalute_constant_expr(expr):
 
 
 class Preprocessor:
+
     def __init__(self, filename, source, include_dirs, system_include_dirs, eval_masks=None):
         self.filename = filename
         self.source = source.replace("\\\n", "")
@@ -207,50 +226,17 @@ class Preprocessor:
         self.line_column = (1, 1)
         self.context_stack = []
         self.groups = []
-        self.groups.append(DefineReplacementDirective("_MSC_VER", ["1700"]))
-        self.groups.append(DefineReplacementDirective(
-            "_MSVC_LANG", ["201402"]))
-        self.groups.append(DefineReplacementDirective(
-            "_STL_LANG", ["201402"]))
-        self.groups.append(DefineReplacementDirective(
-            "_CRT_DECLARE_NONSTDC_NAMES", ["0"]))
-        self.groups.append(DefineReplacementDirective(
-            "__STDC_VERSION__", ["201112L"]))
-        self.groups.append(DefineReplacementDirective(
-            "__STDC__", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "_USE_DECLSPECS_FOR_SAL", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "_USE_ATTRIBUTES_FOR_SAL", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "_M_IX86_FP", ["0"]))
-        self.groups.append(DefineReplacementDirective(
-            "__STDC_WANT_SECURE_LIB__", ["0"]))
-        self.groups.append(DefineReplacementDirective(
-            "_M_X64", ["100"]))
-        self.groups.append(DefineReplacementDirective(
-            "__STDC_WANT_SECURE_LIB__", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "_NO_CRT_STDIO_INLINE", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "_WIN64", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "X64", ["1"]))
-        self.groups.append(DefineReplacementDirective(
-            "DEBUG", ["0"]))
-
-        # For linux predefined macros.
-        self.groups.append(DefineReplacementDirective(
-            "_FILE_OFFSET_BITS", ["64"]))
-        self.groups.append(DefineReplacementDirective(
-            "_FORTIFY_SOURCE", ["0"]))
-        self.groups.append(DefineReplacementDirective(
-            "__OPTIMIZE__", ["0"]))
 
         if not eval_masks:
             self.eval_masks = [EvalMask(True)]
         else:
             self.eval_masks = eval_masks
+
+    def add_define_directive(self, ident, replacements=None):
+        if not replacements:
+            replacements = []
+
+        self.groups.append(DefineReplacementDirective(ident, replacements))
 
     def save_pos(self):
         self.context_stack.append((self.pos, self.line_column))
@@ -314,11 +300,6 @@ class Preprocessor:
         return None
 
     def parse_token(self):
-        m = identifier.match(self.source, self.pos)
-        if m:
-            self.advance(m.end() - m.start())
-            return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Identifier)
-
         m = string_literal.match(self.source, self.pos)
         if m:
             self.advance(m.end() - m.start())
@@ -338,6 +319,11 @@ class Preprocessor:
         if m:
             self.advance(m.end() - m.start())
             return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Punctuator)
+
+        m = identifier.match(self.source, self.pos)
+        if m:
+            self.advance(m.end() - m.start())
+            return self.create_token(self.source, Span(m.start(), m.end()), TokenType.Identifier)
 
         m = non_whitespace.match(self.source, self.pos)
         if m:
@@ -566,6 +552,12 @@ class Preprocessor:
                         idents = self.parse_identifier_list()
                         self.skip_whitespaces()
 
+                        is_variadic = False
+                        src = self.source[self.pos:]
+                        if src.startswith("..."):
+                            is_variadic = True
+                            self.advance(3)
+
                         src = self.source[self.pos:]
                         if src.startswith(")"):
                             self.advance(1)
@@ -576,8 +568,9 @@ class Preprocessor:
                             m = newline.match(self.source, self.pos)
                             if m:
                                 self.advance(m.end() - m.start())
+
                                 self.groups.append(
-                                    DefineReplacementDirective(ident, replacements, idents))
+                                    DefineReplacementDirective(ident, replacements, idents, is_variadic))
                                 return True
 
                     self.restore_pos()
@@ -616,7 +609,17 @@ class Preprocessor:
                 if m:
                     self.advance(m.end() - m.start())
                     if tokens:
-                        self.groups.extend(tokens)
+                        self.groups.append(ErrorDirective(tokens))
+                    return True
+            elif src.startswith("warning"):
+                self.advance(len("warning"))
+                tokens = self.process_tokens()
+                self.skip_whitespaces()
+                m = newline.match(self.source, self.pos)
+                if m:
+                    self.advance(m.end() - m.start())
+                    if tokens:
+                        self.groups.append(WarningDirective(tokens))
                     return True
             elif src.startswith("pragma"):
                 self.advance(len("pragma"))
@@ -660,16 +663,6 @@ class Preprocessor:
         if self.source[self.pos:].startswith("#"):
             self.advance(1)
             self.skip_whitespaces()
-
-            if self.source[self.pos].startswith("error"):
-                print("")
-
-                raise Exception("")
-
-            if self.source[self.pos].startswith("war"):
-                print("")
-
-                raise Exception("")
 
         self.restore_pos()
         return self.process_text_line()
@@ -733,10 +726,15 @@ class Preprocessor:
         return cpp
 
     def do_replacement(self, tokens, pos, defines):
+        if pos >= len(tokens):
+            return 0
+
+        def create_empty_token():
+            return Token("", "", Span(0, 5), TokenType.Other, (0, 0))
+
         if str(tokens[pos]) in defines:
             macro = defines[str(tokens[pos])]
             if macro.is_func_style:
-                a = tokens[pos:]
                 macro_start = pos
 
                 pos += 1
@@ -748,6 +746,10 @@ class Preprocessor:
                 params = []
 
                 while True:
+                    if new_param_token:
+                        params.append([])
+                        new_param_token = False
+
                     if str(tokens[pos]) == "(":
                         parenthesis_nest += 1
                     elif str(tokens[pos]) == ")":
@@ -760,15 +762,13 @@ class Preprocessor:
                             pos += 1
                             continue
 
-                    if new_param_token:
-                        params.append([])
-                        new_param_token = False
-
                     params[-1].append(tokens[pos])
                     pos += 1
 
                 assert(str(tokens[pos]) == ")")
-                assert(len(macro.params) == len(params))
+
+                if macro.is_func_style and not macro.is_variadic:
+                    assert(len(macro.params) == len(params))
 
                 macro_end = pos
 
@@ -781,9 +781,29 @@ class Preprocessor:
                 for token in macro.replacements:
                     if str(token) in args:
                         param = args[str(token)]
-                        result.extend(param)
+
+                        if len(param) == 0:
+                            result.append(create_empty_token())
+                        else:
+                            result.extend(param)
+                    elif macro.is_variadic and str(token) == "__VA_ARGS__":
+                        for i in range(len(params)):
+                            if i != 0:
+                                result.append(",")
+
+                            param = params[i]
+                            if len(param) == 0:
+                                result.append(
+                                    Token("", "", Span(0, 5), TokenType.Other, (0, 0)))
+                            else:
+                                result.extend(param)
                     else:
                         result.append(token)
+
+                self.do_replacement(result, 0, defines)
+
+                if len(result) == 0:
+                    result.append(create_empty_token())
 
                 while macro_end >= macro_start:
                     tokens.pop(macro_start)
@@ -795,15 +815,28 @@ class Preprocessor:
                     tokens.insert(pos, r)
                     pos += 1
             else:
+                macro_start = pos
+
+                result = []
                 tokens.pop(pos)
                 if macro.replacements:
                     for r in macro.replacements:
-                        tokens.insert(pos, r)
-                        pos += 1
+                        result.append(r)
 
-            return True
+                self.do_replacement(result, 0, defines)
 
-        return False
+                if len(result) == 0:
+                    result.append(create_empty_token())
+
+                pos = macro_start
+
+                for r in result:
+                    tokens.insert(pos, r)
+                    pos += 1
+
+            return len(result)
+
+        return 0
 
     def process_replacement(self, tokens, replacements):
         pos = 0
@@ -885,11 +918,11 @@ class Preprocessor:
 
         self.process_group()
         self.replacements = defines
-        self.processed_tokens = processed_tokens = []
+        processed_tokens = list(self.groups)
 
         pos = 0
-        while pos < len(self.groups):
-            group = self.groups[pos]
+        while pos < len(processed_tokens):
+            group = processed_tokens[pos]
 
             if isinstance(group, IfDirective):
                 if self.eval_masks[-1].masked:
@@ -902,7 +935,7 @@ class Preprocessor:
                 self.eval_masks.append(
                     EvalMask(self.eval_masks[-1].masked and value))
 
-                pos += 1
+                processed_tokens.pop(pos)
             elif isinstance(group, IfDefDirective):
                 if self.eval_masks[-1].masked:
                     value = str(group.ident) in self.replacements
@@ -917,12 +950,12 @@ class Preprocessor:
                 if value:
                     self.eval_masks[-1].evaluated = True
 
-                pos += 1
+                processed_tokens.pop(pos)
             elif isinstance(group, ElseDirective):
                 self.eval_masks[-1].masked = self.eval_masks[-2].masked and not self.eval_masks[-1].masked
                 self.eval_masks[-1].evaluated = True
 
-                pos += 1
+                processed_tokens.pop(pos)
             elif isinstance(group, ElIfDirective):
                 if not self.eval_masks[-1].evaluated:
                     expr_str = " ".join([str(token) for token in self.process_replacement(
@@ -937,34 +970,52 @@ class Preprocessor:
                 else:
                     self.eval_masks[-1].masked = False
 
-                pos += 1
+                processed_tokens.pop(pos)
             elif isinstance(group, EndIfDirective):
                 self.eval_masks.pop()
 
-                pos += 1
+                processed_tokens.pop(pos)
             elif self.eval_masks[-1].masked:
                 if isinstance(group, DefineReplacementDirective):
                     self.replacements[str(group.identifier)] = group
-                    processed_tokens.append(group)
 
-                    pos += 1
+                    processed_tokens.pop(pos)
                 elif isinstance(group, UndefDirective):
                     if str(group.identifier) in self.replacements:
                         self.replacements.pop(str(group.identifier))
 
-                    pos += 1
+                    processed_tokens.pop(pos)
                 elif isinstance(group, IncludeDirective):
                     included = self.include(group.header_name)
-                    processed_tokens.extend(included.processed_tokens)
+                    processed_tokens = processed_tokens[:pos] + \
+                        included.processed_tokens + processed_tokens[pos+1:]
                     self.replacements.update(**included.replacements)
 
-                    pos += 1
+                    pos += len(included.processed_tokens)
+                elif isinstance(group, ErrorDirective):
+                    processed_tokens.pop(pos)
+                elif isinstance(group, WarningDirective):
+                    processed_tokens.pop(pos)
+                elif self.do_replacement(processed_tokens, pos, self.replacements):
+                    pass
                 else:
-                    if not self.do_replacement(
-                            self.groups, pos, self.replacements):
-                        processed_tokens.append(self.groups[pos])
+                    if pos + 2 < len(processed_tokens) and str(processed_tokens[pos + 1]) == "##":
+                        while pos + 2 < len(processed_tokens) and str(processed_tokens[pos + 1]) == "##":
+                            lhs = processed_tokens[pos]
+
+                            self.do_replacement(
+                                processed_tokens, pos + 2, self.replacements)
+                            rhs = processed_tokens[pos + 2]
+
+                            new_str = f'{str(lhs) + str(rhs)}'
+                            new_token = Token(lhs.filename, new_str, Span(
+                                0, len(new_str)), TokenType.Other, lhs.line_col)
+                            processed_tokens = processed_tokens[:pos] + [
+                                new_token] + processed_tokens[pos + 3:]
+                    else:
                         pos += 1
             else:
-                pos += 1
+                processed_tokens.pop(pos)
 
-        return [group for group in processed_tokens if isinstance(group, Token)]
+        self.processed_tokens = processed_tokens
+        return processed_tokens

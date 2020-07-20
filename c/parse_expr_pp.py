@@ -13,47 +13,140 @@ def parse_primary_expression(tokens, pos, ctx):
 
     # identifier
     if isinstance(tokens[pos], Identifier):
-        return (pos + 1, IdentExpr(str(tokens[pos])))
+        return (pos + 1, IdentExpr(tokens[pos].value))
+
+    from ast.types import PrimitiveType
 
     # constant
     if isinstance(tokens[pos], FloatingConstant):
-        t = Type('float', None)
-        val = float(str(tokens[pos]))
+        token = tokens[pos]
+
+        t = PrimitiveType('double')
+        if "f" in token.suffix or "F" in token.suffix:
+            t = PrimitiveType('float')
+        val = float(tokens[pos].value)
         return (pos + 1, FloatingConstantExpr(val, t))
 
     if isinstance(tokens[pos], IntegerConstant):
-        val = str(tokens[pos])
+        val = tokens[pos].value
+        suffix = tokens[pos].suffix
+
         if val.startswith('0x'):
-            val = val[2:]
-
-            if len(val) <= 8:
-                val = struct.unpack('>i', bytes.fromhex(val))[0]
-                t = Type('int', None)
-            else:
-                raise NotImplementedError()
-
+            base = 0
+        elif val.startswith('0'):
+            base = 8
         else:
-            val = int(val)
-            t = Type('int', None)
+            base = 10
+
+        is_unsigned = "U" in suffix or "u" in suffix
+        is_long = "L" in suffix or "l" in suffix
+
+        value = int(val, base)
+        if base in [0, 8]:
+            if (value & ((1 << 31) - 1)) == value:
+                t = PrimitiveType('int')
+                bits = 32
+            elif (value & ((1 << 32) - 1)) == value:
+                t = PrimitiveType('unsigned int')
+                bits = 32
+            elif (value & ((1 << 63) - 1)) == value:
+                t = PrimitiveType('long')
+                bits = 64
+            elif (value & ((1 << 64) - 1)) == value:
+                t = PrimitiveType('unsigned long')
+                bits = 64
+            else:
+                raise ValueError("The constant isn't representive.")
+        else:
+            if (value & ((1 << 32) - 1)) == value:
+                t = PrimitiveType('int')
+                bits = 32
+            elif (value & ((1 << 64) - 1)) == value:
+                t = PrimitiveType('long')
+                bits = 64
+            else:
+                raise ValueError("The constant isn't representive.")
+
+        if is_unsigned:
+            if is_long:
+                t = PrimitiveType("unsigned long")
+            else:
+                t = PrimitiveType("unsigned int")
+        else:
+            if is_long:
+                t = PrimitiveType("long")
+
+        def sign_extend(value, bits):
+            sign_bit = 1 << (bits - 1)
+            return (value & (sign_bit - 1)) - (value & sign_bit)
+
+        if t.name in ["int", "long"]:
+            value = sign_extend(value, bits)
+
+        return (pos + 1, IntegerConstantExpr(value, t))
+
+    def unescape(val: str):
+        val = val.replace("\\'", "\'")
+        val = val.replace("\\\"", "\"")
+        val = val.replace("\\?", "?")
+        val = val.replace("\\\\", "\\")
+        val = val.replace("\\a", "\a")
+        val = val.replace("\\b", "\b")
+        val = val.replace("\\f", "\f")
+        val = val.replace("\\n", "\n")
+        val = val.replace("\\r", "\r")
+        val = val.replace("\\t", "\t")
+        val = val.replace("\\v", "\v")
+
+        while True:
+            m = re.search(r"\\(?:(x[0-9A-Fa-f]+)|([0-9]))", val)
+
+            if not m:
+                break
+
+            hex_val, octet_val = m.groups()
+
+            if hex_val:
+                hex_num = int("0" + hex_val, 0)
+                assert(hex_num >= 0 and hex_num < 256)
+                val = val[:m.start()] + chr(hex_num) + val[m.end():]
+
+            if octet_val in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']:
+                octet_num = int(octet_val, 8)
+                assert(octet_num >= 0 and octet_num < 8)
+                val = val[:m.start()] + chr(octet_num) + val[m.end():]
+
+        return val
+
+    if isinstance(tokens[pos], CharacterConstant):
+        val = tokens[pos].value
+        val = unescape(val)
+        val = ord(val)
+        t = PrimitiveType('char')
         return (pos + 1, IntegerConstantExpr(val, t))
+
+    from ast.types import PointerType, PrimitiveType, ArrayType
 
     # string-literal
     if isinstance(tokens[pos], StringLiteral):
-        raise NotImplementedError()
+        val = tokens[pos].value
+        val = unescape(val)
+        t = ArrayType(PrimitiveType("char"), len(val) + 1)
+        return (pos + 1, StringLiteralExpr(val, t))
 
     # ( expression )
     save_pos.append(pos)
-    if str(tokens[pos]) == "(":
+    if tokens[pos].value == "(":
         pos += 1
         (pos, expr) = parse_expression(tokens, pos, ctx)
         if expr:
-            if str(tokens[pos]) == ")":
+            if tokens[pos].value == ")":
                 return (pos + 1, expr)
     pos = save_pos.pop()
 
     # generic-selection
     save_pos.append(pos)
-    if str(tokens[pos]) == "_Generic":
+    if tokens[pos].value == "_Generic":
         raise NotImplementedError()
     pos = save_pos.pop()
 
