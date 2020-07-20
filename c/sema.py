@@ -271,10 +271,24 @@ def evaluate_constant_expr(expr, ctx):
 
         if op == "+":
             return lhs + rhs
+        if op == "-":
+            return lhs - rhs
+        if op == "*":
+            return lhs * rhs
+        if op == "/":
+            return int(lhs / rhs)
 
     if isinstance(expr, TypedIdentExpr):
         if is_enum_type(expr.type):
             return expr.type.values[expr.val.name]
+
+    if isinstance(expr, SizeOfExpr):
+        if isinstance(expr.type, TypeSpecifierPtr):
+            return 8
+
+    if isinstance(expr, CastExpr):
+        expr = evaluate_constant_expr(expr.expr, ctx)
+        return expr
 
     raise ValueError()
 
@@ -282,7 +296,7 @@ def evaluate_constant_expr(expr, ctx):
 def enter_node(node, depth, ctx):
     sym_table = ctx.sym_table
 
-    if isinstance(node, (CompoundStmt, VarDecl)):
+    if isinstance(node, (CompoundStmt,)):
         ctx.push_scope(node)
 
     type_scope = ctx.scope_map[ctx.top_scope]
@@ -297,6 +311,10 @@ def enter_node(node, depth, ctx):
 
                     if not decl_params:
                         decl_params = []
+                    
+                    ctx.push_scope(node)
+
+                    type_scope = ctx.scope_map[ctx.top_scope]
 
                     for param_ty, param_decl in decl_params:
                         ty = get_type(sym_table, param_ty, ctx)
@@ -312,6 +330,8 @@ def enter_node(node, depth, ctx):
                         if param_name:
                             var = VariableSymbol(param_name, var_ty)
                             var = sym_table.register_object(param_name, var)
+                    
+                    ctx.pop_scope(node)
 
                     func_decl = register_function(
                         node.qual_spec, decl, sym_table, ctx)
@@ -930,7 +950,7 @@ def exit_node(node, depth, ctx):
     type_scope = ctx.scope_map[ctx.top_scope]
     obj_scope = ctx.scope_map[ctx.top_scope]
 
-    if isinstance(node, (CompoundStmt, TypedFunction, VarDecl)):
+    if isinstance(node, (CompoundStmt, TypedFunction)):
         ctx.pop_scope(node)
 
     if isinstance(node, IntegerConstantExpr):
@@ -1347,6 +1367,8 @@ def register_buildin_types(sym_table: SymbolTable):
     sym_table.register('unsigned int', PrimitiveType('unsigned int'))
     sym_table.register('long', PrimitiveType('long'))
     sym_table.register('unsigned long', PrimitiveType('unsigned long'))
+    sym_table.register('long int', PrimitiveType('long'))
+    sym_table.register('unsigned long int', PrimitiveType('unsigned long'))
 
     sym_table.register('float', PrimitiveType('float'))
     sym_table.register('double', PrimitiveType('double'))
