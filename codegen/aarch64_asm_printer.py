@@ -1041,7 +1041,7 @@ def get_logical_sreg(inst: MCInst, opc, n, fixups):
     return code
 
 
-def get_move_immediate(inst: MCInst, opc, fixups):
+def get_insert_immediate(inst: MCInst, opc, fixups):
     code = 0
 
     code = write_bits(code, opc, 29, 2)
@@ -1049,6 +1049,22 @@ def get_move_immediate(inst: MCInst, opc, fixups):
 
     imm = inst.operands[2].imm
     shift = inst.operands[3].imm
+
+    code = write_bits(code, read_bits(shift, 4, 2), 21, 2)
+    code = write_bits(code, imm, 5, 16)
+    code = write_bits(code, get_reg_code(inst.operands[0]), 0, 5)
+
+    return code
+
+
+def get_move_immediate(inst: MCInst, opc, fixups):
+    code = 0
+
+    code = write_bits(code, opc, 29, 2)
+    code = write_bits(code, 0b100101, 23, 6)
+
+    imm = inst.operands[1].imm
+    shift = inst.operands[2].imm
 
     code = write_bits(code, read_bits(shift, 4, 2), 21, 2)
     code = write_bits(code, imm, 5, 16)
@@ -1401,6 +1417,12 @@ def get_inst_binary_code(inst: MCInst, fixups):
     if opcode == AArch64MachineOps.STURQi:
         return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b10, fixups)
 
+    if opcode == AArch64MachineOps.STRBBui:
+        return get_ldst_ui_inst_code(inst, 0b00, 0, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED1)
+
+    if opcode == AArch64MachineOps.STRHHui:
+        return get_ldst_ui_inst_code(inst, 0b01, 0, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED2)
+
     if opcode == AArch64MachineOps.STRWui:
         return get_ldst_ui_inst_code(inst, 0b10, 0, 0b00, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
 
@@ -1439,6 +1461,12 @@ def get_inst_binary_code(inst: MCInst, fixups):
 
     if opcode == AArch64MachineOps.LDURQi:
         return get_ldst_unscaled_inst_code(inst, 0b00, 1, 0b11, fixups)
+
+    if opcode == AArch64MachineOps.LDRBBui:
+        return get_ldst_ui_inst_code(inst, 0b00, 0, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED1)
+
+    if opcode == AArch64MachineOps.LDRHHui:
+        return get_ldst_ui_inst_code(inst, 0b01, 0, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED2)
 
     if opcode == AArch64MachineOps.LDRWui:
         return get_ldst_ui_inst_code(inst, 0b10, 0, 0b01, fixups, AArch64FixupKind.AArch64_LDST_IMM12_UNSCALED4)
@@ -1634,8 +1662,13 @@ def get_inst_binary_code(inst: MCInst, fixups):
         return code
 
     if opcode == AArch64MachineOps.MOVKWi:
-        code = get_move_immediate(inst, 0b11, fixups)
+        code = get_insert_immediate(inst, 0b11, fixups)
         code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.MOVKXi:
+        code = get_insert_immediate(inst, 0b11, fixups)
+        code = write_bits(code, 1, 31, 1)
         return code
 
     if opcode == AArch64MachineOps.SBFMWri:
@@ -1666,8 +1699,13 @@ def get_inst_binary_code(inst: MCInst, fixups):
         code = write_bits(code, 1, 22, 1)
         return code
 
-    if opcode == AArch64MachineOps.MOVKXi:
-        code = get_move_immediate(inst, 0b11, fixups)
+    if opcode == AArch64MachineOps.MOVZWi:
+        code = get_move_immediate(inst, 0b10, fixups)
+        code = write_bits(code, 0, 31, 1)
+        return code
+
+    if opcode == AArch64MachineOps.MOVZXi:
+        code = get_move_immediate(inst, 0b10, fixups)
         code = write_bits(code, 1, 31, 1)
         return code
 

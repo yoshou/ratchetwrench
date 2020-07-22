@@ -983,6 +983,24 @@ class AArch64MachineOps:
         patterns=[set_(("dst", GPR64), ("src", imm))]
     )
 
+    LDRBBui = def_inst(
+        "ldrbb_ui",
+        outs=[("rt", GPR32)],
+        ins=[("rn", GPR64sp), ("offset", I32Imm)],
+        patterns=[set_(("dst", GPR32), zextloadi8_(
+            am_indexed8(("rn", GPR64sp), ("offset", uimm12s1))))],
+        sched=WriteLD,
+    )
+
+    LDRHHui = def_inst(
+        "ldrhh_ui",
+        outs=[("rt", GPR32)],
+        ins=[("rn", GPR64sp), ("offset", I32Imm)],
+        patterns=[set_(("dst", GPR32), zextloadi16_(
+            am_indexed16(("rn", GPR64sp), ("offset", uimm12s2))))],
+        sched=WriteLD,
+    )
+
     LDRWui = def_inst(
         "ldrw_ui",
         outs=[("rt", GPR32)],
@@ -1149,6 +1167,22 @@ class AArch64MachineOps:
         outs=[],
         ins=[("rt1", GPR64), ("rt2", GPR64),
              ("rn", GPR64sp), ("offset", I32Imm)]
+    )
+
+    STRBBui = def_inst(
+        "strbb_ui",
+        outs=[],
+        ins=[("rt", GPR32), ("rn", GPR64sp), ("offset", I32Imm)],
+        patterns=[truncstorei8_(("rt", GPR32), am_indexed8(
+            ("rn", GPR64sp), ("offset", uimm12s1)))]
+    )
+
+    STRHHui = def_inst(
+        "strhh_ui",
+        outs=[],
+        ins=[("rt", GPR32), ("rn", GPR64sp), ("offset", I32Imm)],
+        patterns=[truncstorei16_(("rt", GPR32), am_indexed16(
+            ("rn", GPR64sp), ("offset", uimm12s2)))]
     )
 
     STRWui = def_inst(
@@ -1589,6 +1623,18 @@ class AArch64MachineOps:
         outs=[("dst", GPR64)],
         ins=[("src1", GPR64), ("src2", GPR64)],
         patterns=[set_(("dst", GPR64), srl_(("src1", GPR64), ("src2", GPR64)))]
+    )
+
+    MOVZWi = def_inst(
+        "movzw_i",
+        outs=[("dst", GPR32)],
+        ins=[("imm", I32Imm), ("shift", I32Imm)]
+    )
+
+    MOVZXi = def_inst(
+        "movzx_i",
+        outs=[("dst", GPR64)],
+        ins=[("imm", I32Imm), ("shift", I32Imm)]
     )
 
     MOVKWi = def_inst(
@@ -2198,6 +2244,30 @@ def_pat_aarch64(srl_(("rn", GPR32), ("imm", imm0_31)),
 
 def_pat_aarch64(srl_(("rn", GPR64), ("imm", imm0_63)),
                 UBFMXri(("rn", GPR64), ("imm", I32Imm), 63))
+
+SBFMWri = def_inst_node_(AArch64MachineOps.SBFMWri)
+SBFMXri = def_inst_node_(AArch64MachineOps.SBFMXri)
+
+def_pat_aarch64(sext_inreg_(("rn", GPR32), i1_),
+                SBFMWri(("rn", GPR32), 0, 0))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR32), i8_),
+                SBFMWri(("rn", GPR32), 0, 7))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR32), i16_),
+                SBFMWri(("rn", GPR32), 0, 15))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR64), i1_),
+                SBFMXri(("rn", GPR64), 0, 0))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR64), i8_),
+                SBFMXri(("rn", GPR64), 0, 7))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR64), i16_),
+                SBFMXri(("rn", GPR64), 0, 15))
+
+def_pat_aarch64(sext_inreg_(("rn", GPR64), i32_),
+                SBFMXri(("rn", GPR64), 0, 31))
 
 CSINCWr = def_inst_node_(AArch64MachineOps.CSINCWr)
 CSINCXr = def_inst_node_(AArch64MachineOps.CSINCXr)
