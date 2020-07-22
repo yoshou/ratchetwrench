@@ -244,6 +244,8 @@ class AArch64InstructionSelector(InstructionSelector):
             return node
         elif node.opcode == VirtualDagOps.REGISTER_MASK:
             return node
+        elif node.opcode == VirtualDagOps.VALUETYPE:
+            return node
         elif node.opcode == VirtualDagOps.TARGET_CONSTANT_FP:
             return node
         elif node.opcode == VirtualDagOps.TARGET_GLOBAL_ADDRESS:
@@ -1305,11 +1307,10 @@ class AArch64TargetInstInfo(TargetInstInfo):
 
                 for i in range(0, 64, 16):
                     if i == 0:
-                        new_inst = MachineInstruction(AArch64MachineOps.MOVKWi)
+                        new_inst = MachineInstruction(AArch64MachineOps.MOVZXi)
                         new_inst.add_reg(dst.reg, RegState.Define)
-                        new_inst.add_reg(MachineRegister(WZR), RegState.Non)
                     else:
-                        new_inst = MachineInstruction(AArch64MachineOps.MOVKWi)
+                        new_inst = MachineInstruction(AArch64MachineOps.MOVKXi)
                         new_inst.add_reg(dst.reg, RegState.Define)
                         new_inst.add_reg(dst.reg, RegState.Non)
 
@@ -1341,7 +1342,7 @@ class AArch64TargetInstInfo(TargetInstInfo):
 
                 new_inst.insert_after(inst)
             else:
-                lo_opc = AArch64MachineOps.MOVKWi
+                lo_opc = AArch64MachineOps.MOVZWi
                 hi_opc = AArch64MachineOps.MOVKWi
 
                 lo_inst = MachineInstruction(lo_opc)
@@ -1355,22 +1356,16 @@ class AArch64TargetInstInfo(TargetInstInfo):
                 elif isinstance(src, MOImm):
                     lo_val = (src.val >> 0) & 0xFFFF
 
-                    reg = MachineRegister(WZR)
+                    lo_inst.add_imm(lo_val)
+                    lo_inst.add_imm(0)
 
-                    if lo_val:
-                        lo_inst.add_reg(reg, RegState.Non)
-                        lo_inst.add_imm(lo_val)
-                        lo_inst.add_imm(0)
+                    lo_inst.insert_after(inst)
 
-                        lo_inst.insert_after(inst)
-
-                        reg = dst.reg
-
-                    hi_inst.add_reg(reg, RegState.Non)
+                    hi_inst.add_reg(dst.reg, RegState.Non)
                     hi_inst.add_imm((src.val >> 16) & 0xFFFF)
                     hi_inst.add_imm(16)
 
-                    hi_inst.insert_after(inst)
+                    hi_inst.insert_after(lo_inst)
                 else:
                     raise ValueError()
 
@@ -1585,11 +1580,11 @@ class AArch64TargetLowering(TargetLowering):
 
         if is_fcmp:
             cmp_node = DagValue(dag.add_node(AArch64DagOps.CMPFP,
-                                             [lhs.ty], lhs, rhs), 0)
+                                             [lhs.ty, MachineValueType(ValueType.GLUE)], lhs, rhs), 1)
         else:
             assert(lhs.ty == rhs.ty)
             cmp_node = DagValue(dag.add_node(AArch64DagOps.SUBS,
-                                             [lhs.ty, MachineValueType(ValueType.I32)], lhs, rhs), 1)
+                                             [lhs.ty, MachineValueType(ValueType.GLUE)], lhs, rhs), 1)
 
         return cmp_node, condcode
 
@@ -2346,7 +2341,9 @@ class AArch64Legalizer(Legalizer):
         elif node.opcode in [VirtualDagOps.TRUNCATE]:
             return self.promote_integer_result_truncate(node, dag, legalized)
         elif node.opcode in [VirtualDagOps.LOAD]:
-            return dag.add_node(node.opcode, [MachineValueType(ValueType.I32)], *node.operands)
+            chain = node.operands[0]
+            ptr = get_legalized_op(node.operands[1], legalized)
+            return dag.add_load_node(MachineValueType(ValueType.I32), chain, ptr, False, mem_operand=node.mem_operand)
         elif node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
             return dag.add_constant_node(MachineValueType(ValueType.I32), node.value)
         else:
@@ -2505,10 +2502,9 @@ class AArch64Legalizer(Legalizer):
     def promote_integer_operand_sign_extend(self, node, dag: Dag, legalized):
         op = self.get_legalized_op(node.operands[0], legalized)
 
-        if node.value_types[0] == op.ty:
-            return op.node
+        vt_value = DagValue(dag.add_value_type_node(node.operands[0].ty), 0)
 
-        return dag.add_node(node.opcode, node.value_types, op)
+        return dag.add_node(VirtualDagOps.SIGN_EXTEND_INREG, node.value_types, op, vt_value)
 
     def promote_integer_operand_uint_to_fp(self, node, dag: Dag, legalized):
         op = self.get_legalized_op(node.operands[0], legalized)
