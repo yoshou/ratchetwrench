@@ -265,6 +265,8 @@ def create_matcher(matcher_or_tuple):
         return RegValueMatcher(matcher_or_tuple, matcher_or_tuple)
     elif isinstance(matcher_or_tuple, int):
         return ConstantValueMatcher(matcher_or_tuple, matcher_or_tuple)
+    elif isinstance(matcher_or_tuple, ValueTypeMatcherGen):
+        return ValueTypeValueMatcher(matcher_or_tuple.value_type)
     else:
         assert(isinstance(matcher_or_tuple, PatternMatcher))
         return matcher_or_tuple
@@ -340,11 +342,56 @@ fdiv_ = NodePatternMatcherGen(VirtualDagOps.FDIV)
 load_ = NodePatternMatcherGen(
     VirtualDagOps.LOAD, NodeProperty.HasChain)
 
+extloadi1_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+
+extloadi8_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+
+extloadi16_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+
 extloadi32_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+
+zextloadi1_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+
+zextloadi8_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+
+zextloadi16_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+
+zextloadi32_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+
+sextloadi1_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+
+sextloadi8_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+
+sextloadi16_ = NodePatternMatcherGen(
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+
+sextloadi32_ = NodePatternMatcherGen(
     VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
 
 store_ = NodePatternMatcherGen(
     VirtualDagOps.STORE, NodeProperty.HasChain)
+
+truncstorei1_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I1)
+
+truncstorei8_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I8)
+
+truncstorei16_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I16)
+
+truncstorei32_ = NodePatternMatcherGen(
+    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I32)
 
 extstorei32_ = NodePatternMatcherGen(
     VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I32)
@@ -372,6 +419,7 @@ sext_ = NodePatternMatcherGen(VirtualDagOps.SIGN_EXTEND)
 zext_ = NodePatternMatcherGen(VirtualDagOps.ZERO_EXTEND)
 anyext_ = NodePatternMatcherGen(VirtualDagOps.ANY_EXTEND)
 trunc_ = NodePatternMatcherGen(VirtualDagOps.TRUNCATE)
+sext_inreg_ = NodePatternMatcherGen(VirtualDagOps.SIGN_EXTEND_INREG)
 
 
 class ComplexPatternMatcher(PatternMatcher):
@@ -518,8 +566,30 @@ class ValueTypeMatcherGen:
         return ValueTypeMatcher(self.value_type, sub_matcher, list(operands))
 
 
+class ValueTypeValueMatcher(NodeValuePatternMatcher):
+    def __init__(self, value_type, name=None):
+        super().__init__(name)
+
+        self.value_type = value_type
+
+    def match(self, node, values, idx, dag):
+        if idx >= len(values):
+            return idx, None
+
+        value = values[idx]
+
+        if value.node.opcode != VirtualDagOps.VALUETYPE:
+            return idx, None
+
+        if value.node.vt != self.value_type:
+            return idx, None
+
+        return idx + 1, MatcherResult(self.name, value)
+
+
 from codegen.types import ValueType
 
+i1_ = ValueTypeMatcherGen(ValueType.I1)
 i8_ = ValueTypeMatcherGen(ValueType.I8)
 i16_ = ValueTypeMatcherGen(ValueType.I16)
 i32_ = ValueTypeMatcherGen(ValueType.I32)

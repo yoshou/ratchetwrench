@@ -102,6 +102,7 @@ class VirtualDagOps(Enum):
     FP_TO_SINT = VirtualDagOp("fp_to_sint")
     UINT_TO_FP = VirtualDagOp("uint_to_fp")
     SINT_TO_FP = VirtualDagOp("sint_to_fp")
+    SIGN_EXTEND_INREG = VirtualDagOp("sign_extend_inreg")
 
     LOAD = VirtualDagOp("load")
     STORE = VirtualDagOp("store")
@@ -615,7 +616,7 @@ class ValueTypeDagNode(DagNode):
         self.vt = vt
 
     def __hash__(self):
-        return hash((super().__hash__(), tuple(self.vt)))
+        return hash((super().__hash__(), self.vt))
 
     def __eq__(self, other):
         if not isinstance(other, ValueTypeDagNode):
@@ -682,6 +683,12 @@ class Dag:
     def add_register_mask_node(self, mask):
         assert(isinstance(mask, list))
         node = RegisterMaskDagNode(mask)
+        node = self.append_node(node)
+        return node
+
+    def add_value_type_node(self, vt):
+        assert(isinstance(vt, MachineValueType))
+        node = ValueTypeDagNode(vt)
         node = self.append_node(node)
         return node
 
