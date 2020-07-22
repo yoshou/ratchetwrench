@@ -2791,6 +2791,75 @@ class EABIABIInfo(ABIInfo):
         return self.compute_arg_info(ctx, ty)
 
 
+class AArch64ABIInfo(ABIInfo):
+    def __init__(self):
+        super().__init__()
+
+    def is_homogeneous_aggregate_small_enough(self, ty, members):
+        return members <= 4
+
+    def is_homogeneous_aggregate(self, ty):
+        def is_homogeneous_aggregate_rec(ty, base, members):
+            
+            if isinstance(ty, ast.types.CompositeType):
+                for field in ty.fields:
+                    field_ty, _, _ = field
+
+                    field_is_ha, base, field_members = is_homogeneous_aggregate_rec(field_ty, base, 0)
+
+                    if not field_is_ha:
+                        return False
+
+                    if ty.is_union:
+                        members = max(members, field_members)
+                    else:
+                        members += field_members
+
+                if not base:
+                    return False
+            else:
+                members = 1
+                base = ty
+
+            return members > 0 and self.is_homogeneous_aggregate_small_enough(base, members), base, members
+
+        result, _, _ = is_homogeneous_aggregate_rec(ty, None, 0)
+        return result
+
+    def compute_arg_info(self, ctx, ty):
+        if isinstance(ty, ast.types.VoidType):
+            return ABIArgInfo(ABIArgKind.Ignore)
+
+        if isinstance(ty, ast.types.PrimitiveType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if isinstance(ty, ast.types.PointerType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if isinstance(ty, ast.types.VectorType):
+            ir_ty = ctx.get_ir_type(ty)
+            if is_x86_mmx_type(ir_ty):
+                return ABIArgInfo(ABIArgKind.Direct, get_integer_type(64))
+
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if self.is_homogeneous_aggregate(ty):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        type_info = get_type_info(ctx, ty)
+        width = type_info.witdh
+
+        if is_complex_type(ty):
+            if width > 128:
+                return ABIArgInfo(ABIArgKind.Indirect, get_integer_type(width))
+            return ABIArgInfo(ABIArgKind.Direct, get_integer_type(width))
+
+        raise NotImplementedError()
+
+    def compute_return_info(self, ctx, ty):
+        return self.compute_arg_info(ctx, ty)
+
+
 class RISCVABIInfo(ABIInfo):
     def __init__(self, xlen):
         super().__init__()
@@ -2907,6 +2976,7 @@ class ABIType(Enum):
     WinX86_64 = auto()
     X86_64 = auto()
     EABI = auto()
+    AArch64 = auto()
     RISCV32 = auto()
     RISCV64 = auto()
 
@@ -2954,6 +3024,8 @@ def emit_ir(ast, abi, module):
         ctx.abi_info = X86_64ABIInfo()
     elif abi == ABIType.EABI:
         ctx.abi_info = EABIABIInfo()
+    elif abi == ABIType.AArch64:
+        ctx.abi_info = AArch64ABIInfo()
     elif abi == ABIType.RISCV32:
         ctx.abi_info = RISCVABIInfo(32)
     elif abi == ABIType.RISCV64:
