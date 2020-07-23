@@ -294,6 +294,7 @@ class MCAssembler:
     def register_symbol(self, symbol):
         if symbol.is_registered:
             return
+
         self.symbols.add(symbol)
         symbol.is_registered = True
 

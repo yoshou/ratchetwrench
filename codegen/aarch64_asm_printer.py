@@ -631,6 +631,10 @@ class AArch64AsmPrinter(AsmPrinter):
 
         self.emit_alignment(int(align / 8))
 
+        initializer = variable.initializer
+        if not initializer:
+            return
+
         symbol = get_global_symbol(variable, self.ctx)
         self.stream.emit_label(symbol)
 
@@ -640,7 +644,6 @@ class AArch64AsmPrinter(AsmPrinter):
 
         self.emit_linkage(variable)
 
-        initializer = variable.initializer
         if initializer is not None:
             data_layout = self.module.data_layout
             self.emit_global_constant(data_layout, initializer)
@@ -736,7 +739,7 @@ class AArch64AsmBackend(MCAsmBackend):
         if kind in [AArch64FixupKind.AArch64_ADD_IMM12]:
             assert(fixed_value < 0x1000)
 
-            return fixed_value
+            return fixed_value & 0xfff
 
         if kind in [AArch64FixupKind.AArch64_PCREL_BRANCH26, AArch64FixupKind.AArch64_PCREL_CALL26]:
             assert(signed_value <= 134217727 and signed_value >= -134217728)

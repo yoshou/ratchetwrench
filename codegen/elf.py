@@ -91,6 +91,13 @@ class ELFObjectStream(MCObjectStream):
         self.current_section.add_fragment(fragment)
         return fragment
 
+    def get_data_fragment(self):
+        if len(self.current_section.fragments) > 0:
+            if isinstance(self.current_section.fragments[-1], MCDataFragment):
+                return self.current_section.fragments[-1]
+
+        return None
+
     def emit_instruction_data_fragment(self, inst: MCInst):
         fixups = []
 
@@ -143,8 +150,10 @@ class ELFObjectStream(MCObjectStream):
     def emit_label(self, symbol: MCSymbol):
         self.assembler.register_symbol(symbol)
 
-        symbol.fragment = self.get_or_create_data_fragment()
-        symbol.offset = len(symbol.fragment.contents)
+        fragment = self.get_or_create_data_fragment()
+        if fragment:
+            symbol.fragment = fragment
+            symbol.offset = len(symbol.fragment.contents)
 
         if self.current_section.flags & SHF_TLS:
             symbol.ty = ELFSymbolType.STT_TLS
