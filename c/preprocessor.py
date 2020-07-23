@@ -732,7 +732,8 @@ class Preprocessor:
         def create_empty_token():
             return Token("", "", Span(0, 5), TokenType.Other, (0, 0))
 
-        if str(tokens[pos]) in defines:
+        token = tokens[pos]
+        if str(token) in defines:
             macro = defines[str(tokens[pos])]
             if macro.is_func_style:
                 macro_start = pos
@@ -778,15 +779,15 @@ class Preprocessor:
                         param in zip(macro.params, params)}
 
                 result = []
-                for token in macro.replacements:
-                    if str(token) in args:
-                        param = args[str(token)]
+                for r in macro.replacements:
+                    if str(r) in args:
+                        param = args[str(r)]
 
                         if len(param) == 0:
                             result.append(create_empty_token())
                         else:
                             result.extend(param)
-                    elif macro.is_variadic and str(token) == "__VA_ARGS__":
+                    elif macro.is_variadic and str(r) == "__VA_ARGS__":
                         for i in range(len(params)):
                             if i != 0:
                                 result.append(",")
@@ -798,7 +799,7 @@ class Preprocessor:
                             else:
                                 result.extend(param)
                     else:
-                        result.append(token)
+                        result.append(r)
 
                 self.do_replacement(result, 0, defines)
 
@@ -822,6 +823,10 @@ class Preprocessor:
                 if macro.replacements:
                     for r in macro.replacements:
                         result.append(r)
+
+                if len(result) == 1 and str(result[0]) == str(token):
+                    tokens.insert(pos, token)
+                    return 0
 
                 self.do_replacement(result, 0, defines)
 
