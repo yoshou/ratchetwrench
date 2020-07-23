@@ -566,6 +566,9 @@ def cast_if_need(node, ty):
 
 
 def is_integer_zero(expr):
+    if not isinstance(expr, IntegerConstantExpr):
+        return False
+        
     if not isinstance(get_type_of(expr), PrimitiveType):
         return False
 
