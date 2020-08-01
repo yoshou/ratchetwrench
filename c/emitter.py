@@ -2873,6 +2873,9 @@ class RISCVABIInfo(ABIInfo):
         if isinstance(ty, ast.types.PrimitiveType):
             return ABIArgInfo(ABIArgKind.Direct)
 
+        if isinstance(ty, ast.types.PointerType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
         if isinstance(ty, ast.types.VectorType):
             type_info = get_type_info(ctx, ty)
             width = type_info.witdh
@@ -2909,6 +2912,9 @@ class RISCVABIInfo(ABIInfo):
             return ABIArgInfo(ABIArgKind.Ignore)
 
         if isinstance(ty, ast.types.PrimitiveType):
+            return ABIArgInfo(ABIArgKind.Direct)
+
+        if isinstance(ty, ast.types.PointerType):
             return ABIArgInfo(ABIArgKind.Direct)
 
         if isinstance(ty, ast.types.VectorType):
