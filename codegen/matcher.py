@@ -316,6 +316,9 @@ mul_ = NodePatternMatcherGen(
 
 sdiv_ = NodePatternMatcherGen(VirtualDagOps.SDIV)
 udiv_ = NodePatternMatcherGen(VirtualDagOps.UDIV)
+srem_ = NodePatternMatcherGen(VirtualDagOps.SREM)
+urem_ = NodePatternMatcherGen(VirtualDagOps.UREM)
+
 and_ = NodePatternMatcherGen(
     VirtualDagOps.AND, NodeProperty.Commutative, NodeProperty.Associative)
 
@@ -391,9 +394,6 @@ truncstorei16_ = NodePatternMatcherGen(
     VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I16)
 
 truncstorei32_ = NodePatternMatcherGen(
-    VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I32)
-
-extstorei32_ = NodePatternMatcherGen(
     VirtualDagOps.STORE, NodeProperty.HasChain, mem_vt=ValueType.I32)
 
 br_ = NodePatternMatcherGen(VirtualDagOps.BR)
@@ -773,9 +773,10 @@ set_ = SetPatternMatcherGen()
 
 
 class SimplePattern(PatternMatcher):
-    def __init__(self, pattern, result):
+    def __init__(self, pattern, result, enabled):
         self.pattern = pattern
         self.result = result
+        self.enabled = enabled
 
     def match(self, node, dag):
         from codegen.types import ValueType
@@ -791,7 +792,7 @@ class SimplePattern(PatternMatcher):
         return self.result.construct(node, dag, result)[0]
 
 
-def def_pat(pattern, result, patterns):
+def def_pat(pattern, result, patterns, enabled=None):
     from codegen.spec import MachineRegisterDef
 
     opcode_matcher = NodeOpcodePatternMatcher(None)
@@ -803,7 +804,7 @@ def def_pat(pattern, result, patterns):
     matcher = NodePatternMatcher(
         opcode_matcher, operand_matchers, value_matchers, {})
 
-    patterns.append(SimplePattern(matcher, result))
+    patterns.append(SimplePattern(matcher, result, enabled))
 
 
 def setoeq_(lhs, rhs): return setcc_(lhs, rhs, SETOEQ)
