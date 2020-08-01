@@ -673,12 +673,13 @@ class CCArgFlags:
 
 
 class CallingConvArg:
-    def __init__(self, arg_ty, mvt, arg_idx, offset, flags):
+    def __init__(self, arg_ty, mvt, arg_idx, offset, flags, is_fixed=True):
         self.arg_ty = arg_ty
         self.mvt = mvt
         self.arg_idx = arg_idx
         self.offset = offset
         self.flags = flags
+        self.is_fixed = is_fixed
 
 
 class CallingConvReturn:
