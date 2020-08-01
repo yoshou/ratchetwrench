@@ -519,6 +519,11 @@ class RISCVAsmPrinter(AsmPrinter):
             self.emit_global_constant_struct(data_layout, constant, offset)
         elif isinstance(constant, GlobalValue):
             self.stream.emit_int_value(0, int(size / 8))
+        elif isinstance(constant, TruncInst):
+            if isinstance(constant.rs, ConstantInt):
+                self.stream.emit_int_value(constant.rs.value, int(size / 8))
+            else:
+                raise ValueError("Invalid constant type")
         else:
             raise ValueError("Invalid constant type")
 
@@ -541,6 +546,10 @@ class RISCVAsmPrinter(AsmPrinter):
             raise ValueError("Invalid section kind for the global variable.")
 
         self.emit_alignment(int(align / 8))
+
+        initializer = variable.initializer
+        if not initializer:
+            return
 
         symbol = get_global_symbol(variable, self.ctx)
         self.stream.emit_label(symbol)
@@ -825,6 +834,12 @@ def get_rv_inst_r(inst: MCInst, fixups):
         RISCVMachineOps.SRLW: (0b0111011, 0b101, 0b0000000),
         RISCVMachineOps.SRAW: (0b0111011, 0b101, 0b0100000),
 
+        RISCVMachineOps.MUL: (0b0110011, 0b000, 0b0000001),
+        RISCVMachineOps.DIV: (0b0110011, 0b100, 0b0000001),
+        RISCVMachineOps.DIVU: (0b0110011, 0b101, 0b0000001),
+        RISCVMachineOps.REM: (0b0110011, 0b110, 0b0000001),
+        RISCVMachineOps.REMU: (0b0110011, 0b111, 0b0000001),
+
         RISCVMachineOps.FADD_S: (0b1010011, 0b000, 0b0000000),
         RISCVMachineOps.FSUB_S: (0b1010011, 0b000, 0b0000100),
         RISCVMachineOps.FMUL_S: (0b1010011, 0b000, 0b0001000),
@@ -834,6 +849,16 @@ def get_rv_inst_r(inst: MCInst, fixups):
         RISCVMachineOps.FEQ_S: (0b1010011, 0b010, 0b1010000),
         RISCVMachineOps.FLT_S: (0b1010011, 0b001, 0b1010000),
         RISCVMachineOps.FLE_S: (0b1010011, 0b000, 0b1010000),
+
+        RISCVMachineOps.FADD_D: (0b1010011, 0b000, 0b0000001),
+        RISCVMachineOps.FSUB_D: (0b1010011, 0b000, 0b0000101),
+        RISCVMachineOps.FMUL_D: (0b1010011, 0b000, 0b0001001),
+        RISCVMachineOps.FDIV_D: (0b1010011, 0b000, 0b0001101),
+        RISCVMachineOps.FSGNJ_D: (0b1010011, 0b000, 0b0010001),
+
+        RISCVMachineOps.FEQ_D: (0b1010011, 0b010, 0b1010001),
+        RISCVMachineOps.FLT_D: (0b1010011, 0b001, 0b1010001),
+        RISCVMachineOps.FLE_D: (0b1010011, 0b000, 0b1010001),
     }
 
     opcode, funct3, funct7 = OPCODE_TABLE[inst.opcode]
@@ -841,6 +866,59 @@ def get_rv_inst_r(inst: MCInst, fixups):
     rd = get_reg_code(inst.operands[0])
     rs1 = get_reg_code(inst.operands[1])
     rs2 = get_reg_code(inst.operands[2])
+
+    code = 0
+    code = write_bits(code, opcode, 0, 7)
+    code = write_bits(code, rd, 7, 5)
+    code = write_bits(code, funct3, 12, 3)
+    code = write_bits(code, rs1, 15, 5)
+    code = write_bits(code, rs2, 20, 5)
+    code = write_bits(code, funct7, 25, 7)
+
+    return code
+
+
+
+def get_frm_code(operand):
+    assert(operand.is_imm)
+    return operand.imm
+
+def get_rv_inst_r_frm(inst: MCInst, fixups):
+    OPCODE_TABLE = {
+        RISCVMachineOps.FCVT_W_S: lambda: (0b00000, 0b1010011, get_frm_code(inst.operands[2]), 0b1100000),
+        RISCVMachineOps.FCVT_WU_S: lambda: (0b00001, 0b1010011, get_frm_code(inst.operands[2]), 0b1100000),
+        RISCVMachineOps.FCVT_S_W: lambda: (0b00000, 0b1010011, get_frm_code(inst.operands[2]), 0b1101000),
+        RISCVMachineOps.FCVT_S_WU: lambda: (0b00001, 0b1010011, get_frm_code(inst.operands[2]), 0b1101000),
+        
+        RISCVMachineOps.FCVT_S_D: lambda: (0b00001, 0b1010011, get_frm_code(inst.operands[2]), 0b0100000),
+        RISCVMachineOps.FCVT_D_S: lambda: (0b00000, 0b1010011, 0b000, 0b0100001),
+        
+        RISCVMachineOps.FCVT_W_D: lambda: (0b00000, 0b1010011, get_frm_code(inst.operands[2]), 0b1100001),
+        RISCVMachineOps.FCVT_WU_D: lambda: (0b00001, 0b1010011, get_frm_code(inst.operands[2]), 0b1100001),
+        RISCVMachineOps.FCVT_D_W: lambda: (0b00000, 0b1010011, 0b000, 0b1101001),
+        RISCVMachineOps.FCVT_D_WU: lambda: (0b00001, 0b1010011, 0b000, 0b1101001),
+        
+        RISCVMachineOps.FCVT_L_S: lambda: (0b00010, 0b1010011, get_frm_code(inst.operands[2]), 0b1100000),
+        RISCVMachineOps.FCVT_LU_S: lambda: (0b00011, 0b1010011, get_frm_code(inst.operands[2]), 0b1100000),
+        RISCVMachineOps.FCVT_S_L: lambda: (0b00010, 0b1010011, get_frm_code(inst.operands[2]), 0b1101000),
+        RISCVMachineOps.FCVT_S_LU: lambda: (0b00011, 0b1010011, get_frm_code(inst.operands[2]), 0b1101000),
+        
+        RISCVMachineOps.FCVT_L_D: lambda: (0b00010, 0b1010011, get_frm_code(inst.operands[2]), 0b1100001),
+        RISCVMachineOps.FCVT_LU_D: lambda: (0b00011, 0b1010011, get_frm_code(inst.operands[2]), 0b1100001),
+        RISCVMachineOps.FCVT_D_L: lambda: (0b00010, 0b1010011, get_frm_code(inst.operands[2]), 0b1101001),
+        RISCVMachineOps.FCVT_D_LU: lambda: (0b00011, 0b1010011, get_frm_code(inst.operands[2]), 0b1101001),
+        
+        RISCVMachineOps.FMV_X_W: lambda: (0b00000, 0b1010011, 0b000, 0b1110000),
+        RISCVMachineOps.FMV_W_X: lambda: (0b00000, 0b1010011, 0b000, 0b1111000),
+        
+        RISCVMachineOps.FMV_X_D: lambda: (0b00000, 0b1010011, 0b000, 0b1110001),
+        RISCVMachineOps.FMV_D_X: lambda: (0b00000, 0b1010011, 0b000, 0b1111001),
+    }
+
+    rs2, opcode, funct3, funct7 = OPCODE_TABLE[inst.opcode]()
+
+    rd = get_reg_code(inst.operands[0])
+    rs1 = get_reg_code(inst.operands[1])
 
     code = 0
     code = write_bits(code, opcode, 0, 7)
@@ -861,9 +939,13 @@ def get_rv_inst_i(inst: MCInst, fixups):
         RISCVMachineOps.XORI: (0b0010011, 0b100),
         RISCVMachineOps.ORI: (0b0010011, 0b110),
         RISCVMachineOps.ANDI: (0b0010011, 0b111),
+        RISCVMachineOps.LB: (0b0000011, 0b000),
+        RISCVMachineOps.LH: (0b0000011, 0b001),
+        RISCVMachineOps.LBU: (0b0000011, 0b100),
+        RISCVMachineOps.LHU: (0b0000011, 0b101),
         RISCVMachineOps.LW: (0b0000011, 0b010),
-        RISCVMachineOps.FLW: (0b0000111, 0b010),
         RISCVMachineOps.LD: (0b0000011, 0b011),
+        RISCVMachineOps.FLW: (0b0000111, 0b010),
         RISCVMachineOps.FLD: (0b0000111, 0b011),
         RISCVMachineOps.JALR: (0b1100111, 0b000),
     }
@@ -886,9 +968,11 @@ def get_rv_inst_i(inst: MCInst, fixups):
 
 def get_rv_inst_s(inst: MCInst, fixups):
     OPCODE_TABLE = {
+        RISCVMachineOps.SB: (0b0100011, 0b000),
+        RISCVMachineOps.SH: (0b0100011, 0b001),
         RISCVMachineOps.SW: (0b0100011, 0b010),
-        RISCVMachineOps.FSW: (0b0100111, 0b010),
         RISCVMachineOps.SD: (0b0100011, 0b011),
+        RISCVMachineOps.FSW: (0b0100111, 0b010),
         RISCVMachineOps.FSD: (0b0100111, 0b011),
     }
 
@@ -981,17 +1065,33 @@ def get_inst_binary_code(inst: MCInst, fixups):
             RISCVMachineOps.ADD, RISCVMachineOps.SUB, RISCVMachineOps.SLT, RISCVMachineOps.SLTU, RISCVMachineOps.AND,
             RISCVMachineOps.OR, RISCVMachineOps.SRL, RISCVMachineOps.SRA, RISCVMachineOps.SLL, RISCVMachineOps.XOR,
             RISCVMachineOps.SLLW, RISCVMachineOps.SRAW, RISCVMachineOps.SRLW,
+            RISCVMachineOps.MUL, RISCVMachineOps.DIV, RISCVMachineOps.DIVU, RISCVMachineOps.REM, RISCVMachineOps.REMU,
             RISCVMachineOps.FADD_S, RISCVMachineOps.FSUB_S, RISCVMachineOps.FMUL_S, RISCVMachineOps.FDIV_S,
-            RISCVMachineOps.FLE_S, RISCVMachineOps.FLT_S, RISCVMachineOps.FSGNJ_S]:
+            RISCVMachineOps.FEQ_S, RISCVMachineOps.FLE_S, RISCVMachineOps.FLT_S, RISCVMachineOps.FSGNJ_S,
+            RISCVMachineOps.FADD_D, RISCVMachineOps.FSUB_D, RISCVMachineOps.FMUL_D, RISCVMachineOps.FDIV_D,
+            RISCVMachineOps.FEQ_D, RISCVMachineOps.FLE_D, RISCVMachineOps.FLT_D, RISCVMachineOps.FSGNJ_D]:
         return get_rv_inst_r(inst, fixups)
+
+    if opcode in [
+            RISCVMachineOps.FCVT_W_S, RISCVMachineOps.FCVT_WU_S, RISCVMachineOps.FCVT_S_W, RISCVMachineOps.FCVT_S_WU,
+            RISCVMachineOps.FCVT_W_D, RISCVMachineOps.FCVT_WU_D, RISCVMachineOps.FCVT_D_W, RISCVMachineOps.FCVT_D_WU,
+            RISCVMachineOps.FCVT_L_S, RISCVMachineOps.FCVT_LU_S, RISCVMachineOps.FCVT_S_L, RISCVMachineOps.FCVT_S_LU,
+            RISCVMachineOps.FCVT_L_D, RISCVMachineOps.FCVT_LU_D, RISCVMachineOps.FCVT_D_L, RISCVMachineOps.FCVT_D_LU,
+            RISCVMachineOps.FCVT_S_D, RISCVMachineOps.FCVT_D_S,
+            RISCVMachineOps.FMV_W_X, RISCVMachineOps.FMV_X_W,
+            RISCVMachineOps.FMV_D_X, RISCVMachineOps.FMV_X_D]:
+        return get_rv_inst_r_frm(inst, fixups)
 
     if opcode in [
             RISCVMachineOps.ADDI, RISCVMachineOps.XORI, RISCVMachineOps.SLTI, RISCVMachineOps.SLTIU,
             RISCVMachineOps.JALR,
+            RISCVMachineOps.LB, RISCVMachineOps.LBU, RISCVMachineOps.LH, RISCVMachineOps.LHU,
             RISCVMachineOps.LW, RISCVMachineOps.LD, RISCVMachineOps.FLW, RISCVMachineOps.FLD]:
         return get_rv_inst_i(inst, fixups)
 
-    if opcode in [RISCVMachineOps.SW, RISCVMachineOps.SD, RISCVMachineOps.FSW, RISCVMachineOps.FSD]:
+    if opcode in [
+        RISCVMachineOps.SB, RISCVMachineOps.SH,
+        RISCVMachineOps.SW, RISCVMachineOps.SD, RISCVMachineOps.FSW, RISCVMachineOps.FSD]:
         return get_rv_inst_s(inst, fixups)
 
     if opcode in [RISCVMachineOps.LUI, RISCVMachineOps.AUIPC]:

@@ -179,6 +179,7 @@ SORegImm = RISCVMemOperandDef([GPR, I32Imm])
 riscv_bl_target = ValueOperandDef(ValueType.I32)
 reglist = ValueOperandDef(ValueType.I32)
 cmovpred = ValueOperandDef(ValueType.I32)
+frmarg = ValueOperandDef(ValueType.I32)
 
 
 class RISCVDagOp(DagOp):
@@ -313,19 +314,40 @@ class RISCVMachineOps:
             if isinstance(value, MachineInstructionDef):
                 yield value
 
+    LB = def_inst(
+        "lb",
+        outs=[("dst", GPR)],
+        ins=[("src", AddrMode_Imm12)]
+    )
+
+    LH = def_inst(
+        "lh",
+        outs=[("dst", GPR)],
+        ins=[("src", AddrMode_Imm12)]
+    )
+
+    LBU = def_inst(
+        "lbu",
+        outs=[("dst", GPR)],
+        ins=[("src", AddrMode_Imm12)]
+    )
+
+    LHU = def_inst(
+        "lhu",
+        outs=[("dst", GPR)],
+        ins=[("src", AddrMode_Imm12)]
+    )
+
     LW = def_inst(
         "lw",
         outs=[("dst", GPR)],
-        ins=[("src", AddrMode_Imm12)],
-        patterns=[set_(("dst", GPR), load_(("src", addr)))],
-        enabled=lambda target_info: target_info.hwmode == RV32,
+        ins=[("src", AddrMode_Imm12)]
     )
 
     LD = def_inst(
         "ld",
         outs=[("dst", GPR)],
-        ins=[("src", AddrMode_Imm12)],
-        # patterns=[set_(("dst", GPR), load_(("src", addr)))]
+        ins=[("src", AddrMode_Imm12)]
     )
 
     FLW = def_inst(
@@ -342,19 +364,28 @@ class RISCVMachineOps:
         patterns=[set_(("dst", FPR64), load_(("src", addr)))]
     )
 
+    SB = def_inst(
+        "sb",
+        outs=[],
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)]
+    )
+
+    SH = def_inst(
+        "sh",
+        outs=[],
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)]
+    )
+
     SW = def_inst(
         "sw",
         outs=[],
-        ins=[("dst", GPR), ("src", AddrMode_Imm12)],
-        patterns=[store_(("dst", GPR), ("src", addr))],
-        enabled=lambda target_info: target_info.hwmode == RV32,
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)]
     )
 
     SD = def_inst(
         "sd",
         outs=[],
-        ins=[("dst", GPR), ("src", AddrMode_Imm12)],
-        # patterns=[store_(("dst", GPR), ("src", addr))]
+        ins=[("dst", GPR), ("src", AddrMode_Imm12)]
     )
 
     FSW = def_inst(
@@ -518,6 +549,40 @@ class RISCVMachineOps:
         patterns=[]
     )
 
+    # M extension
+
+    MUL = def_inst(
+        "mul",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)]
+    )
+
+    DIV = def_inst(
+        "div",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)]
+    )
+
+    DIVU = def_inst(
+        "divu",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)]
+    )
+
+    REM = def_inst(
+        "rem",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)]
+    )
+
+    REMU = def_inst(
+        "remu",
+        outs=[("dst", GPR)],
+        ins=[("src1", GPR), ("src2", GPR)]
+    )
+
+    # F, D extension
+
     FADD_S = def_inst(
         "fadd_s",
         outs=[("dst", FPR32)],
@@ -586,6 +651,56 @@ class RISCVMachineOps:
         ins=[("src1", FPR32), ("src2", FPR32)]
     )
 
+    FADD_D = def_inst(
+        "fadd_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fadd_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FMUL_D = def_inst(
+        "fmul_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fmul_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FDIV_D = def_inst(
+        "fdiv_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fdiv_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FSUB_D = def_inst(
+        "fsub_d",
+        outs=[("dst", FPR64)],
+        ins=[("src1", FPR64), ("src2", FPR64)],
+        patterns=[set_(("dst", FPR64), fsub_(
+            ("src1", FPR64), ("src2", FPR64)))]
+    )
+
+    FEQ_D = def_inst(
+        "feq_d",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    FLT_D = def_inst(
+        "flt_d",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    FLE_D = def_inst(
+        "fle_d",
+        outs=[("dst", GPR)],
+        ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
     FSGNJ_D = def_inst(
         "fsgnj_d",
         outs=[("dst", FPR64)],
@@ -602,6 +717,150 @@ class RISCVMachineOps:
         "fsgnjx_d",
         outs=[("dst", FPR64)],
         ins=[("src1", FPR64), ("src2", FPR64)]
+    )
+
+    FCLASS_S = def_inst(
+        "fclass_s",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32)]
+    )
+
+    FCVT_W_S = def_inst(
+        "fcvt_w_s",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32), ("frm", frmarg)]
+    )
+
+    FCVT_WU_S = def_inst(
+        "fcvt_wu_s",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32), ("frm", frmarg)]
+    )
+
+    FCVT_S_W = def_inst(
+        "fcvt_s_w",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FCVT_S_WU = def_inst(
+        "fcvt_s_wu",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FCVT_L_S = def_inst(
+        "fcvt_l_s",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32), ("frm", frmarg)]
+    )
+
+    FCVT_LU_S = def_inst(
+        "fcvt_lu_s",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32), ("frm", frmarg)]
+    )
+
+    FCVT_S_L = def_inst(
+        "fcvt_s_l",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FCVT_S_LU = def_inst(
+        "fcvt_s_lu",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FMV_X_W = def_inst(
+        "fmv_x_w",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR32)]
+    )
+
+    FMV_W_X = def_inst(
+        "fmv_w_x",
+        outs=[("dst", FPR32)],
+        ins=[("src", GPR)]
+    )
+
+    FCLASS_D = def_inst(
+        "fclass_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64)]
+    )
+
+    FCVT_W_D = def_inst(
+        "fcvt_w_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64), ("frm", frmarg)]
+    )
+
+    FCVT_WU_D = def_inst(
+        "fcvt_wu_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64), ("frm", frmarg)]
+    )
+
+    FCVT_D_W = def_inst(
+        "fcvt_d_w",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR)]
+    )
+
+    FCVT_D_WU = def_inst(
+        "fcvt_d_wu",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR)]
+    )
+
+    FCVT_L_D = def_inst(
+        "fcvt_l_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64), ("frm", frmarg)]
+    )
+
+    FCVT_LU_D = def_inst(
+        "fcvt_lu_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64), ("frm", frmarg)]
+    )
+
+    FCVT_D_L = def_inst(
+        "fcvt_d_l",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FCVT_D_LU = def_inst(
+        "fcvt_d_lu",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR), ("frm", frmarg)]
+    )
+
+    FMV_X_D = def_inst(
+        "fmv_x_d",
+        outs=[("dst", GPR)],
+        ins=[("src", FPR64)]
+    )
+
+    FMV_D_X = def_inst(
+        "fmv_d_x",
+        outs=[("dst", FPR64)],
+        ins=[("src", GPR)]
+    )
+
+    FCVT_S_D = def_inst(
+        "fcvt_s_d",
+        outs=[("dst", FPR32)],
+        ins=[("src", FPR64), ("frm", frmarg)]
+    )
+
+    FCVT_D_S = def_inst(
+        "fcvt_d_s",
+        outs=[("dst", FPR64)],
+        ins=[("src", FPR32)]
     )
 
     JAL = def_inst(
@@ -709,10 +968,15 @@ class RISCVMachineOps:
         ins=[("amt1", I32Imm), ("amt2", I32Imm)]
     )
 
-
+LB = def_inst_node_(RISCVMachineOps.LB)
+LH = def_inst_node_(RISCVMachineOps.LH)
+LBU = def_inst_node_(RISCVMachineOps.LBU)
+LHU = def_inst_node_(RISCVMachineOps.LHU)
 LW = def_inst_node_(RISCVMachineOps.LW)
 LD = def_inst_node_(RISCVMachineOps.LD)
 
+SB = def_inst_node_(RISCVMachineOps.SB)
+SH = def_inst_node_(RISCVMachineOps.SH)
 SW = def_inst_node_(RISCVMachineOps.SW)
 SD = def_inst_node_(RISCVMachineOps.SD)
 
@@ -745,12 +1009,47 @@ FEQ_S = def_inst_node_(RISCVMachineOps.FEQ_S)
 FLT_S = def_inst_node_(RISCVMachineOps.FLT_S)
 FLE_S = def_inst_node_(RISCVMachineOps.FLE_S)
 
+FEQ_D = def_inst_node_(RISCVMachineOps.FEQ_D)
+FLT_D = def_inst_node_(RISCVMachineOps.FLT_D)
+FLE_D = def_inst_node_(RISCVMachineOps.FLE_D)
+
+FCVT_W_S = def_inst_node_(RISCVMachineOps.FCVT_W_S)
+FCVT_WU_S = def_inst_node_(RISCVMachineOps.FCVT_WU_S)
+FCVT_S_W = def_inst_node_(RISCVMachineOps.FCVT_S_W)
+FCVT_S_WU = def_inst_node_(RISCVMachineOps.FCVT_S_WU)
+
+FCVT_L_S = def_inst_node_(RISCVMachineOps.FCVT_L_S)
+FCVT_LU_S = def_inst_node_(RISCVMachineOps.FCVT_LU_S)
+FCVT_S_L = def_inst_node_(RISCVMachineOps.FCVT_S_L)
+FCVT_S_LU = def_inst_node_(RISCVMachineOps.FCVT_S_LU)
+
+FCVT_W_D = def_inst_node_(RISCVMachineOps.FCVT_W_D)
+FCVT_WU_D = def_inst_node_(RISCVMachineOps.FCVT_WU_D)
+FCVT_D_W = def_inst_node_(RISCVMachineOps.FCVT_D_W)
+FCVT_D_WU = def_inst_node_(RISCVMachineOps.FCVT_D_WU)
+
+FCVT_L_D = def_inst_node_(RISCVMachineOps.FCVT_L_D)
+FCVT_LU_D = def_inst_node_(RISCVMachineOps.FCVT_LU_D)
+FCVT_D_L = def_inst_node_(RISCVMachineOps.FCVT_D_L)
+FCVT_D_LU = def_inst_node_(RISCVMachineOps.FCVT_D_LU)
+
+FCVT_D_S = def_inst_node_(RISCVMachineOps.FCVT_D_S)
+FCVT_S_D = def_inst_node_(RISCVMachineOps.FCVT_S_D)
+
+FMV_D_X = def_inst_node_(RISCVMachineOps.FMV_D_X)
+FMV_X_D = def_inst_node_(RISCVMachineOps.FMV_X_D)
+
+MUL = def_inst_node_(RISCVMachineOps.MUL)
+DIV = def_inst_node_(RISCVMachineOps.DIV)
+DIVU = def_inst_node_(RISCVMachineOps.DIVU)
+REM = def_inst_node_(RISCVMachineOps.REM)
+REMU = def_inst_node_(RISCVMachineOps.REMU)
 
 from codegen.dag import DagValue
 
 
 HI20 = def_node_xform_(I32Imm, lambda value, dag: DagValue(dag.add_target_constant_node(
-    value.node.value_types[0], ConstantInt(value.node.value.value >> 12, value.node.value.ty)), 0))
+    value.node.value_types[0], ConstantInt((value.node.value.value & 0xFFFFFFFF) >> 12, value.node.value.ty)), 0))
 
 
 def get_bits_sext(value, bits):
@@ -772,9 +1071,14 @@ LO12Sext = def_node_xform_(I32Imm, lambda value, dag: DagValue(dag.add_target_co
 riscv_patterns = []
 
 
-def def_pat_riscv(pattern, result):
-    def_pat(pattern, result, riscv_patterns)
+def def_pat_riscv(pattern, result, enabled=None):
+    def_pat(pattern, result, riscv_patterns, enabled)
 
+def_pat_riscv(extloadi8_(("src", addr)),
+              LBU(("src", AddrMode_Imm12)))
+
+def_pat_riscv(extloadi16_(("src", addr)),
+              LHU(("src", AddrMode_Imm12)))
 
 def_pat_riscv(extloadi32_(("src", addr)),
               LW(("src", AddrMode_Imm12)))
@@ -782,7 +1086,13 @@ def_pat_riscv(extloadi32_(("src", addr)),
 def_pat_riscv(load_(("src", addr)),
               LD(("src", AddrMode_Imm12)))
 
-def_pat_riscv(extstorei32_(("dst", GPR), ("src", addr)),
+def_pat_riscv(truncstorei8_(("dst", GPR), ("src", addr)),
+              SB(("dst", GPR), ("src", AddrMode_Imm12)))
+
+def_pat_riscv(truncstorei16_(("dst", GPR), ("src", addr)),
+              SH(("dst", GPR), ("src", AddrMode_Imm12)))
+
+def_pat_riscv(truncstorei32_(("dst", GPR), ("src", addr)),
               SW(("dst", GPR), ("src", AddrMode_Imm12)))
 
 def_pat_riscv(store_(("dst", GPR), ("src", addr)),
@@ -831,6 +1141,21 @@ def_pat_riscv(riscv_srlw_(("src1", GPR), ("src2", GPR)),
 def_pat_riscv(riscv_sllw_(("src1", GPR), ("src2", GPR)),
               SLLW(("src1", GPR), ("src2", GPR)))
 
+def_pat_riscv(mul_(("src1", GPR), ("src2", GPR)),
+              MUL(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(sdiv_(("src1", GPR), ("src2", GPR)),
+              DIV(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(udiv_(("src1", GPR), ("src2", GPR)),
+              DIVU(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(srem_(("src1", GPR), ("src2", GPR)),
+              REM(("src1", GPR), ("src2", GPR)))
+
+def_pat_riscv(urem_(("src1", GPR), ("src2", GPR)),
+              REMU(("src1", GPR), ("src2", GPR)))
+
 # integer compare
 def_pat_riscv(seteq_(("src1", GPR), ("src2", GPR)),
               SLTIU(XOR(("src1", GPR), ("src2", GPR)), 1))
@@ -851,8 +1176,11 @@ def_pat_riscv(setgt_(("src1", GPR), ("src2", GPR)),
               SLT(("src2", GPR), ("src1", GPR)))
 
 # float compare
+def_pat_riscv(seteq_(("src1", FPR32), ("src2", FPR32)),
+              FEQ_S(("src1", FPR32), ("src2", FPR32)))
 def_pat_riscv(setoeq_(("src1", FPR32), ("src2", FPR32)),
               FEQ_S(("src1", FPR32), ("src2", FPR32)))
+              
 def_pat_riscv(setolt_(("src1", FPR32), ("src2", FPR32)),
               FLT_S(("src1", FPR32), ("src2", FPR32)))
 def_pat_riscv(setole_(("src1", FPR32), ("src2", FPR32)),
@@ -862,6 +1190,86 @@ def_pat_riscv(setogt_(("src1", FPR32), ("src2", FPR32)),
               FLT_S(("src2", FPR32), ("src1", FPR32)))
 def_pat_riscv(setoge_(("src1", FPR32), ("src2", FPR32)),
               FLE_S(("src2", FPR32), ("src1", FPR32)))
+
+# double compare
+def_pat_riscv(seteq_(("src1", FPR64), ("src2", FPR64)),
+              FEQ_D(("src1", FPR64), ("src2", FPR64)))
+def_pat_riscv(setoeq_(("src1", FPR64), ("src2", FPR64)),
+              FEQ_D(("src1", FPR64), ("src2", FPR64)))
+
+def_pat_riscv(setolt_(("src1", FPR64), ("src2", FPR64)),
+              FLT_D(("src1", FPR64), ("src2", FPR64)))
+def_pat_riscv(setole_(("src1", FPR64), ("src2", FPR64)),
+              FLE_D(("src1", FPR64), ("src2", FPR64)))
+
+def_pat_riscv(setogt_(("src1", FPR64), ("src2", FPR64)),
+              FLT_D(("src2", FPR64), ("src1", FPR64)))
+def_pat_riscv(setoge_(("src1", FPR64), ("src2", FPR64)),
+              FLE_D(("src2", FPR64), ("src1", FPR64)))
+
+# fcvt
+
+def_pat_riscv(fp_to_sint_(("src", FPR32)),
+              FCVT_W_S(("src", FPR32), 0b001),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(fp_to_uint_(("src", FPR32)),
+              FCVT_WU_S(("src", FPR32), 0b001),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(sint_to_fp_(("src", GPR)),
+              FCVT_S_W(("src", GPR), 0b111),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(uint_to_fp_(("src", GPR)),
+              FCVT_S_WU(("src", GPR), 0b111),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(fp_to_sint_(("src", FPR64)),
+              FCVT_W_D(("src", FPR64), 0b001),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(fp_to_uint_(("src", FPR64)),
+              FCVT_WU_D(("src", FPR64), 0b001),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(sint_to_fp_(("src", GPR)),
+              FCVT_D_W(("src", GPR)),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(uint_to_fp_(("src", GPR)),
+              FCVT_D_WU(("src", GPR)),
+              enabled=lambda target_info: target_info.hwmode == RV32)
+
+def_pat_riscv(fp_to_sint_(("src", FPR32)),
+              FCVT_L_S(("src", FPR32), 0b001))
+
+def_pat_riscv(fp_to_uint_(("src", FPR32)),
+              FCVT_LU_S(("src", FPR32), 0b001))
+
+def_pat_riscv(fp_to_sint_(("src", FPR64)),
+              FCVT_L_D(("src", FPR64), 0b001))
+
+def_pat_riscv(fp_to_uint_(("src", FPR64)),
+              FCVT_LU_D(("src", FPR64), 0b001))
+
+def_pat_riscv(f64_(sint_to_fp_(("src", GPR))),
+              FCVT_D_W(("src", GPR)))
+
+def_pat_riscv(f64_(uint_to_fp_(("src", GPR))),
+              FCVT_D_WU(("src", GPR)))
+
+def_pat_riscv(fp_round_(("src", FPR64)),
+              FCVT_S_D(("src", FPR64), 0b001))
+
+def_pat_riscv(fp_extend_(("src", FPR32)),
+              FCVT_D_S(("src", FPR32)))
+
+def_pat_riscv(bitconvert_(("src", FPR64)),
+              FMV_X_D(("src", GPR)))
+
+def_pat_riscv(f64_(bitconvert_(("src", GPR))),
+              FMV_D_X(("src", GPR)))
 
 # branch, call
 def_pat_riscv(brcond_(("cond", GPR), ("imm", bb)),
