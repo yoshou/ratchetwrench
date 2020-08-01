@@ -216,6 +216,10 @@ class LiveIntervals(MachineFunctionPass):
 
             new_live_regs = live_out - live_in
 
+            for kill in kills[inst]:
+                if kill not in live_ranges:
+                    new_live_regs.add(kill)
+
             for new_live_reg in new_live_regs:
                 # live_regs.add(new_live_reg)
                 if new_live_reg not in live_ranges:
