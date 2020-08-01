@@ -1987,6 +1987,14 @@ class RISCVELFTargetObjectFile(MCObjectFileInfo):
             ".sdata", SHT_PROGBITS, SHF_WRITE | SHF_ALLOC)
         self._rodata_section = create_elf_section(
             ".rodata", SHT_PROGBITS, SHF_ALLOC)
+        self._mergeable_const4_section = create_elf_section(
+            ".rodata.cst4", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 4, alignment=4)
+        self._mergeable_const8_section = create_elf_section(
+            ".rodata.cst8", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8, alignment=8)
+        self._mergeable_const16_section = create_elf_section(
+            ".rodata.cst16", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 16, alignment=16)
+        self._mergeable_const32_section = create_elf_section(
+            ".rodata.cst32", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 32, alignment=32)
 
         self._tls_bss_section = create_elf_section(
             ".tbss", SHT_NOBITS, SHF_WRITE | SHF_ALLOC | SHF_TLS)
@@ -2014,8 +2022,18 @@ class RISCVELFTargetObjectFile(MCObjectFileInfo):
         return self._tls_data_section
 
     def get_section_for_const(self, section_kind: SectionKind, value, align):
-        return self._text_section
-        return self._sdata_section
+        if section_kind == SectionKind.MergeableConst4:
+            return self._mergeable_const4_section
+        elif section_kind == SectionKind.MergeableConst8:
+            return self._mergeable_const8_section
+        elif section_kind == SectionKind.MergeableConst16:
+            return self._mergeable_const16_section
+        elif section_kind == SectionKind.MergeableConst32:
+            return self._mergeable_const32_section
+        elif section_kind == SectionKind.ReadOnly:
+            return self._rodata_section
+
+        raise ValueError("Invalid section kind.")
 
     @property
     def is_elf(self):
