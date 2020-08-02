@@ -542,7 +542,7 @@ class Constraint:
 
 
 class MachineInstructionDef:
-    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False, enabled=None, sched=None):
+    def __init__(self, mnemonic, outs, ins, patterns=[], uses=[], defs=[], constraints=[], size=0, is_compare=False, is_terminator=False, is_call=False, is_branch=False, is_barrier=False, enabled=None, sched=None):
         self.mnemonic = mnemonic
         self.outs = OrderedDict(outs)
         self.ins = OrderedDict(ins)
@@ -554,6 +554,8 @@ class MachineInstructionDef:
         self.is_compare = is_compare
         self.is_terminator = is_terminator
         self.is_call = is_call
+        self.is_branch = is_branch
+        self.is_barrier = is_barrier
 
         self.enabled = enabled
         self.sched = sched
@@ -879,6 +881,13 @@ class TargetInstInfo:
 
     def expand_post_ra_pseudo(self, inst):
         raise NotImplementedError()
+
+    def analyze_branch(self, bb):
+        analyzed = False
+        true_mbb = None
+        false_mbb = None
+        cond_operand = None
+        return analyzed, true_mbb, false_mbb, cond_operand
 
 
 class TargetRegisterInfo:

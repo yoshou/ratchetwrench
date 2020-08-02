@@ -803,17 +803,24 @@ class RISCVTargetInstInfo(TargetInstInfo):
 
         noreg = MachineRegister(NOREG)
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                reg_info = inst.mbb.func.target_info.get_register_info()
+                return reg.regclass == regclass or reg_info.is_subclass(regclass, reg.regclass)
+            else:
+                return reg.spec in regclass.regs
+
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPR):
                 copy_inst = MachineInstruction(RISCVMachineOps.SW)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in FPR32.regs:
+            elif has_reg_regclass(reg, FPR32):
                 copy_inst = MachineInstruction(RISCVMachineOps.FSW)
 
                 copy_inst.add_reg(reg, RegState.Non)
@@ -823,14 +830,14 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPR):
                 copy_inst = MachineInstruction(RISCVMachineOps.SD)
 
                 copy_inst.add_reg(reg, RegState.Non)
 
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in FPR64.regs:
+            elif has_reg_regclass(reg, FPR64):
                 copy_inst = MachineInstruction(RISCVMachineOps.FSD)
 
                 copy_inst.add_reg(reg, RegState.Non)
@@ -859,16 +866,23 @@ class RISCVTargetInstInfo(TargetInstInfo):
 
         noreg = MachineRegister(NOREG)
 
+        def has_reg_regclass(reg, regclass):
+            if isinstance(reg, MachineVirtualRegister):
+                reg_info = inst.mbb.func.target_info.get_register_info()
+                return reg.regclass == regclass or reg_info.is_subclass(regclass, reg.regclass)
+            else:
+                return reg.spec in regclass.regs
+
         if size == 1:
             raise NotImplementedError()
         elif size == 4:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPR):
                 copy_inst = MachineInstruction(RISCVMachineOps.LW)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in FPR32.regs:
+            elif has_reg_regclass(reg, FPR32):
                 copy_inst = MachineInstruction(RISCVMachineOps.FLW)
 
                 copy_inst.add_reg(reg, RegState.Define)
@@ -877,13 +891,13 @@ class RISCVTargetInstInfo(TargetInstInfo):
             else:
                 raise NotImplementedError()
         elif size == 8:
-            if reg.spec in GPR.regs:
+            if has_reg_regclass(reg, GPR):
                 copy_inst = MachineInstruction(RISCVMachineOps.LD)
 
                 copy_inst.add_reg(reg, RegState.Define)
                 copy_inst.add_frame_index(stack_slot)
                 copy_inst.add_imm(0)
-            elif reg.spec in FPR64.regs:
+            elif has_reg_regclass(reg, FPR64):
                 copy_inst = MachineInstruction(RISCVMachineOps.FLD)
 
                 copy_inst.add_reg(reg, RegState.Define)
@@ -1006,6 +1020,36 @@ class RISCVTargetInstInfo(TargetInstInfo):
             lo_inst.insert_after(hi_inst)
 
             inst.remove()
+
+    def analyze_branch(self, bb):
+        analyzed = False
+        true_mbb = None
+        false_mbb = None
+        cond_operands = []
+
+        if not bb.insts[-1].is_branch:
+            return False, true_mbb, false_mbb, cond_operands
+
+        num_terminator = 0
+        for inst in reversed(bb.insts):
+            if not inst.is_terminator:
+                break
+
+            num_terminator += 1
+
+        if num_terminator > 2:
+            return False, true_mbb, false_mbb, cond_operands
+
+        if num_terminator == 1 and bb.insts[-1].is_unconditional_branch:
+            true_mbb = bb.insts[-1].operands[0].mbb
+            return True, true_mbb, false_mbb, cond_operands
+
+        if num_terminator == 2 and bb.insts[-1].is_unconditional_branch and bb.insts[-2].is_conditional_branch:
+            true_mbb = bb.insts[-2].operands[2].mbb
+            false_mbb = bb.insts[-1].operands[0].mbb
+            return True, true_mbb, false_mbb, cond_operands
+
+        return analyzed, true_mbb, false_mbb, cond_operands
 
 
 def get_super_regs(reg):

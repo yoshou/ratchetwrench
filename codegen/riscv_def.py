@@ -881,42 +881,48 @@ class RISCVMachineOps:
         "beq",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     BNE = def_inst(
         "bne",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     BLT = def_inst(
         "blt",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     BGE = def_inst(
         "bge",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     BLTU = def_inst(
         "blgu",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     BGEU = def_inst(
         "bgeu",
         outs=[],
         ins=[("src1", GPR), ("src2", GPR), ("dst", BrTarget8)],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True
     )
 
     PseudoBR = def_inst(
@@ -924,7 +930,9 @@ class RISCVMachineOps:
         outs=[],
         ins=[("dst", BrTarget8)],
         patterns=[br_(("dst", bb))],
-        is_terminator=True
+        is_terminator=True,
+        is_branch=True,
+        is_barrier=True
     )
 
     PseudoRET = def_inst(

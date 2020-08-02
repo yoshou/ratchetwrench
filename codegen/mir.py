@@ -852,6 +852,27 @@ class MachineInstruction:
             return self.opcode.is_terminator
         return False
 
+    @property
+    def is_branch(self):
+        from codegen.spec import MachineInstructionDef
+        if isinstance(self.opcode, MachineInstructionDef):
+            return self.opcode.is_branch
+        return False
+
+    @property
+    def is_unconditional_branch(self):
+        from codegen.spec import MachineInstructionDef
+        if isinstance(self.opcode, MachineInstructionDef):
+            return self.opcode.is_branch and self.opcode.is_barrier
+        return False
+
+    @property
+    def is_conditional_branch(self):
+        from codegen.spec import MachineInstructionDef
+        if isinstance(self.opcode, MachineInstructionDef):
+            return self.opcode.is_branch and not self.opcode.is_barrier
+        return False
+
     def add_reg_operand_to_use(self, operand):
         if self.mbb is not None:
             reginfo = self.mbb.func.reg_info
