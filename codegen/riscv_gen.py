@@ -212,6 +212,7 @@ class CallInfo:
         self.ret_ty = ret_ty
         self.target = target
         self.arg_list = arg_list
+        self.num_fixed_args = len(self.arg_list)
 
 
 class RISCVCallingConv(CallingConv):
