@@ -807,6 +807,38 @@ class MachineInstruction:
         self.comment = ""
 
     @property
+    def is_copy(self):
+        from codegen.spec import TargetDagOps
+        return self.opcode == TargetDagOps.COPY
+
+    @property
+    def is_subreg_to_reg(self):
+        from codegen.spec import TargetDagOps
+        return self.opcode == TargetDagOps.SUBREG_TO_REG
+
+    @property
+    def is_insert_subreg(self):
+        from codegen.spec import TargetDagOps
+        return self.opcode == TargetDagOps.INSERT_SUBREG
+
+    @property
+    def is_extract_subreg(self):
+        from codegen.spec import TargetDagOps
+        return self.opcode == TargetDagOps.EXTRACT_SUBREG
+
+    @property
+    def is_full_copy(self):
+        return self.is_copy and not self.operands[0].subreg and not self.operands[1].subreg
+
+    @property
+    def is_copy_like(self):
+        return self.is_copy or self.is_subreg_to_reg
+
+    @property
+    def is_identity_copy(self):
+        return self.is_copy and self.operands[0].reg == self.operands[1].reg and self.operands[0].subreg == self.operands[1].subreg
+
+    @property
     def is_call(self):
         from codegen.spec import MachineInstructionDef
         if isinstance(self.opcode, MachineInstructionDef):
