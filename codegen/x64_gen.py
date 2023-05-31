@@ -815,7 +815,8 @@ class X86CallingConv(CallingConv):
         demote_reg = builder.func_info.sret_reg
         has_demote_arg = demote_reg is not None
 
-        stack_pop_bytes = builder.get_value(ConstantInt(0, i32))
+        stack_pop_bytes = DagValue(builder.g.add_target_constant_node(
+            MachineValueType(ValueType.I32), 0), 0)
 
         if len(inst.operands) > 0:
             return_offsets = []
@@ -1536,6 +1537,8 @@ class X64TargetInstInfo(TargetInstInfo):
                 inst.opcode = X64MachineOps.CMP32rm
             elif inst.opcode == X64MachineOps.SUB32rr:
                 inst.opcode = X64MachineOps.CMP32rr
+            elif inst.opcode == X64MachineOps.SUB64ri:
+                inst.opcode = X64MachineOps.CMP64ri
             elif inst.opcode == X64MachineOps.SUB64rr:
                 inst.opcode = X64MachineOps.CMP64rr
             else:
@@ -2474,7 +2477,15 @@ class X64TargetLowering(TargetLowering):
         chains = []
         while offset < size:
             copy_size = min(4, size - offset)
-            copy_ty = MachineValueType(ValueType.I32)
+
+            if copy_size == 8:
+                copy_ty = MachineValueType(ValueType.I64)
+            elif copy_size == 4:
+                copy_ty = MachineValueType(ValueType.I32)
+            elif copy_size == 2:
+                copy_ty = MachineValueType(ValueType.I16)
+            elif copy_size == 1:
+                copy_ty = MachineValueType(ValueType.I8)
 
             if offset != 0:
                 src_ty = src_op.ty

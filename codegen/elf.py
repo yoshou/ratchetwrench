@@ -1827,6 +1827,9 @@ class X64ELFTargetObjectFile(MCObjectFileInfo):
     def rodata_section(self) -> MCSection:
         return self._rodata_section
 
+    def select_section_for_global(self, section_kind: SectionKind, value, ctx):
+        return self.text_section
+
     def get_section_for_const(self, section_kind: SectionKind, value, align):
         if section_kind == SectionKind.MergeableConst4:
             return self._mergeable_const4_section

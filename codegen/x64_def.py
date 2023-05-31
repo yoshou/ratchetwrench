@@ -403,14 +403,68 @@ def match_addr(node, operands, idx, dag):
         sub_op1 = operand.node.operands[0]
         sub_op2 = operand.node.operands[1]
 
-        if sub_op1.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
+        scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
+        index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
+        segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+
+        def is_constant(value):
+            return value.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]
+
+        def is_index(value):
+            if value.node.opcode == VirtualDagOps.MUL:
+                mul_op1 = sub_op2.node.operands[0]
+                mul_op2 = sub_op2.node.operands[1]
+
+                if mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    return True
+
+                if mul_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op2.node.value.value in [1, 2, 4, 8]:
+                    return True
+
+            return False
+
+        if sub_op1.node.opcode in [VirtualDagOps.FRAME_INDEX] and (is_constant(sub_op2) or is_index(sub_op2)):
             base = DagValue(dag.add_frame_index_node(
                 sub_op1.ty, sub_op1.node.index, True), 0)
-            disp = sub_op2
-        elif sub_op2.node.opcode in [VirtualDagOps.FRAME_INDEX] and sub_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
+
+            if sub_op2.node.opcode == VirtualDagOps.MUL:
+                mul_op1 = sub_op2.node.operands[0]
+                mul_op2 = sub_op2.node.operands[1]
+
+                if mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op1
+                    index = mul_op2
+                elif mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op2
+                    index = mul_op1
+                else:
+                    index = sub_op2
+
+                disp = DagValue(dag.add_target_constant_node(
+                    MVT(ValueType.I32), 0), 0)
+            else:
+                disp = sub_op2
+        elif sub_op2.node.opcode in [VirtualDagOps.FRAME_INDEX] and (is_constant(sub_op1) or is_index(sub_op1)):
             base = DagValue(dag.add_frame_index_node(
                 sub_op2.ty, sub_op2.node.index, True), 0)
-            disp = sub_op1
+
+            if sub_op2.node.opcode == VirtualDagOps.MUL:
+                mul_op1 = sub_op2.node.operands[0]
+                mul_op2 = sub_op2.node.operands[1]
+
+                if mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op1
+                    index = mul_op2
+                elif mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op2
+                    index = mul_op1
+                else:
+                    index = sub_op2
+
+                disp = DagValue(dag.add_target_constant_node(
+                    MVT(ValueType.I32), 0), 0)
+            else:
+                disp = sub_op1
         elif sub_op2.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT]:
             if sub_op1.node.opcode == X64DagOps.WRAPPER_RIP and sub_op2.node.is_zero:
                 base = DagValue(dag.add_target_register_node(
@@ -430,7 +484,36 @@ def match_addr(node, operands, idx, dag):
                 base = sub_op2
                 disp = sub_op1
         else:
-            base = operand
+            if sub_op1.node.opcode == VirtualDagOps.MUL:
+                mul_op1 = sub_op1.node.operands[0]
+                mul_op2 = sub_op1.node.operands[1]
+
+                if mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op1
+                    index = mul_op2
+                elif mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op2
+                    index = mul_op1
+                else:
+                    index = sub_op2
+                base = sub_op2
+            elif sub_op2.node.opcode == VirtualDagOps.MUL:
+                mul_op1 = sub_op2.node.operands[0]
+                mul_op2 = sub_op2.node.operands[1]
+
+                if mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op1
+                    index = mul_op2
+                elif mul_op1.node.opcode in [VirtualDagOps.CONSTANT, VirtualDagOps.TARGET_CONSTANT] and mul_op1.node.value.value in [1, 2, 4, 8]:
+                    scale = mul_op2
+                    index = mul_op1
+                else:
+                    index = sub_op2
+                base = sub_op1
+            else:
+                base = sub_op1
+                index = sub_op2
+
             disp = DagValue(dag.add_target_constant_node(
                 MVT(ValueType.I32), 0), 0)
 
@@ -438,9 +521,9 @@ def match_addr(node, operands, idx, dag):
             disp = DagValue(dag.add_target_constant_node(
                 disp.ty, disp.node.value), 0)
 
-        scale = DagValue(dag.add_target_constant_node(MVT(ValueType.I8), 1), 0)
-        index = DagValue(dag.add_register_node(MVT(ValueType.I32), noreg), 0)
-        segment = DagValue(dag.add_register_node(MVT(ValueType.I16), noreg), 0)
+        if scale.node.opcode == VirtualDagOps.CONSTANT:
+            disp = DagValue(dag.add_target_constant_node(
+                disp.ty, disp.node.value), 0)
 
         if node.mem_operand:
             if node.mem_operand.ptr_info and node.mem_operand.ptr_info.value.ty.addr_space == 256:
@@ -1069,7 +1152,8 @@ class X64MachineOps:
         outs=[("dst", GR32)],
         ins=[("src1", GR32), ("src2", I32Mem)],
         defs=[EFLAGS],
-        # patterns=[set_(("dst", GR32), EFLAGS, add_(("src1", GR32), ("src2", addr)))],
+        patterns=[set_(("dst", GR32), EFLAGS, add_(
+            ("src1", GR32), load_(("src2", addr))))],
         constraints=[Constraint("dst", "src1")]
     )
 
@@ -1251,17 +1335,6 @@ class X64MachineOps:
         is_compare=True
     )
 
-    SUB64rr = def_inst(
-        "sub64_rr",
-        outs=[("dst", GR64)],
-        ins=[("src1", GR64), ("src2", GR64)],
-        defs=[EFLAGS],
-        constraints=[Constraint("dst", "src1")],
-        patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
-            ("src1", GR64), ("src2", GR64)))],
-        is_compare=True
-    )
-
     SUB64mi = def_inst(
         "sub64_mi",
         outs=[],
@@ -1278,6 +1351,17 @@ class X64MachineOps:
         patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
             ("src1", GR64), ("src2", reloc_imm64)))],
         constraints=[Constraint("dst", "src1")],
+        is_compare=True
+    )
+
+    SUB64rr = def_inst(
+        "sub64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")],
+        patterns=[set_(("dst", GR64), EFLAGS, x64sub_(
+            ("src1", GR64), ("src2", GR64)))],
         is_compare=True
     )
 
@@ -1602,7 +1686,6 @@ class X64MachineOps:
         outs=[("dst", GR32)],
         ins=[("src1", GR32), ("src2", I32Mem)],
         defs=[EFLAGS],
-        # patterns=[set_(("dst", GR32), EFLAGS, and_(("src1", GR32), ("src2", addr)))],
         constraints=[Constraint("dst", "src1")]
     )
 
@@ -1630,6 +1713,40 @@ class X64MachineOps:
         defs=[EFLAGS],
         patterns=[set_(("dst", GR32), EFLAGS, and_(
             ("src1", GR32), ("src2", GR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # and64
+    AND64rm = def_inst(
+        "and64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    AND64mi = def_inst(
+        "and64_mi",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", I64Imm)],
+        defs=[EFLAGS]
+    )
+
+    AND64ri = def_inst(
+        "and64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    AND64rr = def_inst(
+        "and64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, and_(
+            ("src1", GR64), ("src2", GR64)))],
         constraints=[Constraint("dst", "src1")]
     )
 
@@ -1678,6 +1795,43 @@ class X64MachineOps:
         defs=[EFLAGS],
         patterns=[set_(("dst", GR32), EFLAGS, or_(
             ("src1", GR32), ("src2", GR32)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    # or64
+    OR64rm = def_inst(
+        "or64_rm",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Mem)],
+        defs=[EFLAGS],
+        # patterns=[set_(("dst", GR64), EFLAGS, or_(("src1", GR64), ("src2", addr)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    OR64mi = def_inst(
+        "or64_mi",
+        outs=[],
+        ins=[("dst", I64Mem), ("src", I64Imm)],
+        defs=[EFLAGS]
+    )
+
+    OR64ri = def_inst(
+        "or64_ri",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", I64Imm)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, or_(
+            ("src1", GR64), ("src2", reloc_imm64)))],
+        constraints=[Constraint("dst", "src1")]
+    )
+
+    OR64rr = def_inst(
+        "or64_rr",
+        outs=[("dst", GR64)],
+        ins=[("src1", GR64), ("src2", GR64)],
+        defs=[EFLAGS],
+        patterns=[set_(("dst", GR64), EFLAGS, or_(
+            ("src1", GR64), ("src2", GR64)))],
         constraints=[Constraint("dst", "src1")]
     )
 
@@ -2157,6 +2311,51 @@ class X64MachineOps:
         outs=[("dst", GR64)],
         ins=[("src", GR16)],
         patterns=[set_(("dst", GR64), zext_(("src", GR16)))]
+    )
+
+    # extload
+    MOVZX32rm8 = def_inst(
+        "movzx32_rm8",
+        outs=[("dst", GR32)],
+        ins=[("src", I8Mem)],
+        patterns=[set_(("dst", GR32), i32_(zextloadi8_(("src", addr))))]
+    )
+    MOVZX32rm16 = def_inst(
+        "movzx32_rm16",
+        outs=[("dst", GR32)],
+        ins=[("src", I16Mem)],
+        patterns=[set_(("dst", GR32), i32_(zextloadi16_(("src", addr))))]
+    )
+    MOVZX64rm8 = def_inst(
+        "movzx64_rm8",
+        outs=[("dst", GR64)],
+        ins=[("src", I8Mem)],
+        patterns=[set_(("dst", GR64), i64_(zextloadi8_(("src", addr))))]
+    )
+    MOVZX64rm16 = def_inst(
+        "movzx64_rm16",
+        outs=[("dst", GR64)],
+        ins=[("src", I16Mem)],
+        patterns=[set_(("dst", GR64), i64_(zextloadi16_(("src", addr))))]
+    )
+
+    MOVSX64rm8 = def_inst(
+        "movsx64_rm8",
+        outs=[("dst", GR64)],
+        ins=[("src", I8Mem)],
+        patterns=[set_(("dst", GR64), i64_(sextloadi8_(("src", addr))))]
+    )
+    MOVSX64rm16 = def_inst(
+        "movsx64_rm16",
+        outs=[("dst", GR64)],
+        ins=[("src", I16Mem)],
+        patterns=[set_(("dst", GR64), i64_(sextloadi16_(("src", addr))))]
+    )
+    MOVSX64rm32 = def_inst(
+        "movsx64_rm32",
+        outs=[("dst", GR64)],
+        ins=[("src", I32Mem)],
+        patterns=[set_(("dst", GR64), i64_(sextloadi32_(("src", addr))))]
     )
 
     # convert byte to word
