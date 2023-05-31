@@ -19,6 +19,13 @@ class DagOp:
         return self.name
 
 
+class LoadExtType(Enum):
+    NON = auto()
+    ZEXTLOAD = auto()
+    SEXTLOAD = auto()
+    EXTLOAD = auto()
+
+
 class VirtualDagOp(DagOp):
     def __init__(self, name):
         super().__init__(name, "default")
@@ -170,10 +177,6 @@ class DagNode:
     def opcode(self):
         return self._opc
 
-    @opcode.setter
-    def opcode(self, value):
-        raise RuntimeError()
-
     @property
     def operands(self):
         return [op.ref for op in self._ops]
@@ -203,6 +206,8 @@ class DagNode:
         self._hash_val = hash((self.opcode, tuple(self.value_types), operands))
 
     def __hash__(self):
+        if self.opcode == VirtualDagOps.COPY_TO_REG:
+            return super().__hash__()
         return self._hash_val
 
     @property
@@ -275,8 +280,9 @@ class MachineMemOperand:
 
 
 class LoadDagNode(MemDagNode):
-    def __init__(self, value_types, operands, mem_operand):
-        super().__init__(VirtualDagOps.LOAD, value_types, operands, mem_operand)
+    def __init__(self, opcode, value_types, operands, mem_operand, ext_type=LoadExtType.NON):
+        super().__init__(opcode, value_types, operands, mem_operand)
+        self.ext_type = ext_type
 
     def get_label(self):
         return f"load<(load {self.mem_operand.size})>"
@@ -284,10 +290,10 @@ class LoadDagNode(MemDagNode):
     def __eq__(self, other):
         if not isinstance(other, LoadDagNode):
             return False
-        return super().__eq__(other)
+        return super().__eq__(other) and self.ext_type == other.ext_type
 
     def __hash__(self):
-        return super().__hash__()
+        return hash((super().__hash__(), self.ext_type))
 
 
 class StoreDagNode(MemDagNode):
@@ -703,8 +709,27 @@ class Dag:
                 ptr_info, mem_value_ty.get_size_in_byte())
 
         offset = DagValue(self.add_undef(ptr.ty), 0)
-        node = LoadDagNode(
-            [value_ty, MachineValueType(ValueType.OTHER)], [chain, ptr, offset], mem_operand)
+        node = LoadDagNode(VirtualDagOps.LOAD,
+                           [value_ty, MachineValueType(ValueType.OTHER)], [chain, ptr, offset], mem_operand)
+        node = self.append_node(node)
+
+        if is_volatile:
+            self.root = DagValue(node, 1)
+        return node
+
+    def add_ext_load_node(self, ext_type, value_ty: MachineValueType, chain, ptr, is_volatile, ptr_info=None, mem_value_ty=None, mem_operand=None):
+        assert(isinstance(value_ty, MachineValueType))
+
+        if not mem_operand:
+            if not mem_value_ty:
+                mem_value_ty = value_ty
+
+            mem_operand = MachineMemOperand(
+                ptr_info, mem_value_ty.get_size_in_byte())
+
+        offset = DagValue(self.add_undef(ptr.ty), 0)
+        node = LoadDagNode(VirtualDagOps.LOAD,
+                           [value_ty, MachineValueType(ValueType.OTHER)], [chain, ptr, offset], mem_operand, ext_type=ext_type)
         node = self.append_node(node)
 
         if is_volatile:

@@ -78,7 +78,7 @@ def compute_value_types(ty, data_layout, offsets=None, start_offset=0):
         return []
 
     INT_VALUE_TYPES = {
-        i1: ValueType.I1,
+        i1: ValueType.I8,
         i8: ValueType.I8,
         i16: ValueType.I16,
         i32: ValueType.I32,

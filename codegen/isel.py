@@ -320,6 +320,20 @@ class InstructionSelection(MachineFunctionPass):
         while self.do_legalize_type():
             pass
 
+    def combine_ext_load(self, node: DagNode, dag: Dag):
+        node0 = node.operands[0].node
+        if node0.opcode != VirtualDagOps.LOAD:
+            return None
+
+        if node.opcode == VirtualDagOps.SIGN_EXTEND:
+            ext_type = LoadExtType.SEXTLOAD
+        elif node.opcode == VirtualDagOps.ZERO_EXTEND:
+            ext_type = LoadExtType.ZEXTLOAD
+
+        ops = [node0.operands[0], node0.operands[1]]
+
+        return DagValue(dag.add_ext_load_node(ext_type, node.value_types[0], *ops, False, mem_operand=node0.mem_operand), 0)
+
     def combine_node(self, node: DagNode, dag: Dag):
         if node.opcode == VirtualDagOps.MERGE_VALUES:
             ops = node.operands
@@ -344,6 +358,16 @@ class InstructionSelection(MachineFunctionPass):
                 ops[idx.node.value.value] = in_val
 
                 return DagValue(dag.add_node(VirtualDagOps.BUILD_VECTOR, in_vec.node.value_types, *ops), 0)
+
+        if node.opcode == VirtualDagOps.SIGN_EXTEND:
+            combined = self.combine_ext_load(node, dag)
+            if combined:
+                return combined
+
+        if node.opcode == VirtualDagOps.ZERO_EXTEND:
+            combined = self.combine_ext_load(node, dag)
+            if combined:
+                return combined
 
         return None
 

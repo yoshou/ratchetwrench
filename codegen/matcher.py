@@ -140,13 +140,17 @@ def construct(inst, node, dag: Dag, result: MatcherResult):
 
 
 class NodePatternMatcher(PatternMatcher):
-    def __init__(self, opcode_matcher, operand_matchers, value_matchers, props, name=None):
+    def __init__(self, opcode_matcher, operand_matchers, value_matchers, props, predicates=None, name=None):
         super().__init__(name)
 
         self.opcode = opcode_matcher
         self.operands = operand_matchers
         self.values = value_matchers
         self.props = dict(props)
+
+        self.predicates = predicates
+        if not self.predicates:
+            self.predicates = []
 
     def match(self, node, values, idx, dag):
         from codegen.types import ValueType, MachineValueType
@@ -171,6 +175,10 @@ class NodePatternMatcher(PatternMatcher):
             assert(isinstance(node, (StoreDagNode, LoadDagNode)))
 
             if node.mem_operand.size != MachineValueType(mem_vt).get_size_in_byte():
+                return idx, None
+
+        for p in self.predicates:
+            if not p(node):
                 return idx, None
 
         # Check operands
@@ -273,9 +281,10 @@ def create_matcher(matcher_or_tuple):
 
 
 class NodePatternMatcherGen:
-    def __init__(self, opcode: str, *props, mem_vt=None):
+    def __init__(self, opcode: str, *props, mem_vt=None, predicates=None):
         self.opcode = opcode
         self.props = dict({"mem_vt": mem_vt})
+        self.predicates = predicates
 
     def __call__(self, *operands):
         from codegen.spec import MachineRegisterDef
@@ -286,7 +295,7 @@ class NodePatternMatcherGen:
         for matcher_or_tuple in operands:
             operand_matchers.append(create_matcher(matcher_or_tuple))
 
-        return NodePatternMatcher(opcode_matcher, operand_matchers, [], self.props)
+        return NodePatternMatcher(opcode_matcher, operand_matchers, [], self.props, predicates=self.predicates)
 
 
 from enum import Enum, auto
@@ -342,44 +351,72 @@ fmul_ = NodePatternMatcherGen(
 
 fdiv_ = NodePatternMatcherGen(VirtualDagOps.FDIV)
 
+from codegen.dag import LoadExtType
+
 load_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, predicates=[
+        lambda node: node.ext_type == LoadExtType.NON
+    ])
 
 extloadi1_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1, predicates=[
+        lambda node: node.ext_type == LoadExtType.EXTLOAD
+    ])
 
 extloadi8_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8, predicates=[
+        lambda node: node.ext_type == LoadExtType.EXTLOAD
+    ])
 
 extloadi16_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16, predicates=[
+        lambda node: node.ext_type == LoadExtType.EXTLOAD
+    ])
 
 extloadi32_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32, predicates=[
+        lambda node: node.ext_type == LoadExtType.EXTLOAD
+    ])
 
 zextloadi1_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1, predicates=[
+        lambda node: node.ext_type == LoadExtType.ZEXTLOAD
+    ])
 
 zextloadi8_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8, predicates=[
+        lambda node: node.ext_type == LoadExtType.ZEXTLOAD
+    ])
 
 zextloadi16_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16, predicates=[
+        lambda node: node.ext_type == LoadExtType.ZEXTLOAD
+    ])
 
 zextloadi32_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32, predicates=[
+        lambda node: node.ext_type == LoadExtType.ZEXTLOAD
+    ])
 
 sextloadi1_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I1, predicates=[
+        lambda node: node.ext_type == LoadExtType.SEXTLOAD
+    ])
 
 sextloadi8_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I8, predicates=[
+        lambda node: node.ext_type == LoadExtType.SEXTLOAD
+    ])
 
 sextloadi16_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I16, predicates=[
+        lambda node: node.ext_type == LoadExtType.SEXTLOAD
+    ])
 
 sextloadi32_ = NodePatternMatcherGen(
-    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32)
+    VirtualDagOps.LOAD, NodeProperty.HasChain, mem_vt=ValueType.I32, predicates=[
+        lambda node: node.ext_type == LoadExtType.SEXTLOAD
+    ])
 
 store_ = NodePatternMatcherGen(
     VirtualDagOps.STORE, NodeProperty.HasChain)
