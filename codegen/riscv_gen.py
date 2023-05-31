@@ -2007,10 +2007,6 @@ class RISCVLegalizer(Legalizer):
                 if vt.value_type == ValueType.I32:
                     return None
 
-            # if node.opcode == VirtualDagOps.COPY_TO_REG:
-            #     return self.promote_integer_operand_copy_to_reg(
-            #         node, i, dag, legalized)
-
             if node.opcode == VirtualDagOps.ADD:
                 return None
 
