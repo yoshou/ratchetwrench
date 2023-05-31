@@ -7,7 +7,7 @@ class DomTreeNode:
         self.idx = idx
         self.doms = set([self])
         self.is_changed = True
-        self.parents = []
+        self.parent = None
         self.children = []
 
 
@@ -22,7 +22,7 @@ def get_value_predecessors(value):
     return value.uses
 
 
-class DominatorTreeBuider:
+class DominatorTree:
     def __init__(self):
         self.nodes = []
         self.value_to_node = {}
@@ -112,12 +112,25 @@ class DominatorTreeBuider:
         for node in sorted(self.nodes, key=lambda x: len(x.doms)):
             for dom in list(node.doms):
                 if dom != node:
-                    if len(dom.doms) == 1:
-                        node.parents.append(dom)
-                        node.doms.remove(dom)
+                    if not dom.parent:
+                        dom.parent = node
 
         for node in self.nodes:
-            for parent in node.parents:
-                parent.children.append(node)
+            if node.parent:
+                node.parent.children.append(node)
 
-        return self.roots
+    def dominate(self, value_a, value_b):
+        node_a = self.value_to_node[value_a]
+        node_b = self.value_to_node[value_b]
+
+        return node_b in node_a.doms
+
+
+from codegen.passes import FunctionPass
+
+
+class DominatorTreePass(FunctionPass):
+
+    def process_function(self, func):
+        self.dom_tree = DominatorTree()
+        self.dom_tree.build(func)
