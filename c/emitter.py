@@ -1471,7 +1471,7 @@ def build_ir_expr_func_call(node, block, ctx):
             block, va_list = get_lvalue(node.params[0], block, ctx)
             return block, VAArgInst(block, va_list, PointerType(PrimitiveType("i8"), 0))
 
-        no_inline = True
+        no_inline = False
 
         if not no_inline and node.ident in ctx.defined_funcs:
             callee_func = ctx.defined_funcs[node.ident]
@@ -2800,12 +2800,13 @@ class AArch64ABIInfo(ABIInfo):
 
     def is_homogeneous_aggregate(self, ty):
         def is_homogeneous_aggregate_rec(ty, base, members):
-            
+
             if isinstance(ty, ast.types.CompositeType):
                 for field in ty.fields:
                     field_ty, _, _ = field
 
-                    field_is_ha, base, field_members = is_homogeneous_aggregate_rec(field_ty, base, 0)
+                    field_is_ha, base, field_members = is_homogeneous_aggregate_rec(
+                        field_ty, base, 0)
 
                     if not field_is_ha:
                         return False
