@@ -997,7 +997,7 @@ class X86CallingConv(CallingConv):
         for idx, arg_val in enumerate(ccstate.values):
             if isinstance(arg_val, CCArgReg):
                 reg_val = DagValue(g.add_target_register_node(
-                    arg_val.vt, arg_val.reg), 0)
+                    arg_val.loc_vt, arg_val.reg), 0)
                 copy_val = arg_parts[idx]
 
                 if arg_val.loc_info == CCArgLocInfo.Full:
