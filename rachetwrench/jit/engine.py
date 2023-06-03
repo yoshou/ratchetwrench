@@ -1150,6 +1150,13 @@ class DynamicLinkerCOFF(DynamicLinker):
             addr = value + addend
             bys = struct.pack("<Q", addr)
             self.mem_mgr.copy_to_mem(target, bys)
+        elif reloc.rel_type == IMAGE_REL_AMD64_SECREL:
+            def to_signed(value):
+                return (value & ((1 << 31) - 1)) - (value & (1 << 31))
+
+            addend = to_signed(reloc.addend)
+            bys = struct.pack("<i", addend)
+            self.mem_mgr.copy_to_mem(target, bys)
         else:
             raise ValueError()
 
