@@ -2509,9 +2509,7 @@ class X64MachineOps:
     V_SET0 = def_inst(
         "v_set0",
         outs=[("dst", VR128)],
-        ins=[],
-        patterns=[
-            set_(("dst", VR128), v4f32_(imm_zero_vec))]
+        ins=[]
     )
 
     CALLpcrel32 = def_inst(
