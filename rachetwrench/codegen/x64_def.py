@@ -2571,6 +2571,7 @@ def loadf32_(addr): return f32_(load_(addr))
 
 V_SET0 = def_inst_node_(X64MachineOps.V_SET0)
 VMOVSSrm = def_inst_node_(X64MachineOps.VMOVSSrm)
+MOV8rm = def_inst_node_(X64MachineOps.MOV8rm)
 
 x64_patterns = []
 
@@ -2582,3 +2583,4 @@ def def_pat_x64(pattern, result):
 def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
 def_pat_x64(v4f32_(imm_zero_vec), V_SET0())
 # def_pat(v4f32_(scalar_to_vector_(loadf32_(("src", addr)))), VMOVSSrm(("src", F32Mem)))
+def_pat_x64(i8_(zextloadi1_(("src", addr))), MOV8rm(("src", I8Mem)))
